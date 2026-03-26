@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Build / output
+out/
+*.glb
+*.gltf
+
+# Ghidra project internals (keep .gpr but not the auto-generated folder)
+GhidraHades2.rep/
+
+# Windows
+*.lnk
+Thumbs.db
+Desktop.ini
+
+# Editor
+.vscode/
+*.sublime-workspace
+
+# Claude Code settings (local only)
+.claude/
