@@ -380,9 +380,13 @@ def read_mesh_data(mesh_ptr, bone_name_to_idx, dll, debug=False):
         joints  = None
         weights = None
     else:
-        # Skinned — remap local bone palette indices to global skeleton indices.
+        # Remap local bone palette indices → global skeleton indices.
+        # Unused bone influence slots (raw_bw == 0) may contain arbitrary/sentinel values
+        # that exceed the palette size.  Clamp before the lookup so those slots don't crash;
+        # they are zeroed out afterwards anyway.
         palette_np               = np.array(palette, dtype=np.uint16)
-        joints_global            = palette_np[raw_bj]
+        raw_bj_safe              = np.clip(raw_bj, 0, len(palette) - 1)
+        joints_global            = palette_np[raw_bj_safe]
         joints_global[raw_bw==0] = 0
         w_sum        = raw_bw.sum(axis=1, keepdims=True)
         weights_norm = (raw_bw / np.where(w_sum > 0, w_sum, 1.0)).astype(np.float32)
