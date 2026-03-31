@@ -401,6 +401,17 @@ def get_gr2_meshes(fi) -> list[dict]:
         bb_count = ri(mesh_ptr, _off_bb)
         bb_ptr   = rq(mesh_ptr, _off_bb + 4)
 
+        # Read bone binding names for weight remapping
+        _off_bb_name = _t('granny_bone_binding', 'BoneName')
+        bb_names = []
+        for bi in range(bb_count):
+            entry = bb_ptr + bi * _BB_STRIDE
+            if _valid_ptr(bb_ptr) and _readable(entry, 8):
+                name_ptr = rq(entry, _off_bb_name)
+                bb_names.append(read_cstr(name_ptr) if _valid_ptr(name_ptr) else '')
+            else:
+                bb_names.append('')
+
         result.append({
             'name':             mesh_name,
             'vp':               vp,
@@ -409,6 +420,7 @@ def get_gr2_meshes(fi) -> list[dict]:
             'mesh_ptr':         mesh_ptr,
             'bb_count':         bb_count,
             'bb_ptr':           bb_ptr,
+            'bb_names':         bb_names,
         })
     return result
 
@@ -617,10 +629,88 @@ def _update_bone_obbs(gm: dict) -> None:
         struct.pack_into('<3f', obb_buf, 12, obb_max[0], obb_max[1], obb_max[2])
 
 
+def _remap_bone_indices(glb_m: dict, gr2_bb_names: list[str]) -> tuple:
+    """
+    Build a remapping from GLB joint indices to GR2 bone binding indices
+    using bone names. Returns (remapped_bj_u8, remapped_bw_u8, success).
+
+    GLB stores joint indices into its own skin.joints order (bone_palette).
+    GR2 stores bone indices into the mesh's BoneBindings array (bb_names).
+    These orders differ after a Blender round-trip.
+
+    If the GLB has no skinning data or no bone_palette, returns (None, None, False).
+    """
+    glb_palette = glb_m.get('bone_palette')
+    glb_bj = glb_m.get('bj_u8')
+    glb_bw = glb_m.get('bw_u8')
+
+    if glb_palette is None or glb_bj is None or glb_bw is None:
+        return None, None, False
+
+    if not gr2_bb_names:
+        return None, None, False
+
+    # Build name -> GR2 index mapping
+    # Bone names may have prefixes like "Armature:" from Blender — strip them
+    gr2_name_to_idx = {}
+    for i, name in enumerate(gr2_bb_names):
+        gr2_name_to_idx[name] = i
+        # Also index by the part after the last colon (short name)
+        short = name.split(':')[-1]
+        if short not in gr2_name_to_idx:
+            gr2_name_to_idx[short] = i
+
+    # Build the remap table: glb_joint_idx -> gr2_binding_idx
+    remap = np.zeros(len(glb_palette), dtype=np.uint8)
+    unmapped = []
+    for glb_idx, glb_name in enumerate(glb_palette):
+        # Try exact match first
+        gr2_idx = gr2_name_to_idx.get(glb_name)
+        if gr2_idx is None:
+            # Try short name (after last colon or pipe)
+            short = glb_name.split(':')[-1].split('|')[-1]
+            gr2_idx = gr2_name_to_idx.get(short)
+        if gr2_idx is None:
+            # Try with Blender's colon escape (_x003A_)
+            unescaped = glb_name.replace('_x003A_', ':')
+            gr2_idx = gr2_name_to_idx.get(unescaped)
+            if gr2_idx is None:
+                gr2_idx = gr2_name_to_idx.get(unescaped.split(':')[-1])
+        if gr2_idx is not None:
+            remap[glb_idx] = gr2_idx
+        else:
+            unmapped.append(glb_name)
+            remap[glb_idx] = 0  # fallback to binding 0
+
+    if unmapped:
+        print(f"    WARNING: {len(unmapped)} GLB joints not found in GR2 bone bindings:")
+        for name in unmapped[:5]:
+            print(f"      '{name}' -> fallback to binding 0")
+        if len(unmapped) > 5:
+            print(f"      ... and {len(unmapped) - 5} more")
+
+    # Apply remap to all vertices
+    remapped_bj = np.zeros_like(glb_bj)
+    for j in range(4):
+        col = glb_bj[:, j]
+        # Clamp to valid palette range
+        col_clamped = np.clip(col, 0, len(remap) - 1)
+        remapped_bj[:, j] = remap[col_clamped]
+
+    matched = len(glb_palette) - len(unmapped)
+    print(f"    Bone remap: {matched}/{len(glb_palette)} joints matched")
+    return remapped_bj, glb_bw, True
+
+
 def _apply_patch(glb_m: dict, gm: dict, strict: bool) -> bool:
     """
     Patch one mesh's vertex buffer in DLL-managed memory, then update
     the per-bone bounding boxes so frustum culling works correctly.
+
+    Bone weights: if the GLB has skinning data with a bone palette, the
+    joint indices are remapped from GLB order to GR2 BoneBinding order
+    using bone name matching. This enables weight painting in Blender.
+    If no skinning data or remapping fails, original weights are preserved.
 
     Returns True if the patch was applied, False if skipped.
     """
@@ -638,10 +728,7 @@ def _apply_patch(glb_m: dict, gm: dict, strict: bool) -> bool:
         print(f"  WARNING: {msg} — skipping")
         return False
 
-    # Read the original vertex buffer from GR2 memory once.
-    # Bone indices MUST always come from the GR2, not the GLB.  Blender reorders
-    # the skin joint list on import/re-export, so JOINTS_0 values in the returned
-    # GLB are in Blender's order, not the original palette order.
+    # Read the original vertex buffer from GR2 memory as fallback
     orig_raw = np.frombuffer(
         bytes((ctypes.c_uint8 * (vc_gr2 * 40)).from_address(gm['vp'])),
         dtype=np.uint8,
@@ -652,10 +739,17 @@ def _apply_patch(glb_m: dict, gm: dict, strict: bool) -> bool:
         fallback_nrm = orig_raw[:, 20:32].view(np.float32).reshape(vc_gr2, 3).copy()
         print(f"  [{gm['name']!r}] normals not in GLB — preserving originals from GR2")
 
-    # Always preserve bone weights (+12) and bone indices (+16) from the original.
     glb_m = dict(glb_m)
-    glb_m['bw_u8'] = orig_raw[:, 12:16].copy()
-    glb_m['bj_u8'] = orig_raw[:, 16:20].copy()
+
+    # Try to remap bone weights from GLB using name-based joint matching
+    remapped_bj, remapped_bw, remap_ok = _remap_bone_indices(glb_m, gm.get('bb_names', []))
+    if remap_ok:
+        glb_m['bj_u8'] = remapped_bj
+        glb_m['bw_u8'] = remapped_bw
+    else:
+        # No skinning data in GLB or remap failed — preserve from original
+        glb_m['bw_u8'] = orig_raw[:, 12:16].copy()
+        glb_m['bj_u8'] = orig_raw[:, 16:20].copy()
 
     vbuf = build_vertex_buffer_40(glb_m, fallback_normals=fallback_nrm)
     expected = vc_gr2 * 40
@@ -668,7 +762,8 @@ def _apply_patch(glb_m: dict, gm: dict, strict: bool) -> bool:
     # Recompute per-bone bounding boxes so the game doesn't cull the mesh
     _update_bone_obbs(gm)
 
-    print(f"  Patched {gm['name']!r}: {vc_gr2} verts x 40 bytes (OBB updated)")
+    weights_src = "GLB (remapped)" if remap_ok else "original GR2"
+    print(f"  Patched {gm['name']!r}: {vc_gr2} verts x 40 bytes (OBB updated, weights: {weights_src})")
     return True
 
 

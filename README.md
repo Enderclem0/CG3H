@@ -14,6 +14,8 @@ Extract, edit, and repack 3D models for Hades II (Supergiant Games).
 | **Multi-LOD patching** (all resolution levels) | Working |
 | **GUI** with Export, Import, and Install tabs | Working |
 | **Backup & restore** originals before installing | Working |
+| **Bone weight painting** from Blender | Working |
+| **Blender addon** (File > Import/Export) | Working |
 | Any character model (all 144 pairs in `_Optimized/`) | Working |
 
 ## What Doesn't Work (Yet)
@@ -23,7 +25,6 @@ Extract, edit, and repack 3D models for Hades II (Supergiant Games).
 | **Adding/removing vertices** | Fixed-size vertex buffer; needs DLL mesh allocation |
 | **Adding/removing bones** | Skeleton is read-only from the original GR2 |
 | **Adding/removing meshes** | Mesh count is fixed at load time |
-| **Bone weight painting** | Blender reorders joint lists; needs index remapping |
 | **Textures** | Not stored in GR2 files (separate engine asset pipeline) |
 | **Animations** | Complex Granny curve formats, separate from mesh data |
 | **Triangle/index changes** | Not yet implemented (vertex count constraint applies) |
