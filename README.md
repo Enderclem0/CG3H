@@ -1,4 +1,4 @@
-# Hades II Model Modding Toolkit
+# CG3H — Custom Geometry 3D for Hades II
 
 Extract, edit, and repack 3D models for Hades II (Supergiant Games).
 
