@@ -28,6 +28,14 @@ Extract, edit, and repack 3D models for Hades II (Supergiant Games).
 | **Animations** | Complex Granny curve formats, separate from mesh data |
 | **Triangle/index changes** | Not yet implemented (vertex count constraint applies) |
 
+## Known Issues
+
+- **Mesh clipping/disappearing at camera edges**: The game uses a bounding box (or
+  hardcoded cutoff) for frustum culling. If you move vertices significantly beyond the
+  original mesh bounds, parts of the model may pop in/out or get culled when near the
+  edge of the screen. The bounding box stored in the GR2 is not yet updated after
+  patching. Keeping edits within the original silhouette avoids this.
+
 ## Requirements
 
 ```

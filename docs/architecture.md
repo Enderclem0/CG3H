@@ -17,7 +17,7 @@ symbols (`GrannyFileInfoType`, `GrannyMeshType`, etc.). No hardcoded offsets exc
 | `gpk_pack.py` — GPK pack/unpack | Done |
 | `converter_gui.py` — GUI with Export/Import/Install | Done |
 | End-to-end DLL verification | Done |
-| In-game testing | Next |
+| In-game testing | Done (bounding box culling issue — see README) |
 
 ## Key Design Decisions
 
