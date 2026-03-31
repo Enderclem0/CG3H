@@ -1,23 +1,32 @@
-# GhidraHades2 — Hades II Modding Toolkit
+# Hades II Model Modding Toolkit
 
-Reverse-engineering workspace and asset pipeline for Hades II (Supergiant Games).
-Extracts 3D models from the game's proprietary `.gpk` format and exports them as standard glTF 2.0 (`.glb`).
+Extract, edit, and repack 3D models for Hades II (Supergiant Games).
 
-## Repository Layout
+## What Works
 
-```
-tools/
-  gr2_to_gltf.py      CLI exporter: .gpk + .sdb → .glb
-  granny_types.py     Dynamic Granny struct resolver (required by gr2_to_gltf.py)
-  converter_gui.py    GUI wrapper for the exporter
-  Start_gui.bat       Windows launcher for the GUI
-docs/
-  file_formats.md     Binary format reference — GPK, SDB, GR2, vertex layout
-Hades2_Rendering_Pipeline.md  Engine architecture — 40-byte GPU stride, index normalisation
-DLL_FIRST_PLAN.md    Current implementation status and work order
-MODDING_PLAN.md      Full research plan with risks, Ghidra sessions, future stages
-GhidraHades2.gpr     Ghidra project (Hades2.exe disassembly)
-```
+| Feature | Status |
+|---|---|
+| **Export** any character to `.glb` (Blender-ready) | Working |
+| **Import** edited `.glb` back to `.gpk` | Working |
+| **Vertex position edits** (reshape mesh) | Working |
+| **UV edits** (texture coordinate changes) | Working |
+| **Normal edits** (if exported from Blender) | Working |
+| **Multi-LOD patching** (all resolution levels) | Working |
+| **GUI** with Export, Import, and Install tabs | Working |
+| **Backup & restore** originals before installing | Working |
+| Any character model (all 144 pairs in `_Optimized/`) | Working |
+
+## What Doesn't Work (Yet)
+
+| Feature | Why |
+|---|---|
+| **Adding/removing vertices** | Fixed-size vertex buffer; needs DLL mesh allocation |
+| **Adding/removing bones** | Skeleton is read-only from the original GR2 |
+| **Adding/removing meshes** | Mesh count is fixed at load time |
+| **Bone weight painting** | Blender reorders joint lists; needs index remapping |
+| **Textures** | Not stored in GR2 files (separate engine asset pipeline) |
+| **Animations** | Complex Granny curve formats, separate from mesh data |
+| **Triangle/index changes** | Not yet implemented (vertex count constraint applies) |
 
 ## Requirements
 
@@ -25,69 +34,142 @@ GhidraHades2.gpr     Ghidra project (Hades2.exe disassembly)
 pip install numpy pygltflib lz4
 ```
 
-Must be run from (or given access to) the game's `Ship/` directory, which contains `granny2_x64.dll`.
-
-```
-C:/Program Files (x86)/Steam/steamapps/common/Hades II/Ship/granny2_x64.dll
-```
+The game's `granny2_x64.dll` is required (auto-detected from Steam path).
 
 ## Quick Start
 
-### Command Line
+### GUI (recommended)
 
 ```bash
-cd "C:/Program Files (x86)/Steam/steamapps/common/Hades II/Ship"
-python C:/Users/ender/GhidraHades2/tools/gr2_to_gltf.py Melinoe
-# → Melinoe.glb
-```
-
-Options:
-```
-  name              Character name (e.g. Melinoe, Zagreus, ThiefMineLayer)
-  --gpk-dir DIR     Path to _Optimized/ folder (default: ../Content/GR2/_Optimized)
-  --dll PATH        Path to granny2_x64.dll (default: ./granny2_x64.dll)
-  --all-lods        Include lower-resolution LOD duplicates
-  --mesh-index N    Export only mesh index N
-  --debug           Print per-mesh vertex layout and bone binding detail
-  -o PATH           Output .glb path (default: <name>.glb)
-```
-
-### GUI
-
-```bash
-python C:/Users/ender/GhidraHades2/tools/converter_gui.py
+python tools/converter_gui.py
 # or double-click tools/Start_gui.bat
 ```
 
-Detects the Steam installation automatically. Select a model from the list, choose an output folder, click Export.
+Three tabs:
+- **Export** — select character(s), export `.glb` files for Blender
+- **Import** — select character + your edited `.glb`, produce a `_mod.gpk`
+- **Install** — backup originals and copy your mod into the game directory
 
-## How It Works
+### CLI
 
-See [`Hades2_Rendering_Pipeline.md`](Hades2_Rendering_Pipeline.md) for the full engine architecture.
+```bash
+# Export
+cd "C:/Program Files (x86)/Steam/steamapps/common/Hades II/Ship"
+python C:/path/to/tools/gr2_to_gltf.py Melinoe -o Melinoe.glb
 
-Short version:
-1. `.gpk` entries are LZ4-decompressed to get a string-stripped `.gr2`
-2. Paired `.sdb` provides bone/mesh/material names via `GrannyRemapFileStrings`
-3. Granny's type-definition symbols are walked at runtime to find struct offsets (no hardcoding)
-4. **40-byte physical GPU stride** is applied — Granny reports 32 bytes for rigid meshes but the engine writes 8 bytes of padding, so custom tools must override the stride
-5. `GrannyCopyMeshIndices(mesh, 2, buf)` normalises 16-bit or 32-bit index buffers to 16-bit
-6. Geometry and skeleton are packed into a standard glTF 2.0 binary (`.glb`)
+# Import (after editing in Blender)
+python C:/path/to/tools/gltf_to_gr2.py Melinoe_edited.glb \
+    --gpk ../Content/GR2/_Optimized/Melinoe.gpk \
+    --sdb ../Content/GR2/_Optimized/Melinoe.sdb \
+    --output-gpk ~/Documents/Hades2Mods/Melinoe_mod.gpk
+```
+
+## Blender Workflow
+
+### Importing the `.glb`
+
+1. File > Import > glTF 2.0 (.glb)
+2. Select the exported `.glb` file
+3. The model imports with skeleton and all meshes
+
+### Editing Rules
+
+**You MUST keep the same vertex count.** The pipeline patches vertex data
+in-place — adding or removing vertices will fail with a strict error.
+
+- **Edit in Edit Mode only** — do NOT apply transforms, modifiers, or
+  operations in Object Mode that change vertex count
+- **Do NOT** use Subdivide, Decimate, Merge by Distance, dissolve edges,
+  or any tool that changes the number of vertices
+- **Safe operations**: Move vertices (G), scale (S), rotate (R), sculpt
+  (proportional editing), edit UVs, smooth vertices
+- **Bone weights** are always preserved from the original (Blender reorders
+  joints on re-export, so the tool ignores GLB weights)
+
+### Exporting from Blender
+
+1. Select **only the meshes and armature** (not cameras, lights, empties)
+2. File > Export > glTF 2.0 (.glb)
+3. Export settings:
+   - Format: **glTF Binary (.glb)**
+   - Include: **Selected Objects** (check this!)
+   - Mesh > **Normals: OFF** (uncheck "Normals")
+     - Exporting normals causes Blender to split vertices at normal seams,
+       which changes the vertex count and breaks the import
+   - Mesh > UVs: ON
+   - Mesh > Vertex Colors: OFF
+   - Armature: ON (if you selected it)
+
+### Summary of Export Settings
+
+```
+Format:             glTF Binary (.glb)
+Include:            Selected Objects only
+Mesh > Normals:     OFF  <-- critical, prevents vertex splitting
+Mesh > UVs:         ON
+Mesh > Apply Mods:  OFF
+Armature:           ON
+```
+
+## Repository Layout
+
+```
+tools/
+  converter_gui.py     GUI (Export + Import + Install)
+  gr2_to_gltf.py       CLI exporter: .gpk + .sdb -> .glb
+  gltf_to_gr2.py       CLI importer: .glb + .gpk + .sdb -> .gpk
+  gpk_pack.py           GPK archive pack/unpack (pure Python)
+  granny_types.py       Dynamic Granny struct offset resolver
+  Start_gui.bat         Windows launcher
+  debug/                Diagnostic probes (development/debugging only)
+docs/
+  file_formats.md       Binary format reference (GPK, SDB, GR2)
+```
+
+## Technical Details
+
+### How Export Works
+
+1. LZ4-decompress `.gpk` entry to get raw `.gr2` bytes
+2. Load `.sdb` string database, remap string indices via `GrannyRemapFileStrings`
+3. Walk Granny type definitions at runtime to discover struct offsets
+4. Apply 40-byte physical GPU stride (engine forces this for all meshes)
+5. Normalize indices via `GrannyCopyMeshIndices` (handles 16-bit and 32-bit)
+6. Pack geometry + skeleton into glTF 2.0 binary
+
+### How Import Works
+
+1. Parse the edited `.glb` (positions, normals, UVs)
+2. Load the original `.gpk` + `.sdb` via the DLL
+3. Match GLB meshes to GR2 meshes by name (fuzzy matching with LOD awareness)
+4. `ctypes.memmove` new 40-byte vertex buffers into DLL memory
+5. Serialize via Granny golden path API (inline strings, valid section descriptors)
+6. LZ4-compress into output `.gpk`
+
+### Why "Golden Path"?
+
+The Granny DLL has two serialization modes:
+- **param3=0 (golden path)**: embeds strings inline, produces valid GR2 files
+- **param3=1 (string stripping)**: writes SDB indices but produces broken section
+  descriptors that crash `GrannyRemapFileStrings`
+
+We use the golden path. `GrannyRemapFileStrings` returns `False` (no-op since
+strings are already embedded), but all data is valid.
 
 ## Game Asset Layout
 
 ```
-<game>/
+<Hades II>/
   Ship/
-    granny2_x64.dll               Granny3D runtime (975 exported functions)
+    granny2_x64.dll           Granny 3D runtime (975 exported functions)
   Content/GR2/_Optimized/
-    Melinoe.gpk  Melinoe.sdb      Character mesh + string database
-    Zagreus.gpk  Zagreus.sdb
-    ... (~144 model pairs total)
+    Melinoe.gpk + .sdb        Character mesh + string database
+    Zagreus.gpk + .sdb        (~144 model pairs total)
+    _backups/                  Created by Install tab (originals stored here)
 ```
 
 ## Documentation
 
-- [`docs/file_formats.md`](docs/file_formats.md) — GPK / SDB / GR2 binary layouts and confirmed struct offsets
-- [`Hades2_Rendering_Pipeline.md`](Hades2_Rendering_Pipeline.md) — Engine pipeline: decompression → 40-byte stride → GPU upload
-- [`DLL_FIRST_PLAN.md`](DLL_FIRST_PLAN.md) — Current work status and next steps
-- [`MODDING_PLAN.md`](MODDING_PLAN.md) — Full research plan including future import/repack stages
+- [`docs/file_formats.md`](docs/file_formats.md) — GPK / SDB / GR2 binary layouts
+- [`Hades2_Rendering_Pipeline.md`](Hades2_Rendering_Pipeline.md) — Engine pipeline details
+- [`DLL_FIRST_PLAN.md`](DLL_FIRST_PLAN.md) — Implementation status and architecture decisions

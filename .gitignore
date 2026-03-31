@@ -7,9 +7,13 @@ __pycache__/
 out/
 *.glb
 *.gltf
+*.gpk
+*.gr2
 
-# Ghidra project internals (keep .gpr but not the auto-generated folder)
+# Ghidra project internals
 GhidraHades2.rep/
+Hades2.gpr
+Hades2.rep/
 
 # Windows
 *.lnk
