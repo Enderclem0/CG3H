@@ -373,8 +373,10 @@ def get_gr2_meshes(fi) -> list[dict]:
 
     _off_name = _t('granny_mesh', 'Name')
     _off_vd   = _t('granny_mesh', 'PrimaryVertexData')
+    _off_topo = _t('granny_mesh', 'PrimaryTopology')
     _off_bb   = _t('granny_mesh', 'BoneBindings')
     _verts    = _t('granny_vertex_data', 'Vertices')
+    _idx16    = _t('granny_tri_topology', 'Indices16')
 
     result = []
     for mi in range(mesh_count):
@@ -397,6 +399,14 @@ def get_gr2_meshes(fi) -> list[dict]:
         if not _valid_ptr(vp) or vc <= 0:
             continue
 
+        # PrimaryTopology -> Indices16 {count[4], ptr[8]}
+        topo_ptr = rq(mesh_ptr, _off_topo)
+        idx_count = 0
+        idx_ptr   = 0
+        if _valid_ptr(topo_ptr):
+            idx_count = ri(topo_ptr, _idx16)       # number of uint16 index values
+            idx_ptr   = rq(topo_ptr, _idx16 + 4)   # pointer to index array
+
         # BoneBindings is ReferenceToArray: {count[4], ptr[8]}
         bb_count = ri(mesh_ptr, _off_bb)
         bb_ptr   = rq(mesh_ptr, _off_bb + 4)
@@ -418,6 +428,8 @@ def get_gr2_meshes(fi) -> list[dict]:
             'vc':               vc,
             'vertex_type_ptr':  vertex_type_ptr,
             'mesh_ptr':         mesh_ptr,
+            'idx_count':        idx_count,
+            'idx_ptr':          idx_ptr,
             'bb_count':         bb_count,
             'bb_ptr':           bb_ptr,
             'bb_names':         bb_names,
@@ -759,11 +771,26 @@ def _apply_patch(glb_m: dict, gm: dict, strict: bool) -> bool:
 
     ctypes.memmove(gm['vp'], vbuf, expected)
 
+    # Patch index buffer if GLB provides indices and the count matches
+    idx_patched = False
+    glb_indices = glb_m.get('indices')
+    gr2_idx_count = gm.get('idx_count', 0)
+    gr2_idx_ptr   = gm.get('idx_ptr', 0)
+
+    if glb_indices is not None and len(glb_indices) > 0 and gr2_idx_count > 0 and _valid_ptr(gr2_idx_ptr):
+        if len(glb_indices) == gr2_idx_count:
+            idx_bytes = glb_indices.astype(np.uint16).tobytes()
+            ctypes.memmove(gr2_idx_ptr, idx_bytes, len(idx_bytes))
+            idx_patched = True
+        else:
+            print(f"    Index count mismatch (GLB={len(glb_indices)}, GR2={gr2_idx_count}) — keeping original indices")
+
     # Recompute per-bone bounding boxes so the game doesn't cull the mesh
     _update_bone_obbs(gm)
 
     weights_src = "GLB (remapped)" if remap_ok else "original GR2"
-    print(f"  Patched {gm['name']!r}: {vc_gr2} verts x 40 bytes (OBB updated, weights: {weights_src})")
+    idx_msg = ", indices patched" if idx_patched else ""
+    print(f"  Patched {gm['name']!r}: {vc_gr2} verts x 40 bytes (OBB updated, weights: {weights_src}{idx_msg})")
     return True
 
 
