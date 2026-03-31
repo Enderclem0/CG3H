@@ -110,11 +110,18 @@ def load_gr2(dll, gr2_bytes, sdb_bytes):
     str_db = dll.GrannyGetStringDatabase(sdb_file)
     if not str_db:
         raise RuntimeError("Failed to get string database")
+    platform_tag = struct.unpack_from('<I', gr2_bytes, 0x14)[0]
+    hdr_size     = struct.unpack_from('<I', gr2_bytes, 0x10)[0]
+    print(f"  [gr2 header] magic={gr2_bytes[:4].hex()}  hdr_size={hdr_size}  platform_tag=0x{platform_tag:08X}")
     gr2_file = dll.GrannyReadEntireFileFromMemory(len(gr2_bytes), gr2_buf)
     if not gr2_file:
         raise RuntimeError("Failed to load GR2")
     if not dll.GrannyRemapFileStrings(gr2_file, str_db):
-        raise RuntimeError("GrannyRemapFileStrings failed")
+        # A re-serialized GR2 (Golden Path output) has strings embedded inline;
+        # GrannyRemapFileStrings returns false because there are no CRC stubs to
+        # resolve.  This is not an error — the fi is still valid and readable.
+        print("  WARNING: GrannyRemapFileStrings returned false "
+              "(file may have embedded strings — continuing)")
     fi = dll.GrannyGetFileInfo(gr2_file)
     if not fi:
         raise RuntimeError("GrannyGetFileInfo returned null")

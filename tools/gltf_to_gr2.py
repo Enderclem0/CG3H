@@ -17,19 +17,24 @@ Requires:
     pip install numpy pygltflib lz4
     granny2_x64.dll in cwd (run from Ship/)
 
-Write-API (Golden Path — confirmed working, probe_golden_path.py, 1,364,492-byte output):
-    GrannyGetFileInfoType()                         -> Blueprint ptr (0 args)
-    GrannyBeginFile(SectionCount=2, Flags=0, Magic) -> builder
-    GrannyBeginFileDataTreeWriting(Blueprint, fi, 0, 0) -> tree_writer
-    GrannyWriteDataTreeToFileBuilder(tree_writer, builder) -> bool
-    GrannyEndFileDataTreeWriting(tree_writer)        # flush string tables + free
-    GrannyCreatePlatformFileWriter(path, 1)          -> pw
-    GrannyEndFileToWriter(builder, pw)               -> bool
+Write-API (Golden Path — inline strings, valid section descriptors):
+    GrannyGetFileInfoType()                                   -> Blueprint ptr
+    GrannyBeginFile(SectionCount, 0, Magic)                   -> builder
+    GrannyBeginFileDataTreeWriting(Blueprint, fi, 0, 0)       -> tree_writer  # 0 = inline
+    GrannyWriteDataTreeToFileBuilder(tree_writer, builder)    -> bool
+    GrannyEndFileDataTreeWriting(tree_writer)                  # flush + free
+    GrannyCreatePlatformFileWriter(path, 1)                   -> pw
+    GrannyEndFileToWriter(builder, pw)                        -> bool
+    vtable[0](pw)                                             # Cleanup
+
+    param3=0 embeds all strings inline.  GrannyRemapFileStrings returns False
+    (no-op — strings already live), but GrannyGetFileInfo returns valid data.
+    The stripped path (param3=1) is NOT used because it produces broken section
+    descriptors that crash GrannyRemapFileStrings.
 """
 
 import argparse
 import ctypes
-import ctypes.wintypes
 import os
 import struct
 import sys
@@ -64,6 +69,11 @@ _TYPES: dict = {}
 _BONE_STRIDE: int = 0
 _BB_STRIDE: int = 0
 _TRANSFORM_OFFS: dict = {}
+
+# ctypes function type for the string-stripping callback registered on tree_writer.
+# The DLL calls this once per unique string encountered during tree serialization.
+# Return value: uint32 SDB array index for that string.
+STRING_CB = ctypes.CFUNCTYPE(ctypes.c_uint32, ctypes.c_void_p, ctypes.c_char_p)
 
 
 # ── glTF helpers ──────────────────────────────────────────────────────────────
@@ -265,6 +275,17 @@ def setup_granny(dll_path: str):
     dll.GrannyCreatePlatformFileWriter.argtypes = [ctypes.c_char_p, ctypes.c_int]
     dll.GrannyEndFileToWriter.restype  = ctypes.c_bool
     dll.GrannyEndFileToWriter.argtypes = [ctypes.c_uint64, ctypes.c_uint64]
+    # Stamps the paired SDB CRC into the file header so the game knows which .sdb
+    # to load for GrannyRemapFileStrings.  Called after GrannyBeginFile.
+    dll.GrannySetFileStringDatabaseCRC.restype  = None
+    dll.GrannySetFileStringDatabaseCRC.argtypes = [ctypes.c_uint64, ctypes.c_uint32]
+    # Registers a Python callback on the tree_writer.  Called once per unique string
+    # encountered during GrannyWriteDataTreeToFileBuilder.  The callback returns the
+    # SDB array index for that string; the DLL writes it as the string field value.
+    # Signature: callback(ctx: void*, string: char*) -> uint32
+    dll.GrannySetFileWriterStringCallback.restype  = None
+    dll.GrannySetFileWriterStringCallback.argtypes = [ctypes.c_uint64, ctypes.c_void_p,
+                                                       ctypes.c_void_p]
 
     setup_dll_types(dll)
 
@@ -280,7 +301,16 @@ def setup_granny(dll_path: str):
 def load_gr2(dll, gr2_bytes: bytes, sdb_bytes: bytes):
     """
     Load a stripped GR2 + SDB pair via the DLL.
-    Returns (gr2_file, sdb_file, fi, keep_alive_tuple).
+
+    Always calls GrannyRemapFileStrings so string fields become live RAM pointers
+    — required for the Python String Callback path (the DLL walker passes each
+    live pointer to the callback as a char*).
+
+    Also extracts sdb_dict: {string_value: sdb_index} by reading the str_db
+    object directly from memory.  The callback uses this to reverse-map each
+    string back to its SDB array index during serialization.
+
+    Returns (gr2_file, sdb_file, fi, sdb_dict, keep_alive_tuple).
     keep_alive_tuple must be retained by the caller until GrannyFreeFile() is called.
     """
     sdb_buf = ctypes.create_string_buffer(sdb_bytes)
@@ -291,6 +321,27 @@ def load_gr2(dll, gr2_bytes: bytes, sdb_bytes: bytes):
     str_db = dll.GrannyGetStringDatabase(sdb_file)
     if not str_db:
         raise RuntimeError("GrannyGetStringDatabase failed")
+
+    # Build reverse-map {string: index} directly from the str_db object.
+    # str_db layout (probed from live DLL memory):
+    #   +0x00  count       uint32   — number of strings in the database
+    #   +0x04  array_ptr   uint64   — pointer to array of char* pointers
+    #          (packed: uint64 immediately follows uint32, misaligned)
+    sdb_count     = ctypes.c_uint32.from_address(str_db).value
+    sdb_array_ptr = ctypes.c_uint64.from_address(str_db + 4).value
+    sdb_dict: dict[str, int] = {}
+    for i in range(sdb_count):
+        str_ptr = ctypes.c_uint64.from_address(sdb_array_ptr + i * 8).value
+        if str_ptr:
+            s = ctypes.string_at(str_ptr).decode('utf-8', 'replace')
+            sdb_dict[s] = i
+
+    # Read the real SDB CRC from str_db at +0x0C.
+    # Decompilation of GrannyRemapFileStrings: iVar1 == *(int *)(param_2 + 0xc)
+    # where param_2 is str_db (GrannyGetStringDatabase result), NOT sdb_file.
+    # str_db layout: [count:u32 +0x00][array_ptr:u64 +0x04][crc:u32 +0x0C]
+    sdb_crc = struct.unpack_from('<I', (ctypes.c_uint8 * 4).from_address(str_db + 0x0c), 0)[0]
+
     gr2_file = dll.GrannyReadEntireFileFromMemory(len(gr2_bytes), gr2_buf)
     if not gr2_file:
         raise RuntimeError("GrannyReadEntireFileFromMemory failed for GR2")
@@ -299,7 +350,8 @@ def load_gr2(dll, gr2_bytes: bytes, sdb_bytes: bytes):
     fi = dll.GrannyGetFileInfo(gr2_file)
     if not fi:
         raise RuntimeError("GrannyGetFileInfo returned null")
-    return gr2_file, sdb_file, fi, (sdb_buf, gr2_buf)
+    return gr2_file, sdb_file, fi, sdb_dict, sdb_crc, (sdb_buf, gr2_buf)
+
 
 
 # ── GR2 mesh walk ─────────────────────────────────────────────────────────────
@@ -353,36 +405,40 @@ def get_gr2_meshes(fi) -> list[dict]:
 
 # ── GR2 serializer ────────────────────────────────────────────────────────────
 
-def build_gr2_bytes(dll, fi: int, gr2_raw: bytes) -> bytes:
+def build_gr2_bytes(dll, fi: int, gr2_raw: bytes, sdb_dict: dict[str, int],
+                    sdb_crc: int) -> bytes:
     """
-    Serialize a loaded granny_file_info back to raw .gr2 bytes.
+    Serialize a loaded granny_file_info to raw .gr2 bytes using the golden path
+    (param3=0, inline strings).
 
-    Uses the confirmed Golden Path (probe_golden_path.py, 1,364,492-byte output):
-      GrannyGetFileInfoType → GrannyBeginFile → GrannyBeginFileDataTreeWriting
-      → GrannyWriteDataTreeToFileBuilder → GrannyEndFileDataTreeWriting (flush)
-      → GrannyCreatePlatformFileWriter → GrannyEndFileToWriter
+    The stripped path (param3=1) produces broken section descriptors that crash
+    GrannyRemapFileStrings.  The golden path writes inline strings and produces
+    valid section descriptors.  GrannyRemapFileStrings returns False (no-op since
+    strings are already embedded), and GrannyGetFileInfo returns valid data.
 
-    gr2_raw must be the original raw GR2 bytes; the first 32 bytes are passed
-    as the Granny magic header to GrannyBeginFile.
+    Pipeline:
+      GrannyBeginFile
+      →  GrannyBeginFileDataTreeWriting(Blueprint, fi, 0, 0)   # 0 = inline strings
+      →  GrannyWriteDataTreeToFileBuilder
+      →  GrannyEndFileDataTreeWriting
+      →  GrannyCreatePlatformFileWriter  →  GrannyEndFileToWriter  →  vtable[0]
     """
     root_type_def = dll.GrannyGetFileInfoType()
     if not root_type_def:
         raise RuntimeError("GrannyGetFileInfoType returned null")
 
-    # EXTRACT THE TRUE PLATFORM FORMAT FROM THE ORIGINAL FILE (Offset 0x14)
-    original_format = struct.unpack_from('<I', gr2_raw, 20)[0]
+    section_count = struct.unpack_from('<I', gr2_raw, 0x20)[0]
 
     magic_buf = ctypes.create_string_buffer(gr2_raw[:32], 32)
-    
-    # PASS THE ORIGINAL FORMAT TO THE BUILDER
     builder = dll.GrannyBeginFile(
-        ctypes.c_int(2), 
-        ctypes.c_int(original_format), 
-        ctypes.cast(magic_buf, ctypes.c_void_p)
+        ctypes.c_int(section_count),
+        ctypes.c_int(0),
+        ctypes.cast(magic_buf, ctypes.c_void_p),
     )
     if not builder:
         raise RuntimeError("GrannyBeginFile returned null")
 
+    # Golden path: param3=0 = inline strings, no string callback needed.
     tree_writer = dll.GrannyBeginFileDataTreeWriting(
         ctypes.c_uint64(root_type_def), ctypes.c_uint64(fi),
         ctypes.c_int(0), ctypes.c_uint64(0))
@@ -394,7 +450,7 @@ def build_gr2_bytes(dll, fi: int, gr2_raw: bytes) -> bytes:
     if not ok:
         raise RuntimeError("GrannyWriteDataTreeToFileBuilder returned False")
 
-    dll.GrannyEndFileDataTreeWriting(ctypes.c_uint64(tree_writer))  # flush + free
+    dll.GrannyEndFileDataTreeWriting(ctypes.c_uint64(tree_writer))
 
     tmp = tempfile.mktemp(suffix='.gr2')
     pw = dll.GrannyCreatePlatformFileWriter(tmp.encode(), ctypes.c_int(1))
@@ -405,13 +461,11 @@ def build_gr2_bytes(dll, fi: int, gr2_raw: bytes) -> bytes:
     if not ok2:
         raise RuntimeError("GrannyEndFileToWriter returned False")
 
-    # Close the OS file handle so the file is fully flushed before we read it.
-    # Ghidra decompilation: puVar1[6] = hObject — 8-byte store at offset 0x30.
-    # puVar1 is undefined8*, so index 6 = 6*8 = 0x30; next field is at puVar1[7] = 0x38.
-    # HANDLE is a pointer-sized type (void*) on x64 — must read all 8 bytes.
-    h = struct.unpack_from('<Q', (ctypes.c_uint8 * 8).from_address(pw + 0x30), 0)[0]
-    if h and h != 0xFFFFFFFFFFFFFFFF:
-        ctypes.windll.kernel32.CloseHandle(ctypes.wintypes.HANDLE(h))
+    # Finalize via vtable[0] = FUN_18000f6a0 (Ghidra-confirmed flat dispatch table):
+    #   flush 1KB internal write buffer → WriteFile → CloseHandle → free struct.
+    cleanup_ptr = struct.unpack_from('<Q', (ctypes.c_uint8 * 8).from_address(pw), 0)[0]
+    cleanup_fn  = ctypes.CFUNCTYPE(None, ctypes.c_uint64)(cleanup_ptr)
+    cleanup_fn(ctypes.c_uint64(pw))
 
     result = open(tmp, 'rb').read()
     os.unlink(tmp)
@@ -488,12 +542,11 @@ def _unique_gr2_meshes(gr2_mesh_list: list) -> list:
     return out
 
 
-def _apply_patch(glb_m: dict, gm: dict, strict: bool) -> tuple:
+def _apply_patch(glb_m: dict, gm: dict, strict: bool) -> bool:
     """
-    Patch one mesh.
+    Patch one mesh's vertex buffer in DLL-managed memory.
 
-    Returns (patched: bool, binary_patch: dict | None).
-    binary_patch carries enough info for Strategy 4 (raw GR2 binary search-replace).
+    Returns True if the patch was applied, False if skipped.
     """
     vc_glb = len(glb_m['positions'])
     vc_gr2 = gm['vc']
@@ -504,7 +557,7 @@ def _apply_patch(glb_m: dict, gm: dict, strict: bool) -> tuple:
         if strict:
             raise ValueError(msg)
         print(f"  WARNING: {msg} — skipping")
-        return False, None
+        return False
 
     # Read the original vertex buffer from GR2 memory once.
     # We use it as a fallback for components that should never change through a
@@ -533,30 +586,18 @@ def _apply_patch(glb_m: dict, gm: dict, strict: bool) -> tuple:
     expected = vc_gr2 * 40
     if len(vbuf) != expected:
         print(f"  WARNING: {glb_m['name']!r}: buffer size mismatch — skipping")
-        return False, None
-
-    # Capture original bytes BEFORE patching so Strategy 4 can find them in the GR2 binary.
-    # Vertex data contains no DLL pointers, so these bytes are identical to the raw file.
-    orig_bytes = bytes((ctypes.c_uint8 * expected).from_address(gm['vp']))
+        return False
 
     ctypes.memmove(gm['vp'], vbuf, expected)
     print(f"  Patched {gm['name']!r}: {vc_gr2} verts x 40 bytes")
-
-    binary_patch = {
-        'name':        gm['name'],
-        'orig_prefix': orig_bytes[:min(256, expected)],  # search key
-        'orig_full':   orig_bytes,
-        'new_vbuf':    vbuf,
-        'n_verts':     vc_gr2,
-    }
-    return True, binary_patch
+    return True
 
 
 def patch_vertex_data(
     dll, fi: int, glb_meshes: list[dict],
     strict: bool = False,
     positional: bool = False,
-) -> tuple:
+) -> int:
     """
     Match each GLB mesh to the corresponding GR2 mesh, then patch the vertex
     buffer in DLL-managed memory using ctypes.memmove.
@@ -572,12 +613,10 @@ def patch_vertex_data(
     multi-map and patch every LOD whose vertex count matches the GLB mesh.
     LODs with a different count are silently skipped (expected behaviour).
 
-    Returns (n_patched: int, binary_patches: list[dict]) where binary_patches
-    is used by Strategy 4 (raw GR2 binary search-replace serialization).
+    Returns n_patched (int).
     """
     gr2_mesh_list = get_gr2_meshes(fi)
     patched = 0
-    binary_patches = []
 
     if positional:
         unique_gr2 = _unique_gr2_meshes(gr2_mesh_list)
@@ -589,12 +628,9 @@ def patch_vertex_data(
             norm_key = _normalize_mesh_name(gm['name'])
             for candidate in gr2_mesh_list:
                 if _normalize_mesh_name(candidate['name']) == norm_key:
-                    ok, bp = _apply_patch(glb_m, candidate, strict)
-                    if ok:
+                    if _apply_patch(glb_m, candidate, strict):
                         patched += 1
-                        if bp:
-                            binary_patches.append(bp)
-        return patched, binary_patches
+        return patched
 
     # Build multi-map: normalised name -> all GR2 meshes (all LODs)
     gr2_by_name: dict[str, list] = {}
@@ -627,12 +663,9 @@ def patch_vertex_data(
         hit = False
         for gm in gr2_by_name[matched_key]:
             if gm['vc'] == vc_glb:
-                ok, bp = _apply_patch(glb_m, gm, strict)
-                if ok:
+                if _apply_patch(glb_m, gm, strict):
                     patched += 1
                     hit = True
-                    if bp:
-                        binary_patches.append(bp)
         if not hit:
             counts = [gm['vc'] for gm in gr2_by_name[matched_key]]
             msg = (f"Mesh {glb_m['name']!r}: no GR2 LOD has {vc_glb} verts "
@@ -642,7 +675,8 @@ def patch_vertex_data(
                 raise ValueError(msg)
             print(f"  WARNING: {msg} — skipping")
 
-    return patched, binary_patches
+    return patched
+
 
 
 # ── Main pipeline ─────────────────────────────────────────────────────────────
@@ -687,17 +721,22 @@ def convert(
     print(f"[4/6] Loading Granny DLL + type map")
     dll = setup_granny(dll_path)
 
-    gr2_file, sdb_file, fi, _keep = load_gr2(dll, gr2_bytes, sdb_bytes)
+    # Single load with remap=True: GrannyRemapFileStrings converts SDB indices to
+    # live RAM pointers.  The DLL walker needs valid string pointers to pass to
+    # the Python string callback during serialization.  sdb_dict is built from
+    # the str_db object in memory for callback lookups.
+    gr2_file, sdb_file, fi, sdb_dict, sdb_crc, _keep = load_gr2(dll, gr2_bytes, sdb_bytes)
+    print(f"  SDB: {len(sdb_dict)} strings indexed  CRC=0x{sdb_crc:08X}")
 
     print(f"[5/6] Patching vertex data")
-    n_patched, _ = patch_vertex_data(
+    n_patched = patch_vertex_data(
         dll, fi, glb_meshes, strict=strict, positional=positional
     )
     if n_patched == 0:
         raise RuntimeError("No meshes were patched — nothing to write")
 
     print(f"[6/6] Serializing modified GR2")
-    new_gr2_bytes = build_gr2_bytes(dll, fi, gr2_bytes)
+    new_gr2_bytes = build_gr2_bytes(dll, fi, gr2_bytes, sdb_dict, sdb_crc)
 
     dll.GrannyFreeFile(gr2_file)
     dll.GrannyFreeFile(sdb_file)
