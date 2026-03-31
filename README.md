@@ -171,5 +171,5 @@ strings are already embedded), but all data is valid.
 ## Documentation
 
 - [`docs/file_formats.md`](docs/file_formats.md) — GPK / SDB / GR2 binary layouts
-- [`Hades2_Rendering_Pipeline.md`](Hades2_Rendering_Pipeline.md) — Engine pipeline details
-- [`DLL_FIRST_PLAN.md`](DLL_FIRST_PLAN.md) — Implementation status and architecture decisions
+- [`docs/rendering_pipeline.md`](docs/rendering_pipeline.md) — Engine pipeline (40-byte stride, index normalization)
+- [`docs/architecture.md`](docs/architecture.md) — Implementation decisions and write API details
