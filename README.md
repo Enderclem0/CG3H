@@ -57,6 +57,19 @@ Three tabs:
 - **Import** — select character + your edited `.glb`, produce a `_mod.gpk`
 - **Install** — backup originals and copy your mod into the game directory
 
+### Blender Addon
+
+1. In Blender: Edit > Preferences > Add-ons > Install
+2. Navigate to `blender_addon/cg3h/` and select `__init__.py`
+3. Enable "CG3H — Hades II Model Tools"
+4. Set the game path and tools path in addon preferences
+
+Then use:
+- **File > Import > Hades II Model (.gpk)** — browse to a `.gpk` in `Content/GR2/_Optimized/`
+- **File > Export > Hades II Model (.gpk)** — select meshes + armature, pick the original character, save
+
+The export automatically uses Normals OFF and strict vertex matching.
+
 ### CLI
 
 ```bash
@@ -121,8 +134,10 @@ Armature:           ON
 ## Repository Layout
 
 ```
+blender_addon/
+  cg3h/__init__.py     Blender addon (File > Import/Export for .gpk)
 tools/
-  converter_gui.py     GUI (Export + Import + Install)
+  converter_gui.py     Standalone GUI (Export + Import + Install)
   gr2_to_gltf.py       CLI exporter: .gpk + .sdb -> .glb
   gltf_to_gr2.py       CLI importer: .glb + .gpk + .sdb -> .gpk
   gpk_pack.py           GPK archive pack/unpack (pure Python)
