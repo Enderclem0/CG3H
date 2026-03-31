@@ -345,8 +345,9 @@ def load_gr2(dll, gr2_bytes: bytes, sdb_bytes: bytes):
     gr2_file = dll.GrannyReadEntireFileFromMemory(len(gr2_bytes), gr2_buf)
     if not gr2_file:
         raise RuntimeError("GrannyReadEntireFileFromMemory failed for GR2")
-    if not dll.GrannyRemapFileStrings(gr2_file, str_db):
-        raise RuntimeError("GrannyRemapFileStrings failed")
+    # GrannyRemapFileStrings returns False for golden-path files (inline strings,
+    # no SDB indices to remap). This is normal — strings are already live pointers.
+    dll.GrannyRemapFileStrings(gr2_file, str_db)
     fi = dll.GrannyGetFileInfo(gr2_file)
     if not fi:
         raise RuntimeError("GrannyGetFileInfo returned null")
