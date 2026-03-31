@@ -362,7 +362,9 @@ def get_gr2_meshes(fi) -> list[dict]:
         name       : str
         vp         : int  — address of vertex buffer in DLL memory
         vc         : int  — vertex count
-        src_stride : int  — reported vertex stride (may be 32 for rigid)
+        mesh_ptr   : int  — address of granny_mesh in DLL memory
+        bb_count   : int  — number of bone binding entries
+        bb_ptr     : int  — address of bone binding array
     """
     _meshes    = _t('granny_file_info', 'Meshes')
     mesh_count = ri(fi, _meshes)
@@ -370,6 +372,7 @@ def get_gr2_meshes(fi) -> list[dict]:
 
     _off_name = _t('granny_mesh', 'Name')
     _off_vd   = _t('granny_mesh', 'PrimaryVertexData')
+    _off_bb   = _t('granny_mesh', 'BoneBindings')
     _verts    = _t('granny_vertex_data', 'Vertices')
 
     result = []
@@ -393,12 +396,18 @@ def get_gr2_meshes(fi) -> list[dict]:
         if not _valid_ptr(vp) or vc <= 0:
             continue
 
+        # BoneBindings is ReferenceToArray: {count[4], ptr[8]}
+        bb_count = ri(mesh_ptr, _off_bb)
+        bb_ptr   = rq(mesh_ptr, _off_bb + 4)
+
         result.append({
             'name':             mesh_name,
             'vp':               vp,
             'vc':               vc,
             'vertex_type_ptr':  vertex_type_ptr,
             'mesh_ptr':         mesh_ptr,
+            'bb_count':         bb_count,
+            'bb_ptr':           bb_ptr,
         })
     return result
 
@@ -542,9 +551,75 @@ def _unique_gr2_meshes(gr2_mesh_list: list) -> list:
     return out
 
 
+def _update_bone_obbs(gm: dict) -> None:
+    """
+    Recompute OBB (Oriented Bounding Box) min/max for each bone binding
+    after vertex positions have been patched.
+
+    Without this, the game's frustum culler uses stale bounds and clips
+    the mesh when vertices move beyond the original silhouette.
+
+    granny_bone_binding layout (stride = _BB_STRIDE = 44):
+        +0x00  BoneName*      (8 bytes)
+        +0x08  OBBMin         float32x3
+        +0x14  OBBMax         float32x3
+        +0x20  TriangleCount  (4 bytes)
+        +0x24  TriangleIndices* (8 bytes)
+    """
+    bb_count = gm['bb_count']
+    bb_ptr   = gm['bb_ptr']
+    vc       = gm['vc']
+    vp       = gm['vp']
+
+    if bb_count <= 0 or not _valid_ptr(bb_ptr):
+        return
+
+    # Read current vertex buffer: positions (+0:12) and bone indices (+16:20)
+    raw = np.frombuffer(
+        bytes((ctypes.c_uint8 * (vc * 40)).from_address(vp)),
+        dtype=np.uint8,
+    ).reshape(vc, 40)
+    positions = raw[:, 0:12].copy().view(np.float32).reshape(vc, 3)
+    bone_indices = raw[:, 16:20].copy()  # uint8 x 4
+    bone_weights = raw[:, 12:16].copy()  # uint8 x 4
+
+    # Add padding to prevent exact-boundary culling
+    PADDING = 0.1
+
+    for bi in range(bb_count):
+        entry = bb_ptr + bi * _BB_STRIDE
+
+        if not _readable(entry, _BB_STRIDE):
+            continue
+
+        # Find vertices influenced by this bone binding index
+        # A vertex is influenced if any of its 4 bone indices == bi AND
+        # the corresponding weight is > 0
+        mask = np.zeros(vc, dtype=bool)
+        for j in range(4):
+            mask |= (bone_indices[:, j] == bi) & (bone_weights[:, j] > 0)
+
+        if not mask.any():
+            # Rigid mesh or no vertices for this binding — use all vertices
+            if bb_count == 1:
+                mask = np.ones(vc, dtype=bool)
+            else:
+                continue
+
+        bound_pos = positions[mask]
+        obb_min = bound_pos.min(axis=0) - PADDING
+        obb_max = bound_pos.max(axis=0) + PADDING
+
+        # Write OBBMin at +0x08, OBBMax at +0x14
+        obb_buf = (ctypes.c_uint8 * 24).from_address(entry + 0x08)
+        struct.pack_into('<3f', obb_buf, 0,  obb_min[0], obb_min[1], obb_min[2])
+        struct.pack_into('<3f', obb_buf, 12, obb_max[0], obb_max[1], obb_max[2])
+
+
 def _apply_patch(glb_m: dict, gm: dict, strict: bool) -> bool:
     """
-    Patch one mesh's vertex buffer in DLL-managed memory.
+    Patch one mesh's vertex buffer in DLL-managed memory, then update
+    the per-bone bounding boxes so frustum culling works correctly.
 
     Returns True if the patch was applied, False if skipped.
     """
@@ -552,21 +627,20 @@ def _apply_patch(glb_m: dict, gm: dict, strict: bool) -> bool:
     vc_gr2 = gm['vc']
     if vc_glb != vc_gr2:
         msg = (f"Mesh {glb_m['name']!r} -> {gm['name']!r}: vertex count mismatch "
-               f"(GLB={vc_glb}, GR2={vc_gr2}). "
-               f"Same-topology edits only — vertex count must be identical.")
+               f"(GLB={vc_glb}, GR2={vc_gr2}).\n"
+               f"    Same-topology edits only — vertex count must be identical.\n"
+               f"    Common causes: Subdivide, Decimate, Merge by Distance, or\n"
+               f"    exporting with Normals ON (splits vertices at seams).\n"
+               f"    Re-export from Blender with Normals OFF and no topology changes.")
         if strict:
             raise ValueError(msg)
         print(f"  WARNING: {msg} — skipping")
         return False
 
     # Read the original vertex buffer from GR2 memory once.
-    # We use it as a fallback for components that should never change through a
-    # Blender round-trip: normals (if not exported), bone weights, and bone indices.
-    #
     # Bone indices MUST always come from the GR2, not the GLB.  Blender reorders
     # the skin joint list on import/re-export, so JOINTS_0 values in the returned
-    # GLB are in Blender's order, not the original palette order.  Using them
-    # directly would skin every vertex to the wrong bone (produces a cylinder).
+    # GLB are in Blender's order, not the original palette order.
     orig_raw = np.frombuffer(
         bytes((ctypes.c_uint8 * (vc_gr2 * 40)).from_address(gm['vp'])),
         dtype=np.uint8,
@@ -589,7 +663,11 @@ def _apply_patch(glb_m: dict, gm: dict, strict: bool) -> bool:
         return False
 
     ctypes.memmove(gm['vp'], vbuf, expected)
-    print(f"  Patched {gm['name']!r}: {vc_gr2} verts x 40 bytes")
+
+    # Recompute per-bone bounding boxes so the game doesn't cull the mesh
+    _update_bone_obbs(gm)
+
+    print(f"  Patched {gm['name']!r}: {vc_gr2} verts x 40 bytes (OBB updated)")
     return True
 
 
@@ -617,6 +695,12 @@ def patch_vertex_data(
     """
     gr2_mesh_list = get_gr2_meshes(fi)
     patched = 0
+
+    # Print mesh summary for diagnostics
+    glb_summary = ", ".join(f"{m['name']}({len(m['positions'])}v)" for m in glb_meshes)
+    gr2_summary = ", ".join(f"{m['name']}({m['vc']}v)" for m in gr2_mesh_list)
+    print(f"  GLB: {glb_summary}")
+    print(f"  GR2: {gr2_summary}")
 
     if positional:
         unique_gr2 = _unique_gr2_meshes(gr2_mesh_list)

@@ -220,7 +220,10 @@ class App:
             box,
             text="Positional matching \u2014 pair meshes by index instead of name",
             variable=self.imp_positional,
-        ).pack(anchor=tk.W, pady=(2, 6))
+        ).pack(anchor=tk.W, pady=(2, 0))
+        ttk.Label(box, text="    Use when GLB and GPK have different variant names "
+                  "(e.g. Melinoe vs MelinoeOverlook)",
+                  foreground="#888", font=("", 8)).pack(anchor=tk.W, pady=(0, 6))
         ttk.Checkbutton(box, text="Also save raw .gr2 alongside the output .gpk",
                         variable=self.imp_save_gr2).pack(anchor=tk.W, pady=2)
 
@@ -247,7 +250,9 @@ class App:
 
         ttk.Label(top, text=(
             "Select a _mod.gpk file to install. The original will be backed up\n"
-            "automatically before replacement. You can restore originals below."
+            "automatically before replacement. You can restore originals below.\n"
+            "Tip: use Steam > Properties > Verify Integrity of Game Files to\n"
+            "restore all originals if backups are lost."
         ), foreground="#555").pack(anchor=tk.W, pady=(0, 8))
 
         # GPK file picker
