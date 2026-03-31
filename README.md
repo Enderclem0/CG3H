@@ -11,19 +11,19 @@ Extract, edit, and repack 3D models for Hades II (Supergiant Games).
 | **Vertex position edits** (reshape mesh) | Working |
 | **UV edits** (texture coordinate changes) | Working |
 | **Normal edits** (if exported from Blender) | Working |
+| **Topology changes** (add/remove vertices, subdivide, decimate) | Working (experimental) |
+| **Triangle/face edits** | Working |
+| **Bone weight painting** from Blender | Working |
 | **Multi-LOD patching** (all resolution levels) | Working |
 | **GUI** with Export, Import, and Install tabs | Working |
-| **Backup & restore** originals before installing | Working |
-| **Bone weight painting** from Blender | Working |
-| **Triangle/face edits** (same vertex count) | Working |
 | **Blender addon** (File > Import/Export) | Working |
+| **Backup & restore** originals before installing | Working |
 | Any character model (all 144 pairs in `_Optimized/`) | Working |
 
 ## What Doesn't Work (Yet)
 
 | Feature | Why |
 |---|---|
-| **Adding/removing vertices** | Fixed-size vertex buffer; needs DLL mesh allocation |
 | **Adding/removing bones** | Skeleton is read-only from the original GR2 |
 | **Adding/removing meshes** | Mesh count is fixed at load time |
 | **Textures** | Not stored in GR2 files (separate engine asset pipeline) |
@@ -31,10 +31,9 @@ Extract, edit, and repack 3D models for Hades II (Supergiant Games).
 
 ## Known Issues
 
-- **Mesh clipping/disappearing at camera edges** (mitigated): The game uses per-bone
-  bounding boxes for frustum culling. The importer now recomputes these after vertex
-  patching, but extreme deformations may still cause edge-case culling artifacts.
-  If you see clipping, try keeping edits closer to the original silhouette.
+- **Mesh clipping at camera edges** (mitigated): The importer recomputes per-bone
+  bounding boxes after patching, but extreme deformations may still cause
+  edge-case culling. Keep edits closer to the original silhouette if you see clipping.
 
 ## Requirements
 
@@ -69,8 +68,6 @@ Then use:
 - **File > Import > Hades II Model (.gpk)** — browse to a `.gpk` in `Content/GR2/_Optimized/`
 - **File > Export > Hades II Model (.gpk)** — select meshes + armature, pick the original character, save
 
-The export automatically uses Normals OFF and strict vertex matching.
-
 ### CLI
 
 ```bash
@@ -78,11 +75,18 @@ The export automatically uses Normals OFF and strict vertex matching.
 cd "C:/Program Files (x86)/Steam/steamapps/common/Hades II/Ship"
 python C:/path/to/tools/gr2_to_gltf.py Melinoe -o Melinoe.glb
 
-# Import (after editing in Blender)
+# Import (same topology — default, safe)
 python C:/path/to/tools/gltf_to_gr2.py Melinoe_edited.glb \
     --gpk ../Content/GR2/_Optimized/Melinoe.gpk \
     --sdb ../Content/GR2/_Optimized/Melinoe.sdb \
     --output-gpk ~/Documents/Hades2Mods/Melinoe_mod.gpk
+
+# Import (topology changes — subdivide, decimate, sculpt)
+python C:/path/to/tools/gltf_to_gr2.py Melinoe_sculpted.glb \
+    --gpk ../Content/GR2/_Optimized/Melinoe.gpk \
+    --sdb ../Content/GR2/_Optimized/Melinoe.sdb \
+    --output-gpk ~/Documents/Hades2Mods/Melinoe_mod.gpk \
+    --allow-topology-change
 ```
 
 ## Blender Workflow
@@ -93,44 +97,49 @@ python C:/path/to/tools/gltf_to_gr2.py Melinoe_edited.glb \
 2. Select the exported `.glb` file
 3. The model imports with skeleton and all meshes
 
-### Editing Rules
+### Editing Modes
 
-**You MUST keep the same vertex count.** The pipeline patches vertex data
-in-place — adding or removing vertices will fail with a strict error.
+#### Same-topology edits (default, safe)
 
-- **Edit in Edit Mode only** — do NOT apply transforms, modifiers, or
-  operations in Object Mode that change vertex count
-- **Do NOT** use Subdivide, Decimate, Merge by Distance, dissolve edges,
-  or any tool that changes the number of vertices
-- **Safe operations**: Move vertices (G), scale (S), rotate (R), sculpt
-  (proportional editing), edit UVs, smooth vertices
-- **Bone weights** are always preserved from the original (Blender reorders
-  joints on re-export, so the tool ignores GLB weights)
+Move vertices without changing the mesh structure. This is the most reliable mode.
+
+- **Safe operations**: Move (G), Scale (S), Rotate (R), proportional editing,
+  sculpt mode, UV editing, smooth vertices
+- **Do NOT**: Subdivide, Decimate, Merge by Distance, dissolve edges, or any
+  operation that adds/removes vertices
+- Vertex count must match exactly — the tool will error if it doesn't
+
+#### Topology changes (experimental)
+
+Enable with `--allow-topology-change` on CLI or the checkbox in the GUI.
+Allows adding/removing vertices and faces.
+
+- **Supported**: Subdivide, Decimate, Sculpt with Dyntopo, Remesh, Boolean,
+  Knife tool, Extrude — anything that changes vertex/face count
+- **When deleting vertices**: use **Delete > Faces** to also remove connected
+  triangles. Dangling faces create corrupt geometry the game will reject.
+- Bone weights are remapped by name from the GLB — weight painting works
 
 ### Exporting from Blender
 
 1. Select **only the meshes and armature** (not cameras, lights, empties)
 2. File > Export > glTF 2.0 (.glb)
 3. Export settings:
-   - Format: **glTF Binary (.glb)**
-   - Include: **Selected Objects** (check this!)
-   - Mesh > **Normals: OFF** (uncheck "Normals")
-     - Exporting normals causes Blender to split vertices at normal seams,
-       which changes the vertex count and breaks the import
-   - Mesh > UVs: ON
-   - Mesh > Vertex Colors: OFF
-   - Armature: ON (if you selected it)
-
-### Summary of Export Settings
 
 ```
 Format:             glTF Binary (.glb)
 Include:            Selected Objects only
 Mesh > Normals:     OFF  <-- critical, prevents vertex splitting
 Mesh > UVs:         ON
-Mesh > Apply Mods:  OFF
+Mesh > Apply Mods:  OFF  (or ON if you used modifiers like Decimate)
+Mesh > Vertex Colors: OFF
 Armature:           ON
 ```
+
+**Why Normals OFF?** Exporting normals causes Blender to split vertices at
+normal seams, which changes the vertex count. With same-topology mode this
+breaks the import. With topology-change mode it works but produces unnecessary
+extra vertices. Turn normals off to keep the mesh clean.
 
 ## Repository Layout
 
@@ -162,12 +171,15 @@ docs/
 
 ### How Import Works
 
-1. Parse the edited `.glb` (positions, normals, UVs)
+1. Parse the edited `.glb` (positions, normals, UVs, bone weights, indices)
 2. Load the original `.gpk` + `.sdb` via the DLL
-3. Match GLB meshes to GR2 meshes by name (fuzzy matching with LOD awareness)
-4. `ctypes.memmove` new 40-byte vertex buffers into DLL memory
-5. Serialize modified data tree back to `.gr2` via the Granny DLL write API
-6. LZ4-compress into output `.gpk`
+3. Match GLB meshes to GR2 meshes by name, pair LODs by position order
+4. Remap bone weights from GLB joint order to GR2 BoneBinding order by name
+5. Patch vertex buffers in DLL memory (in-place or new allocation for topology changes)
+6. Patch index buffers if triangle connectivity changed
+7. Recompute per-bone bounding boxes (OBB) for frustum culling
+8. Serialize modified data tree back to `.gr2` via the Granny DLL write API
+9. LZ4-compress into output `.gpk`
 
 ## Game Asset Layout
 
