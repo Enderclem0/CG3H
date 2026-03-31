@@ -213,9 +213,20 @@ class App:
         ttk.Label(row3, text="(leave blank for auto-detect)",
                   foreground="#888").pack(side=tk.LEFT)
 
-        # Checkboxes (strict is always on — not exposed)
+        # Checkboxes
         self.imp_positional = tk.BooleanVar(value=False)
+        self.imp_topology   = tk.BooleanVar(value=False)
         self.imp_save_gr2   = tk.BooleanVar(value=False)
+
+        ttk.Checkbutton(
+            box,
+            text="Allow topology changes \u2014 subdivide, decimate, sculpt (EXPERIMENTAL)",
+            variable=self.imp_topology,
+        ).pack(anchor=tk.W, pady=(2, 0))
+        ttk.Label(box, text="    Enables different vertex/triangle counts between GLB and GR2.\n"
+                  "    Without this, vertex count must match exactly.",
+                  foreground="#888", font=("", 8)).pack(anchor=tk.W, pady=(0, 6))
+
         ttk.Checkbutton(
             box,
             text="Positional matching \u2014 pair meshes by index instead of name",
@@ -226,10 +237,6 @@ class App:
                   foreground="#888", font=("", 8)).pack(anchor=tk.W, pady=(0, 6))
         ttk.Checkbutton(box, text="Also save raw .gr2 alongside the output .gpk",
                         variable=self.imp_save_gr2).pack(anchor=tk.W, pady=2)
-
-        # Info label about strict mode
-        ttk.Label(box, text="Vertex count must match exactly (same-topology edits only).",
-                  foreground="#888", font=("", 8)).pack(anchor=tk.W, pady=(4, 0))
 
         self._imp_btn = ttk.Button(box, text="Import into selected character",
                                    command=self._import, state=tk.DISABLED)
@@ -620,7 +627,6 @@ class App:
 
         out_gpk = os.path.join(out_dir, f"{character}_mod.gpk")
 
-        # Always use --strict (vertex count must match exactly)
         cmd = [
             sys.executable, IMPORTER, glb_path,
             "--gpk", gpk_path,
@@ -634,6 +640,8 @@ class App:
             cmd += ["--entry-name", entry_name]
         if self.imp_positional.get():
             cmd.append("--positional")
+        if self.imp_topology.get():
+            cmd.append("--allow-topology-change")
         if self.imp_save_gr2.get():
             cmd += ["--output-gr2", os.path.join(out_dir, f"{character}_mod.gr2")]
 

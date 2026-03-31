@@ -70,6 +70,10 @@ _BONE_STRIDE: int = 0
 _BB_STRIDE: int = 0
 _TRANSFORM_OFFS: dict = {}
 
+# Keep Python-allocated buffers alive until serialization completes.
+# Without this, the GC would free them before GrannyWriteDataTreeToFileBuilder reads them.
+_keepalive: list = []
+
 # ctypes function type for the string-stripping callback registered on tree_writer.
 # The DLL calls this once per unique string encountered during tree serialization.
 # Return value: uint32 SDB array index for that string.
@@ -426,6 +430,8 @@ def get_gr2_meshes(fi) -> list[dict]:
             'name':             mesh_name,
             'vp':               vp,
             'vc':               vc,
+            'vd_ptr':           vd,           # granny_vertex_data address (for count/ptr patching)
+            'topo_ptr':         topo_ptr,     # granny_tri_topology address
             'vertex_type_ptr':  vertex_type_ptr,
             'mesh_ptr':         mesh_ptr,
             'idx_count':        idx_count,
@@ -714,31 +720,38 @@ def _remap_bone_indices(glb_m: dict, gr2_bb_names: list[str]) -> tuple:
     return remapped_bj, glb_bw, True
 
 
-def _apply_patch(glb_m: dict, gm: dict, strict: bool) -> bool:
+def _apply_patch(glb_m: dict, gm: dict, strict: bool,
+                 allow_topology_change: bool = False) -> bool:
     """
-    Patch one mesh's vertex buffer in DLL-managed memory, then update
-    the per-bone bounding boxes so frustum culling works correctly.
+    Patch one mesh's vertex buffer (and optionally index buffer) in DLL-managed
+    memory, then update bounding boxes.
 
-    Bone weights: if the GLB has skinning data with a bone palette, the
-    joint indices are remapped from GLB order to GR2 BoneBinding order
-    using bone name matching. This enables weight painting in Blender.
-    If no skinning data or remapping fails, original weights are preserved.
+    If vertex counts match: patches in-place (fast path).
+    If vertex counts differ and allow_topology_change=True: allocates new
+    Python buffers, patches the granny_vertex_data count/ptr fields so the
+    DLL serializer picks up the new data.
 
     Returns True if the patch was applied, False if skipped.
     """
     vc_glb = len(glb_m['positions'])
     vc_gr2 = gm['vc']
-    if vc_glb != vc_gr2:
+    topology_changed = (vc_glb != vc_gr2)
+
+    if topology_changed and not allow_topology_change:
         msg = (f"Mesh {glb_m['name']!r} -> {gm['name']!r}: vertex count mismatch "
                f"(GLB={vc_glb}, GR2={vc_gr2}).\n"
                f"    Same-topology edits only — vertex count must be identical.\n"
                f"    Common causes: Subdivide, Decimate, Merge by Distance, or\n"
                f"    exporting with Normals ON (splits vertices at seams).\n"
-               f"    Re-export from Blender with Normals OFF and no topology changes.")
+               f"    Re-export from Blender with Normals OFF and no topology changes.\n"
+               f"    Or use --allow-topology-change to enable variable vertex counts.")
         if strict:
             raise ValueError(msg)
         print(f"  WARNING: {msg} — skipping")
         return False
+
+    if topology_changed:
+        print(f"  [{gm['name']!r}] Topology change: {vc_gr2} -> {vc_glb} vertices")
 
     # Read the original vertex buffer from GR2 memory as fallback
     orig_raw = np.frombuffer(
@@ -748,49 +761,108 @@ def _apply_patch(glb_m: dict, gm: dict, strict: bool) -> bool:
 
     fallback_nrm = None
     if not glb_m.get('has_normals', True):
-        fallback_nrm = orig_raw[:, 20:32].view(np.float32).reshape(vc_gr2, 3).copy()
-        print(f"  [{gm['name']!r}] normals not in GLB — preserving originals from GR2")
+        if not topology_changed:
+            fallback_nrm = orig_raw[:, 20:32].view(np.float32).reshape(vc_gr2, 3).copy()
+            print(f"  [{gm['name']!r}] normals not in GLB — preserving originals from GR2")
+        else:
+            print(f"  [{gm['name']!r}] normals not in GLB + topology changed — using zero normals")
 
     glb_m = dict(glb_m)
 
-    # Try to remap bone weights from GLB using name-based joint matching
+    # Remap bone weights from GLB using name-based joint matching
     remapped_bj, remapped_bw, remap_ok = _remap_bone_indices(glb_m, gm.get('bb_names', []))
     if remap_ok:
         glb_m['bj_u8'] = remapped_bj
         glb_m['bw_u8'] = remapped_bw
-    else:
-        # No skinning data in GLB or remap failed — preserve from original
+    elif not topology_changed:
+        # Same topology, no skinning data — preserve from original
         glb_m['bw_u8'] = orig_raw[:, 12:16].copy()
         glb_m['bj_u8'] = orig_raw[:, 16:20].copy()
+    # else: topology changed + no remap → zeros (from build_vertex_buffer_40 defaults)
 
     vbuf = build_vertex_buffer_40(glb_m, fallback_normals=fallback_nrm)
-    expected = vc_gr2 * 40
-    if len(vbuf) != expected:
-        print(f"  WARNING: {glb_m['name']!r}: buffer size mismatch — skipping")
-        return False
 
-    ctypes.memmove(gm['vp'], vbuf, expected)
+    # Validate indices are within vertex bounds
+    glb_indices = glb_m.get('indices')
+    if glb_indices is not None and len(glb_indices) > 0:
+        max_idx = int(np.max(glb_indices))
+        if max_idx >= vc_glb:
+            print(f"  ERROR: {glb_m['name']!r} has index {max_idx} but only {vc_glb} vertices "
+                  f"— mesh is corrupt (faces reference deleted vertices)")
+            return False
 
-    # Patch index buffer if GLB provides indices and the count matches
+    if topology_changed:
+        # ── Variable-topology path: allocate new buffers, patch struct fields ──
+        new_vc = vc_glb
+
+        # Allocate new vertex buffer in Python memory
+        new_vbuf = (ctypes.c_uint8 * len(vbuf))()
+        ctypes.memmove(new_vbuf, vbuf, len(vbuf))
+        _keepalive.append(new_vbuf)
+
+        # Patch granny_vertex_data: count at +0x08, ptr at +0x0C
+        vd_ptr = gm['vd_ptr']
+        _verts = _t('granny_vertex_data', 'Vertices')
+        struct.pack_into('<i', (ctypes.c_uint8 * 4).from_address(vd_ptr + _verts + 8),
+                         0, new_vc)
+        struct.pack_into('<Q', (ctypes.c_uint8 * 8).from_address(vd_ptr + _verts + 12),
+                         0, ctypes.addressof(new_vbuf))
+
+        # Update gm so OBB recomputation reads from the new buffer
+        gm['vp'] = ctypes.addressof(new_vbuf)
+        gm['vc'] = new_vc
+    else:
+        # ── Same-topology path: patch in-place ──
+        ctypes.memmove(gm['vp'], vbuf, len(vbuf))
+
+    # ── Patch index buffer ──
     idx_patched = False
     glb_indices = glb_m.get('indices')
     gr2_idx_count = gm.get('idx_count', 0)
     gr2_idx_ptr   = gm.get('idx_ptr', 0)
+    topo_ptr      = gm.get('topo_ptr', 0)
 
-    if glb_indices is not None and len(glb_indices) > 0 and gr2_idx_count > 0 and _valid_ptr(gr2_idx_ptr):
-        if len(glb_indices) == gr2_idx_count:
+    if glb_indices is not None and len(glb_indices) > 0:
+        glb_idx_count = len(glb_indices)
+        if glb_idx_count == gr2_idx_count and _valid_ptr(gr2_idx_ptr):
+            # Same index count — patch in-place
             idx_bytes = glb_indices.astype(np.uint16).tobytes()
             ctypes.memmove(gr2_idx_ptr, idx_bytes, len(idx_bytes))
             idx_patched = True
-        else:
-            print(f"    Index count mismatch (GLB={len(glb_indices)}, GR2={gr2_idx_count}) — keeping original indices")
+        elif glb_idx_count != gr2_idx_count and allow_topology_change and _valid_ptr(topo_ptr):
+            # Different index count — allocate new buffer, patch topology struct
+            idx_bytes = glb_indices.astype(np.uint16).tobytes()
+            new_idx_buf = (ctypes.c_uint8 * len(idx_bytes))()
+            ctypes.memmove(new_idx_buf, idx_bytes, len(idx_bytes))
+            _keepalive.append(new_idx_buf)
 
-    # Recompute per-bone bounding boxes so the game doesn't cull the mesh
+            _idx16 = _t('granny_tri_topology', 'Indices16')
+            # Patch Indices16: count at +0x18, ptr at +0x1C
+            struct.pack_into('<i', (ctypes.c_uint8 * 4).from_address(topo_ptr + _idx16),
+                             0, glb_idx_count)
+            struct.pack_into('<Q', (ctypes.c_uint8 * 8).from_address(topo_ptr + _idx16 + 4),
+                             0, ctypes.addressof(new_idx_buf))
+
+            # GrannyGetMeshTriangleCount reads topology+0x0C first (priority field).
+            # If non-zero it ignores Indices16.count at +0x18. Update it too.
+            struct.pack_into('<i', (ctypes.c_uint8 * 4).from_address(topo_ptr + 0x0C),
+                             0, glb_idx_count)
+
+            gm['idx_count'] = glb_idx_count
+            gm['idx_ptr'] = ctypes.addressof(new_idx_buf)
+            idx_patched = True
+            print(f"    Index count changed: {gr2_idx_count} -> {glb_idx_count}")
+        elif glb_idx_count != gr2_idx_count:
+            print(f"    Index count mismatch (GLB={glb_idx_count}, GR2={gr2_idx_count}) — keeping original")
+
+    # Recompute per-bone bounding boxes
     _update_bone_obbs(gm)
 
     weights_src = "GLB (remapped)" if remap_ok else "original GR2"
+    topo_msg = f" TOPOLOGY CHANGED ({vc_gr2}->{vc_glb}v)" if topology_changed else ""
     idx_msg = ", indices patched" if idx_patched else ""
-    print(f"  Patched {gm['name']!r}: {vc_gr2} verts x 40 bytes (OBB updated, weights: {weights_src}{idx_msg})")
+    print(f"  Patched {gm['name']!r}: {gm['vc']} verts x 40 bytes "
+          f"(OBB updated, weights: {weights_src}{idx_msg}){topo_msg}")
     return True
 
 
@@ -798,10 +870,11 @@ def patch_vertex_data(
     dll, fi: int, glb_meshes: list[dict],
     strict: bool = False,
     positional: bool = False,
+    allow_topology_change: bool = False,
 ) -> int:
     """
     Match each GLB mesh to the corresponding GR2 mesh, then patch the vertex
-    buffer in DLL-managed memory using ctypes.memmove.
+    buffer in DLL-managed memory.
 
     Matching order (unless positional=True):
       1. Exact normalised name
@@ -810,9 +883,9 @@ def patch_vertex_data(
 
     positional=True: pair GLB mesh[i] to unique GR2 mesh[i] by index.
 
-    A GPK entry contains multiple LODs under the same mesh name.  We build a
-    multi-map and patch every LOD whose vertex count matches the GLB mesh.
-    LODs with a different count are silently skipped (expected behaviour).
+    When allow_topology_change=False (default): only patches LODs whose vertex
+    count matches the GLB mesh. When True: patches the first matching LOD
+    regardless of vertex count (allocates new buffers for the serializer).
 
     Returns n_patched (int).
     """
@@ -832,55 +905,61 @@ def patch_vertex_data(
                   f"{len(unique_gr2)} unique meshes — extra GLB meshes ignored")
         for glb_m, gm in zip(glb_meshes, unique_gr2):
             print(f"  Positional match: {glb_m['name']!r} -> {gm['name']!r}")
-            norm_key = _normalize_mesh_name(gm['name'])
-            for candidate in gr2_mesh_list:
-                if _normalize_mesh_name(candidate['name']) == norm_key:
-                    if _apply_patch(glb_m, candidate, strict):
-                        patched += 1
+            if _apply_patch(glb_m, gm, strict, allow_topology_change):
+                patched += 1
         return patched
 
-    # Build multi-map: normalised name -> all GR2 meshes (all LODs)
+    # Build ordered groups: normalised name -> [GR2 meshes in file order]
+    # GR2 LODs share the same name (e.g. two "Melinoe_MeshShape" at different resolutions).
+    # We match by name first, then pair by position within the group (LOD0→LOD0, LOD1→LOD1).
     gr2_by_name: dict[str, list] = {}
     for gm in gr2_mesh_list:
         key = _normalize_mesh_name(gm['name'])
         gr2_by_name.setdefault(key, []).append(gm)
 
+    glb_by_name: dict[str, list] = {}
     for glb_m in glb_meshes:
-        glb_key = _normalize_mesh_name(glb_m['name'])
-        vc_glb  = len(glb_m['positions'])
+        key = _normalize_mesh_name(glb_m['name'])
+        glb_by_name.setdefault(key, []).append(glb_m)
 
-        # Pass 1: exact
+    # Resolve GLB group names to GR2 group names (exact, then fuzzy)
+    for glb_key, glb_group in glb_by_name.items():
         matched_key = glb_key if glb_key in gr2_by_name else None
-
-        # Passes 2+3: fuzzy
         if matched_key is None:
             matched_key = _best_name_match(glb_key, gr2_by_name)
             if matched_key is not None:
-                rep = gr2_by_name[matched_key][0]['name']
-                print(f"  Fuzzy match: {glb_m['name']!r} -> {rep!r}")
+                print(f"  Fuzzy match: '{glb_key}' -> '{matched_key}'")
 
         if matched_key is None:
-            print(f"  WARNING: GLB mesh {glb_m['name']!r} has no matching GR2 mesh — skipping")
-            print(f"    GLB key  : {glb_key!r}")
+            print(f"  WARNING: GLB group '{glb_key}' has no matching GR2 group — skipping")
             print(f"    Available: {sorted(gr2_by_name)}")
             print(f"    Tip: use --positional to match by index instead of name")
             continue
 
-        # Patch every LOD whose vertex count matches; skip mismatches silently
-        hit = False
-        for gm in gr2_by_name[matched_key]:
-            if gm['vc'] == vc_glb:
-                if _apply_patch(glb_m, gm, strict):
-                    patched += 1
-                    hit = True
-        if not hit:
-            counts = [gm['vc'] for gm in gr2_by_name[matched_key]]
-            msg = (f"Mesh {glb_m['name']!r}: no GR2 LOD has {vc_glb} verts "
-                   f"(GR2 LOD counts: {counts}). "
-                   f"Same-topology edits only — vertex count must be identical.")
-            if strict:
-                raise ValueError(msg)
-            print(f"  WARNING: {msg} — skipping")
+        gr2_group = gr2_by_name[matched_key]
+
+        # Pair by position: GLB[0]→GR2[0], GLB[1]→GR2[1], etc.
+        for i, glb_m in enumerate(glb_group):
+            if i >= len(gr2_group):
+                print(f"  WARNING: GLB has more LODs than GR2 for '{matched_key}' "
+                      f"— skipping GLB LOD {i}")
+                continue
+
+            gm = gr2_group[i]
+            vc_glb = len(glb_m['positions'])
+            vc_gr2 = gm['vc']
+
+            if vc_glb != vc_gr2 and not allow_topology_change:
+                msg = (f"Mesh '{glb_m['name']}' LOD{i}: vertex count mismatch "
+                       f"(GLB={vc_glb}, GR2={vc_gr2}). "
+                       f"Use --allow-topology-change to enable.")
+                if strict:
+                    raise ValueError(msg)
+                print(f"  WARNING: {msg} — skipping")
+                continue
+
+            if _apply_patch(glb_m, gm, strict, allow_topology_change):
+                patched += 1
 
     return patched
 
@@ -898,6 +977,7 @@ def convert(
     entry_name=None,
     strict: bool = False,
     positional: bool = False,
+    allow_topology_change: bool = False,
 ) -> None:
     print(f"[1/6] Parsing GLB: {glb_path}")
     glb_meshes = parse_glb(glb_path)
@@ -937,13 +1017,17 @@ def convert(
 
     print(f"[5/6] Patching vertex data")
     n_patched = patch_vertex_data(
-        dll, fi, glb_meshes, strict=strict, positional=positional
+        dll, fi, glb_meshes, strict=strict, positional=positional,
+        allow_topology_change=allow_topology_change,
     )
     if n_patched == 0:
         raise RuntimeError("No meshes were patched — nothing to write")
 
     print(f"[6/6] Serializing modified GR2")
     new_gr2_bytes = build_gr2_bytes(dll, fi, gr2_bytes, sdb_dict, sdb_crc)
+
+    # Free Python-allocated buffers now that serialization is complete
+    _keepalive.clear()
 
     dll.GrannyFreeFile(gr2_file)
     dll.GrannyFreeFile(sdb_file)
@@ -981,6 +1065,10 @@ def main():
                         help='Match meshes by index instead of name '
                              '(use when character variant names differ, e.g. '
                              'Melinoe_MeshShape vs MelinoeOverlook_MeshShape)')
+    parser.add_argument('--allow-topology-change', action='store_true',
+                        help='Allow different vertex/triangle counts between GLB and GR2. '
+                             'Enables sculpting, subdivide, decimate, and other mesh edits '
+                             'that change topology. EXPERIMENTAL.')
     args = parser.parse_args()
 
     out_gpk = args.output_gpk or args.gpk.replace('.gpk', '_mod.gpk')
@@ -997,6 +1085,7 @@ def main():
         entry_name=args.entry_name,
         strict=args.strict,
         positional=args.positional,
+        allow_topology_change=args.allow_topology_change,
     )
 
 
