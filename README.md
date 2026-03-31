@@ -143,18 +143,8 @@ docs/
 2. Load the original `.gpk` + `.sdb` via the DLL
 3. Match GLB meshes to GR2 meshes by name (fuzzy matching with LOD awareness)
 4. `ctypes.memmove` new 40-byte vertex buffers into DLL memory
-5. Serialize via Granny golden path API (inline strings, valid section descriptors)
+5. Serialize modified data tree back to `.gr2` via the Granny DLL write API
 6. LZ4-compress into output `.gpk`
-
-### Why "Golden Path"?
-
-The Granny DLL has two serialization modes:
-- **param3=0 (golden path)**: embeds strings inline, produces valid GR2 files
-- **param3=1 (string stripping)**: writes SDB indices but produces broken section
-  descriptors that crash `GrannyRemapFileStrings`
-
-We use the golden path. `GrannyRemapFileStrings` returns `False` (no-op since
-strings are already embedded), but all data is valid.
 
 ## Game Asset Layout
 
