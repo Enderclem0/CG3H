@@ -801,7 +801,9 @@ def build_gltf(character_name, mesh_data_list, mesh_names, bones, animations=Non
             if short not in bone_name_to_node:
                 bone_name_to_node[short] = bone_node_indices[i]
 
-        for anim_data in animations:
+        total_anims = len(animations)
+        print(f"  Building {total_anims} animation(s) into glTF...", flush=True)
+        for anim_idx, anim_data in enumerate(animations):
             anim = Animation(name=anim_data['name'], channels=[], samplers=[])
 
             for track in anim_data['tracks']:
@@ -861,6 +863,10 @@ def build_gltf(character_name, mesh_data_list, mesh_names, bones, animations=Non
             if anim.channels:
                 gltf.animations.append(anim)
 
+            if (anim_idx + 1) % 100 == 0 or anim_idx + 1 == total_anims:
+                print(f"    {anim_idx+1}/{total_anims} animations built", flush=True)
+
+    print("  Assembling binary buffer...", flush=True)
     combined = b''.join(all_buffers)
     gltf.buffers = [Buffer(byteLength=len(combined))]
     gltf.set_binary_blob(combined)
@@ -953,8 +959,9 @@ def main():
         print(f"[5/6] Animations: skipped (use --animations to include)")
 
     step = "6/6" if (args.animations or args.anim_filter) else "5/5"
-    print(f"[{step}] Building glTF -> {out_path}")
+    print(f"[{step}] Building glTF -> {out_path}", flush=True)
     gltf = build_gltf(args.name, mesh_data_list, mesh_names, bones, animations=anim_data)
+    print(f"  Saving GLB file...", flush=True)
     gltf.save(out_path)
     anim_msg = f", {len(anim_data)} animations" if anim_data else ""
     print(f"\nDone!  {len(mesh_data_list)} meshes, {len(bones)} bones{anim_msg} -> {out_path}")

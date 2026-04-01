@@ -38,6 +38,7 @@ Reshape characters, paint bone weights, add/remove geometry, and install mods �
 - **65,535 vertices max per mesh** — engine uses uint16 index buffers. The tool rejects meshes over this limit.
 - **Scaling mesh without skeleton** causes animation stretching — bones still pivot at original positions. This is expected; skeleton editing is not yet supported.
 - **Extreme deformations** may cause edge-case frustum culling artifacts despite OBB recomputation.
+- **Animation export is slow** — each character has 600-850 animation entries. Exporting all of them takes several minutes. Use `--anim-filter` to limit scope (e.g. `--anim-filter Idle`).
 
 ## Requirements
 
