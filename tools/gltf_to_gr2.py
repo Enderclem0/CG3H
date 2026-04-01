@@ -521,11 +521,15 @@ _VARIANT_WORDS = ('overlook', 'overview', 'overworld', 'portrait')
 
 def _normalize_mesh_name(name: str) -> str:
     """
-    Strip rig prefix, LOD suffixes, and path separators for matching.
-    'Melinoe_Rig:MelinoeOverlook_MeshShape_LOD1' -> 'melinoeoverlook_meshshape'
+    Strip rig prefix, LOD suffixes, Blender duplicate suffixes, and path
+    separators for matching.
+    'Melinoe_Rig:MelinoeOverlook_MeshShape_LOD1.001' -> 'melinoeoverlook_meshshape'
     """
     # Drop 'Armature:' / 'Rig:' style prefixes Blender adds on export
     n = name.split(':')[-1].split('|')[-1].split('/')[-1]
+    # Strip Blender duplicate suffixes (.001, .002, etc.)
+    import re
+    n = re.sub(r'\.\d{3,}$', '', n)
     # Strip LOD suffixes
     for suffix in ('_LOD1', '_LOD2', '_LOD3', '_lod1', '_lod2', '_lod3'):
         if n.endswith(suffix):
