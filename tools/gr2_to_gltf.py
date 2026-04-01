@@ -619,7 +619,7 @@ def extract_animations(dll, gpk_entries, sdb_bytes, anim_filter=None):
 
     total = len(anim_entries)
     print(f"  Processing {total} animation entries" +
-          (f" (filtered by '{anim_filter}')" if anim_filter else ""))
+          (f" (filtered by '{anim_filter}')" if anim_filter else ""), flush=True)
 
     for idx, (entry_name, gr2_bytes) in enumerate(anim_entries.items()):
         gr2_buf = ctypes.create_string_buffer(gr2_bytes)
@@ -681,8 +681,8 @@ def extract_animations(dll, gpk_entries, sdb_bytes, anim_filter=None):
             })
 
         dll.GrannyFreeFile(gr2_file)
-        if (idx + 1) % 50 == 0:
-            print(f"    {idx+1}/{total} processed ({len(animations)} animations)")
+        if (idx + 1) % 25 == 0 or idx + 1 == total:
+            print(f"    {idx+1}/{total} processed ({len(animations)} animations)", flush=True)
 
     dll.GrannyFreeFile(sdb_file)
     print(f"  Extracted {len(animations)} animations")
