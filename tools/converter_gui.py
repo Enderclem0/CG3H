@@ -139,9 +139,12 @@ class App:
                    command=lambda: self._browse_dir(self.exp_output)).pack(side=tk.LEFT)
 
         self.exp_all_lods   = tk.BooleanVar(value=False)
+        self.exp_animations = tk.BooleanVar(value=False)
         self.exp_debug_scan = tk.BooleanVar(value=False)
         ttk.Checkbutton(box, text="Export all LODs (includes lower-resolution duplicates)",
                         variable=self.exp_all_lods).pack(anchor=tk.W, pady=2)
+        ttk.Checkbutton(box, text="Include animations",
+                        variable=self.exp_animations).pack(anchor=tk.W, pady=2)
         ttk.Checkbutton(box, text="Debug scan (print BoneBinding trace in log)",
                         variable=self.exp_debug_scan).pack(anchor=tk.W, pady=2)
 
@@ -532,6 +535,8 @@ class App:
             ]
             if self.exp_all_lods.get():
                 cmd.append("--all-lods")
+            if self.exp_animations.get():
+                cmd.append("--animations")
             if self.exp_debug_scan.get():
                 cmd.append("--debug")
 

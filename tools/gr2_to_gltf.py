@@ -15,7 +15,8 @@ import struct, ctypes, argparse, os, sys
 import numpy as np
 import lz4.block
 import pygltflib
-from pygltflib import GLTF2, Scene, Node, Mesh, Primitive, Skin, Accessor, BufferView, Buffer
+from pygltflib import (GLTF2, Scene, Node, Mesh, Primitive, Skin, Accessor, BufferView, Buffer,
+                       Animation, AnimationSampler, AnimationChannel, AnimationChannelTarget)
 from pygltflib import FLOAT, UNSIGNED_SHORT, UNSIGNED_BYTE, VEC3, VEC4, SCALAR, MAT4, VEC2
 from pygltflib import ARRAY_BUFFER, ELEMENT_ARRAY_BUFFER
 
@@ -84,6 +85,16 @@ def setup_granny(dll_path):
     dll.GrannyGetMeshTriangleCount.argtypes = [ctypes.c_void_p]
     dll.GrannyCopyMeshIndices.restype  = None
     dll.GrannyCopyMeshIndices.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+
+    # Curve conversion for animation export
+    dll.GrannyGetResultingDaK32fC32fCurveSize.restype  = ctypes.c_int
+    dll.GrannyGetResultingDaK32fC32fCurveSize.argtypes = [ctypes.c_void_p]
+    dll.GrannyCurveConvertToDaK32fC32f.restype  = ctypes.c_void_p
+    dll.GrannyCurveConvertToDaK32fC32f.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    dll.GrannyFreeCurve.restype  = None
+    dll.GrannyFreeCurve.argtypes = [ctypes.c_void_p]
+    dll.GrannyCurveIsTypeDaK32fC32f.restype  = ctypes.c_bool
+    dll.GrannyCurveIsTypeDaK32fC32f.argtypes = [ctypes.c_void_p]
 
     # granny_types needs these too
     setup_dll_types(dll)
@@ -426,9 +437,261 @@ def read_mesh_data(mesh_ptr, bone_name_to_idx, dll, debug=False):
 
     return mesh_name, positions, normals, uvs, weights, joints, indices
 
+# ─────────────────────────── Animation extraction ───────────────────────────
+
+TRACK_STRIDE = 60  # granny_transform_track: Name(8)+Flags(4)+3×Curve2(16) = 60
+
+
+def _decode_curve_dak32f(data_ptr, expected_dim):
+    """Decode a DaK32fC32f curve (format=1): float32 knots + float32 controls."""
+    raw = safe_bytes(data_ptr, 28)
+    deg = raw[1]
+    kc = struct.unpack_from('<I', raw, 4)[0]
+    kp = struct.unpack_from('<Q', raw, 8)[0]
+    cc = struct.unpack_from('<I', raw, 16)[0]
+    cp = struct.unpack_from('<Q', raw, 20)[0]
+    if not _valid_ptr(kp) or not _valid_ptr(cp) or kc == 0:
+        return None
+    knots = np.frombuffer(safe_bytes(kp, kc * 4), dtype=np.float32).copy()
+    ctrls = np.frombuffer(safe_bytes(cp, cc * 4), dtype=np.float32).copy()
+    dim = cc // kc if kc > 0 else expected_dim
+    values = ctrls.reshape(kc, dim) if dim > 0 else ctrls
+    return knots, values, deg
+
+
+def _decode_curve(dll, curve2_addr, data_ptr, expected_dim):
+    """
+    Decode a Granny curve. Simple formats are read directly in Python.
+    Quantized formats are converted via GrannyCurveConvertToDaK32fC32f.
+    Returns (knots, values, degree) or None if identity/empty.
+    """
+    if not _valid_ptr(data_ptr):
+        return None
+    fmt = safe_bytes(data_ptr, 1)[0]
+
+    if fmt == 2:  # DaIdentity — no animation
+        return None
+
+    if fmt == 4:  # D3Constant32f
+        vals = np.frombuffer(safe_bytes(data_ptr + 4, 12), dtype=np.float32).copy()
+        return np.array([0.0], dtype=np.float32), vals.reshape(1, 3), 0
+
+    if fmt == 5:  # D4Constant32f
+        vals = np.frombuffer(safe_bytes(data_ptr + 4, 16), dtype=np.float32).copy()
+        return np.array([0.0], dtype=np.float32), vals.reshape(1, 4), 0
+
+    if fmt == 3:  # DaConstant32f (9 floats = 3x3 matrix)
+        vals = np.frombuffer(safe_bytes(data_ptr + 4, 36), dtype=np.float32).copy()
+        return np.array([0.0], dtype=np.float32), vals.reshape(1, 9), 0
+
+    if fmt == 0:  # DaKeyframes32f — implicit integer knots
+        dim = struct.unpack_from('<H', safe_bytes(data_ptr + 2, 2))[0]
+        cc = struct.unpack_from('<I', safe_bytes(data_ptr + 4, 4))[0]
+        cp = struct.unpack_from('<Q', safe_bytes(data_ptr + 8, 8))[0]
+        if not _valid_ptr(cp) or cc == 0 or dim == 0:
+            return None
+        ctrls = np.frombuffer(safe_bytes(cp, cc * 4), dtype=np.float32).copy()
+        n_knots = cc // dim
+        knots = np.arange(n_knots, dtype=np.float32)
+        return knots, ctrls.reshape(n_knots, dim), 0
+
+    if fmt == 1:  # DaK32fC32f — already float32
+        return _decode_curve_dak32f(data_ptr, expected_dim)
+
+    # All other formats: convert via DLL
+    try:
+        sz = dll.GrannyGetResultingDaK32fC32fCurveSize(ctypes.c_void_p(curve2_addr))
+        if sz <= 0:
+            return None
+        buf = (ctypes.c_uint8 * sz)()
+        ret = dll.GrannyCurveConvertToDaK32fC32f(
+            ctypes.c_void_p(curve2_addr), ctypes.cast(buf, ctypes.c_void_p))
+        if not ret:
+            return None
+        conv_data = rq(ret, 8)
+        result = _decode_curve_dak32f(conv_data, expected_dim) if _valid_ptr(conv_data) else None
+        dll.GrannyFreeCurve(ctypes.c_void_p(ret))
+        return result
+    except Exception:
+        return None
+
+
+def _fixup_quaternion_signs(values):
+    """
+    Ensure consecutive quaternions have positive dot product so slerp/lerp
+    takes the short path. Flips quaternions that would cause long-way-around
+    interpolation. Modifies values in-place.
+    """
+    if values.shape[-1] != 4 or len(values) < 2:
+        return
+    flip = 1.0
+    for i in range(len(values) - 1):
+        q0 = values[i]
+        q1 = values[i + 1] * flip
+        dot = np.dot(q0, q1)
+        if dot < 0.0:
+            flip = -flip
+        values[i + 1] *= flip
+
+
+def _postprocess_track(track):
+    """
+    Apply LSLib-style post-processing to an animation track:
+    1. Quaternion sign fixup (prevents slerp long-path jitter)
+    2. Merge adjacent keyframes within 4ms
+    3. Remove trivial keyframes that lie on the interpolation path
+    """
+    # Quaternion sign fixup on orientation curves
+    if track['orient'] is not None:
+        knots, values, deg = track['orient']
+        if values.shape[-1] == 4 and len(knots) > 1:
+            _fixup_quaternion_signs(values)
+
+    # Merge adjacent frames (within 4ms) for each curve type
+    for key in ('orient', 'pos', 'scale'):
+        curve = track[key]
+        if curve is None:
+            continue
+        knots, values, deg = curve
+        if len(knots) < 2:
+            continue
+        # Find indices to keep (merge duplicates within 0.004s)
+        keep = [0]
+        for i in range(1, len(knots)):
+            if knots[i] - knots[keep[-1]] >= 0.004:
+                keep.append(i)
+        if len(keep) < len(knots):
+            track[key] = (knots[keep], values[keep], deg)
+
+    # Remove trivial translation keyframes (on the linear interpolation path)
+    if track['pos'] is not None:
+        knots, values, deg = track['pos']
+        if len(knots) > 2 and values.shape[-1] == 3:
+            keep = [0]
+            for i in range(1, len(knots) - 1):
+                t0, t1, t2 = knots[keep[-1]], knots[i], knots[min(i+1, len(knots)-1)]
+                if t2 == t0:
+                    keep.append(i)
+                    continue
+                alpha = (t1 - t0) / (t2 - t0)
+                lerped = values[keep[-1]] * (1 - alpha) + values[min(i+1, len(values)-1)] * alpha
+                if np.linalg.norm(values[i] - lerped) >= 0.001:
+                    keep.append(i)
+            keep.append(len(knots) - 1)
+            if len(keep) < len(knots):
+                track['pos'] = (knots[keep], values[keep], deg)
+
+    # Remove trivial rotation keyframes (on the slerp path)
+    if track['orient'] is not None:
+        knots, values, deg = track['orient']
+        if len(knots) > 2 and values.shape[-1] == 4:
+            all_trivial = True
+            for i in range(1, len(knots) - 1):
+                t0, t1, t2 = knots[0], knots[i], knots[-1]
+                alpha = (t1 - t0) / (t2 - t0) if t2 != t0 else 0
+                # Simple lerp approximation of slerp for small angles
+                lerped = values[0] * (1 - alpha) + values[-1] * alpha
+                lerped /= max(np.linalg.norm(lerped), 1e-10)
+                if np.linalg.norm(values[i] - lerped) >= 0.001:
+                    all_trivial = False
+                    break
+            if all_trivial and np.linalg.norm(values[0] - values[-1]) < 0.0001:
+                # All intermediate are trivial and endpoints match — reduce to single
+                track['orient'] = (knots[:1], values[:1], deg)
+
+
+def extract_animations(dll, gpk_entries, sdb_bytes, anim_filter=None):
+    """
+    Extract animation data from all non-mesh GPK entries.
+    Returns list of dicts with name, duration, and decoded track data.
+    """
+    animations = []
+    sdb_buf = ctypes.create_string_buffer(sdb_bytes)
+    sdb_file = dll.GrannyReadEntireFileFromMemory(len(sdb_bytes), sdb_buf)
+    if not sdb_file:
+        return animations
+    str_db = dll.GrannyGetStringDatabase(sdb_file)
+
+    anim_entries = {k: v for k, v in gpk_entries.items() if not k.endswith('_Mesh')}
+    if anim_filter:
+        pattern = anim_filter.lower()
+        anim_entries = {k: v for k, v in anim_entries.items() if pattern in k.lower()}
+
+    total = len(anim_entries)
+    print(f"  Processing {total} animation entries" +
+          (f" (filtered by '{anim_filter}')" if anim_filter else ""))
+
+    for idx, (entry_name, gr2_bytes) in enumerate(anim_entries.items()):
+        gr2_buf = ctypes.create_string_buffer(gr2_bytes)
+        gr2_file = dll.GrannyReadEntireFileFromMemory(len(gr2_bytes), gr2_buf)
+        if not gr2_file:
+            continue
+        dll.GrannyRemapFileStrings(gr2_file, str_db)
+        fi = dll.GrannyGetFileInfo(gr2_file)
+        if not fi:
+            dll.GrannyFreeFile(gr2_file)
+            continue
+
+        anim_count = ri(fi, 0x78)
+        if anim_count == 0:
+            dll.GrannyFreeFile(gr2_file)
+            continue
+
+        anim0 = rq(rq(fi, 0x7C), 0)
+        anim_name = read_cstr(rq(anim0, 0))
+        duration = struct.unpack_from('<f', safe_bytes(anim0 + 8, 4))[0]
+        if duration <= 0:
+            dll.GrannyFreeFile(gr2_file)
+            continue
+
+        tg_count = ri(fi, 0x6C)
+        if tg_count == 0:
+            dll.GrannyFreeFile(gr2_file)
+            continue
+        tg0 = rq(rq(fi, 0x70), 0)
+        tt_count = ri(tg0, 0x14)
+        tt_ptr = rq(tg0, 0x18)
+        if tt_count == 0 or not _valid_ptr(tt_ptr):
+            dll.GrannyFreeFile(gr2_file)
+            continue
+
+        tracks = []
+        for ti in range(tt_count):
+            t_base = tt_ptr + ti * TRACK_STRIDE
+            t_name = read_cstr(rq(t_base, 0))
+
+            orient = _decode_curve(dll, t_base + 0x0C, rq(t_base, 0x14), 4)
+            pos    = _decode_curve(dll, t_base + 0x1C, rq(t_base, 0x24), 3)
+            scale  = _decode_curve(dll, t_base + 0x2C, rq(t_base, 0x34), 9)
+
+            if orient is None and pos is None and scale is None:
+                continue
+            track = {'name': t_name, 'orient': orient, 'pos': pos, 'scale': scale}
+            _postprocess_track(track)
+            # Skip if post-processing removed all data
+            if track['orient'] is None and track['pos'] is None and track['scale'] is None:
+                continue
+            tracks.append(track)
+
+        if tracks:
+            animations.append({
+                'name': anim_name or entry_name,
+                'duration': duration,
+                'tracks': tracks,
+            })
+
+        dll.GrannyFreeFile(gr2_file)
+        if (idx + 1) % 50 == 0:
+            print(f"    {idx+1}/{total} processed ({len(animations)} animations)")
+
+    dll.GrannyFreeFile(sdb_file)
+    print(f"  Extracted {len(animations)} animations")
+    return animations
+
+
 # ─────────────────────────── glTF export ─────────────────────────────────────
 
-def build_gltf(character_name, mesh_data_list, mesh_names, bones):
+def build_gltf(character_name, mesh_data_list, mesh_names, bones, animations=None):
     gltf = GLTF2()
     gltf.scene = 0
     gltf.scenes = [Scene(nodes=[])]
@@ -527,6 +790,77 @@ def build_gltf(character_name, mesh_data_list, mesh_names, bones):
     for rn in root_nodes:
         gltf.scenes[0].nodes.append(rn)
 
+    # ── Animations ──
+    if animations:
+        # Build bone name -> node index mapping for animation channel targeting
+        bone_name_to_node = {}
+        for i, bone in enumerate(bones):
+            bone_name_to_node[bone['name']] = bone_node_indices[i]
+            # Also map short name (after last colon)
+            short = bone['name'].split(':')[-1]
+            if short not in bone_name_to_node:
+                bone_name_to_node[short] = bone_node_indices[i]
+
+        for anim_data in animations:
+            anim = Animation(name=anim_data['name'], channels=[], samplers=[])
+
+            for track in anim_data['tracks']:
+                node_idx = bone_name_to_node.get(track['name'])
+                if node_idx is None:
+                    short = track['name'].split(':')[-1]
+                    node_idx = bone_name_to_node.get(short)
+                if node_idx is None:
+                    continue
+
+                # Translation channel
+                if track['pos'] is not None:
+                    knots, values, _ = track['pos']
+                    if len(knots) > 0 and values.shape[-1] == 3:
+                        time_acc = add_accessor(knots.astype(np.float32), FLOAT, SCALAR)
+                        val_acc = add_accessor(values.astype(np.float32), FLOAT, VEC3)
+                        si = len(anim.samplers)
+                        anim.samplers.append(AnimationSampler(
+                            input=time_acc, output=val_acc, interpolation="LINEAR"))
+                        anim.channels.append(AnimationChannel(
+                            sampler=si,
+                            target=AnimationChannelTarget(node=node_idx, path="translation")))
+
+                # Rotation channel (quaternion XYZW — same order as glTF)
+                if track['orient'] is not None:
+                    knots, values, _ = track['orient']
+                    if len(knots) > 0 and values.shape[-1] == 4:
+                        time_acc = add_accessor(knots.astype(np.float32), FLOAT, SCALAR)
+                        val_acc = add_accessor(values.astype(np.float32), FLOAT, VEC4)
+                        si = len(anim.samplers)
+                        anim.samplers.append(AnimationSampler(
+                            input=time_acc, output=val_acc, interpolation="LINEAR"))
+                        anim.channels.append(AnimationChannel(
+                            sampler=si,
+                            target=AnimationChannelTarget(node=node_idx, path="rotation")))
+
+                # Scale channel (extract diagonal from 3x3 matrix, or use 3D directly)
+                if track['scale'] is not None:
+                    knots, values, _ = track['scale']
+                    if len(knots) > 0:
+                        if values.shape[-1] == 9:
+                            # 3x3 matrix → extract diagonal as scale
+                            scale_vals = values[:, [0, 4, 8]]  # M00, M11, M22
+                        elif values.shape[-1] == 3:
+                            scale_vals = values
+                        else:
+                            continue
+                        time_acc = add_accessor(knots.astype(np.float32), FLOAT, SCALAR)
+                        val_acc = add_accessor(scale_vals.astype(np.float32), FLOAT, VEC3)
+                        si = len(anim.samplers)
+                        anim.samplers.append(AnimationSampler(
+                            input=time_acc, output=val_acc, interpolation="LINEAR"))
+                        anim.channels.append(AnimationChannel(
+                            sampler=si,
+                            target=AnimationChannelTarget(node=node_idx, path="scale")))
+
+            if anim.channels:
+                gltf.animations.append(anim)
+
     combined = b''.join(all_buffers)
     gltf.buffers = [Buffer(byteLength=len(combined))]
     gltf.set_binary_blob(combined)
@@ -548,6 +882,10 @@ def main():
     parser.add_argument("-o", "--output", default=None, help="Output .glb path")
     parser.add_argument("--debug", action="store_true",
                         help="Print per-mesh vertex layout and bone binding info")
+    parser.add_argument("--animations", action="store_true",
+                        help="Include animation data from the GPK")
+    parser.add_argument("--anim-filter", default=None,
+                        help="Only export animations matching this pattern (e.g. 'Idle')")
     args = parser.parse_args()
 
     gpk_path = os.path.join(args.gpk_dir, f"{args.name}.gpk")
@@ -606,10 +944,20 @@ def main():
         mesh_data_list.append((positions, normals, uvs, weights, joints, indices))
         mesh_names.append(mesh_name)
 
-    print(f"[5/5] Building glTF -> {out_path}")
-    gltf = build_gltf(args.name, mesh_data_list, mesh_names, bones)
+    # ── Animations ──
+    anim_data = None
+    if args.animations or args.anim_filter:
+        print(f"[5/6] Extracting animations")
+        anim_data = extract_animations(dll, entries, sdb_bytes, anim_filter=args.anim_filter)
+    else:
+        print(f"[5/6] Animations: skipped (use --animations to include)")
+
+    step = "6/6" if (args.animations or args.anim_filter) else "5/5"
+    print(f"[{step}] Building glTF -> {out_path}")
+    gltf = build_gltf(args.name, mesh_data_list, mesh_names, bones, animations=anim_data)
     gltf.save(out_path)
-    print(f"\nDone!  {len(mesh_data_list)} meshes, {len(bones)} bones -> {out_path}")
+    anim_msg = f", {len(anim_data)} animations" if anim_data else ""
+    print(f"\nDone!  {len(mesh_data_list)} meshes, {len(bones)} bones{anim_msg} -> {out_path}")
 
     dll.GrannyFreeFile(gr2_file)
     dll.GrannyFreeFile(sdb_file)
