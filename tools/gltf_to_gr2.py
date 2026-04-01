@@ -786,6 +786,12 @@ def _apply_patch(glb_m: dict, gm: dict, strict: bool,
 
     vbuf = build_vertex_buffer_40(glb_m, fallback_normals=fallback_nrm)
 
+    # Validate vertex count fits in uint16 indices (engine limit)
+    if vc_glb > 65535:
+        print(f"  ERROR: {glb_m['name']!r} has {vc_glb} vertices — exceeds engine limit "
+              f"of 65,535 (uint16 index buffer). Reduce polygon count.")
+        return False
+
     # Validate indices are within vertex bounds
     glb_indices = glb_m.get('indices')
     if glb_indices is not None and len(glb_indices) > 0:
