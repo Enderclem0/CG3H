@@ -140,11 +140,19 @@ class App:
 
         self.exp_all_lods   = tk.BooleanVar(value=False)
         self.exp_animations = tk.BooleanVar(value=False)
+        self.exp_anim_filter = tk.StringVar()
         self.exp_debug_scan = tk.BooleanVar(value=False)
         ttk.Checkbutton(box, text="Export all LODs (includes lower-resolution duplicates)",
                         variable=self.exp_all_lods).pack(anchor=tk.W, pady=2)
         ttk.Checkbutton(box, text="Include animations (slow \u2014 can take several minutes per model)",
                         variable=self.exp_animations).pack(anchor=tk.W, pady=2)
+        anim_row = ttk.Frame(box)
+        anim_row.pack(fill=tk.X, pady=(0, 4), padx=(20, 0))
+        ttk.Label(anim_row, text="Filter:", foreground="#555").pack(side=tk.LEFT)
+        ttk.Entry(anim_row, textvariable=self.exp_anim_filter, width=24).pack(
+            side=tk.LEFT, padx=4)
+        ttk.Label(anim_row, text="e.g. Idle, Attack, NoWeapon  (blank = all)",
+                  foreground="#888", font=("", 8)).pack(side=tk.LEFT)
         ttk.Checkbutton(box, text="Debug scan (print BoneBinding trace in log)",
                         variable=self.exp_debug_scan).pack(anchor=tk.W, pady=2)
 
@@ -217,9 +225,10 @@ class App:
                   foreground="#888").pack(side=tk.LEFT)
 
         # Checkboxes
-        self.imp_positional = tk.BooleanVar(value=False)
-        self.imp_topology   = tk.BooleanVar(value=False)
-        self.imp_save_gr2   = tk.BooleanVar(value=False)
+        self.imp_positional  = tk.BooleanVar(value=False)
+        self.imp_topology    = tk.BooleanVar(value=False)
+        self.imp_patch_anims = tk.BooleanVar(value=False)
+        self.imp_save_gr2    = tk.BooleanVar(value=False)
 
         ttk.Checkbutton(
             box,
@@ -229,6 +238,12 @@ class App:
         ttk.Label(box, text="    Enables different vertex/triangle counts between GLB and GR2.\n"
                   "    Without this, vertex count must match exactly.",
                   foreground="#888", font=("", 8)).pack(anchor=tk.W, pady=(0, 6))
+
+        ttk.Checkbutton(
+            box,
+            text="Patch animations \u2014 import modified animation data from GLB",
+            variable=self.imp_patch_anims,
+        ).pack(anchor=tk.W, pady=(2, 6))
 
         ttk.Checkbutton(
             box,
@@ -537,6 +552,9 @@ class App:
                 cmd.append("--all-lods")
             if self.exp_animations.get():
                 cmd.append("--animations")
+                anim_filter = self.exp_anim_filter.get().strip()
+                if anim_filter:
+                    cmd += ["--anim-filter", anim_filter]
             if self.exp_debug_scan.get():
                 cmd.append("--debug")
 
@@ -647,6 +665,8 @@ class App:
             cmd.append("--positional")
         if self.imp_topology.get():
             cmd.append("--allow-topology-change")
+        if self.imp_patch_anims.get():
+            cmd.append("--patch-animations")
         if self.imp_save_gr2.get():
             cmd += ["--output-gr2", os.path.join(out_dir, f"{character}_mod.gr2")]
 

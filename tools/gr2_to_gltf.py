@@ -675,7 +675,8 @@ def extract_animations(dll, gpk_entries, sdb_bytes, anim_filter=None):
 
         if tracks:
             animations.append({
-                'name': anim_name or entry_name,
+                'name': entry_name,          # GPK entry name (stable, used for roundtrip matching)
+                'granny_name': anim_name,    # internal Granny name (for reference)
                 'duration': duration,
                 'tracks': tracks,
             })
@@ -804,7 +805,10 @@ def build_gltf(character_name, mesh_data_list, mesh_names, bones, animations=Non
         total_anims = len(animations)
         print(f"  Building {total_anims} animation(s) into glTF...", flush=True)
         for anim_idx, anim_data in enumerate(animations):
-            anim = Animation(name=anim_data['name'], channels=[], samplers=[])
+            anim = Animation(
+                name=anim_data['name'], channels=[], samplers=[],
+                extras={'granny_name': anim_data.get('granny_name', '')},
+            )
 
             for track in anim_data['tracks']:
                 node_idx = bone_name_to_node.get(track['name'])

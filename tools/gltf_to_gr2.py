@@ -171,6 +171,241 @@ def parse_glb(glb_path: str) -> list[dict]:
     return meshes_out
 
 
+def parse_glb_animations(glb_path: str) -> dict:
+    """
+    Parse animation channels from a .glb file.
+    Returns dict: {animation_name: {bone_name: {path: (times, values)}}}
+    Where path is 'translation', 'rotation', or 'scale'.
+    """
+    gltf = pygltflib.GLTF2().load(glb_path)
+    blob = bytes(gltf.binary_blob())
+
+    if not gltf.animations:
+        return {}
+
+    result = {}
+    for anim in gltf.animations:
+        tracks = {}
+        for channel in anim.channels:
+            node_idx = channel.target.node
+            if node_idx is None or node_idx >= len(gltf.nodes):
+                continue
+            bone_name = gltf.nodes[node_idx].name
+            path = channel.target.path  # "translation", "rotation", "scale"
+
+            sampler = anim.samplers[channel.sampler]
+            times = _accessor_to_numpy(gltf, blob, sampler.input).flatten().astype(np.float32)
+            values = _accessor_to_numpy(gltf, blob, sampler.output).astype(np.float32)
+
+            if bone_name not in tracks:
+                tracks[bone_name] = {}
+            tracks[bone_name][path] = (times, values)
+
+        if tracks:
+            result[anim.name] = tracks
+
+    return result
+
+
+ANIM_TRACK_STRIDE = 60  # granny_transform_track: Name(8)+Flags(4)+3×Curve2(16)
+
+
+def _build_dak32f_curve(knots, controls, degree=2):
+    """
+    Build a DaK32fC32f curve data struct in Python memory.
+    Returns (curve_data_buf, knots_buf, controls_buf) — all must be kept alive.
+
+    Layout at curve_data_buf:
+      +0x00: Format(u8)=1, Degree(u8), Padding(u16)=0
+      +0x04: Knots {count(i32), ptr(u64)}
+      +0x10: Controls {count(i32), ptr(u64)}
+    """
+    knots_f32 = np.ascontiguousarray(knots, dtype=np.float32)
+    ctrls_f32 = np.ascontiguousarray(controls.flatten(), dtype=np.float32)
+
+    knots_buf = (ctypes.c_uint8 * knots_f32.nbytes)()
+    ctypes.memmove(knots_buf, knots_f32.tobytes(), knots_f32.nbytes)
+
+    ctrls_buf = (ctypes.c_uint8 * ctrls_f32.nbytes)()
+    ctypes.memmove(ctrls_buf, ctrls_f32.tobytes(), ctrls_f32.nbytes)
+
+    data_buf = (ctypes.c_uint8 * 28)()
+    data_buf[0] = 1       # Format = DaK32fC32f
+    data_buf[1] = degree   # Degree
+    # +0x02: padding = 0 (already zero)
+    struct.pack_into('<I', data_buf, 4, len(knots_f32))
+    struct.pack_into('<Q', data_buf, 8, ctypes.addressof(knots_buf))
+    struct.pack_into('<I', data_buf, 16, len(ctrls_f32))
+    struct.pack_into('<Q', data_buf, 20, ctypes.addressof(ctrls_buf))
+
+    return data_buf, knots_buf, ctrls_buf
+
+
+def _fixup_quat_signs(values):
+    """Ensure consecutive quaternions have positive dot product."""
+    if len(values) < 2 or values.shape[-1] != 4:
+        return
+    flip = 1.0
+    for i in range(len(values) - 1):
+        if np.dot(values[i], values[i + 1] * flip) < 0:
+            flip = -flip
+        values[i + 1] *= flip
+
+
+def patch_animation_entries(dll, gpk_entries, sdb_bytes, glb_animations):
+    """
+    Patch animation entries in the GPK using data from glTF animations.
+    glb_animations: dict from parse_glb_animations().
+    Returns number of patched entries.
+    """
+    if not glb_animations:
+        return 0
+
+    # Resolve DaK32fC32f type pointer from DLL symbol
+    try:
+        sym_addr = ctypes.c_void_p.in_dll(dll, 'GrannyCurveDataDaK32fC32fType').value
+        dak32f_type_ptr = sym_addr
+    except (ValueError, AttributeError):
+        print("  WARNING: Could not resolve GrannyCurveDataDaK32fC32fType — skipping animations")
+        return 0
+
+    sdb_buf = ctypes.create_string_buffer(sdb_bytes)
+    sdb_file = dll.GrannyReadEntireFileFromMemory(len(sdb_bytes), sdb_buf)
+    if not sdb_file:
+        return 0
+    str_db = dll.GrannyGetStringDatabase(sdb_file)
+
+    patched = 0
+    anim_entries = {k: v for k, v in gpk_entries.items() if not k.endswith('_Mesh')}
+
+    # Build lookup tables for matching GLB animation names to GPK entries.
+    # Primary: exact match by GPK entry name (from our exporter).
+    # Fallback: normalized match stripping Blender suffixes (_Skin, .001).
+    import re as _re
+    def _norm_anim_name(name):
+        n = name
+        for suffix in ('_Melinoe_Skin', '_Armature', '_Skin'):
+            if n.endswith(suffix):
+                n = n[:-len(suffix)]
+                break
+        n = _re.sub(r'\.\d{3,}$', '', n)
+        return n
+
+    glb_by_exact = dict(glb_animations)  # exact name match
+    glb_by_norm = {}                      # normalized fallback
+    for glb_name, tracks in glb_animations.items():
+        norm = _norm_anim_name(glb_name)
+        if norm not in glb_by_norm:
+            glb_by_norm[norm] = tracks
+
+    total = len(anim_entries)
+    for idx, (entry_name, gr2_bytes) in enumerate(anim_entries.items()):
+        gr2_buf = ctypes.create_string_buffer(gr2_bytes)
+        gr2_file = dll.GrannyReadEntireFileFromMemory(len(gr2_bytes), gr2_buf)
+        if not gr2_file:
+            continue
+        dll.GrannyRemapFileStrings(gr2_file, str_db)
+        fi = dll.GrannyGetFileInfo(gr2_file)
+        if not fi:
+            dll.GrannyFreeFile(gr2_file)
+            continue
+
+        anim_count = ri(fi, 0x78)
+        if anim_count == 0:
+            dll.GrannyFreeFile(gr2_file)
+            continue
+
+        anim0 = rq(rq(fi, 0x7C), 0)
+        anim_name = read_cstr(rq(anim0, 0))
+
+        # Match GLB animation: try GPK entry name (exact), then internal name, then normalized
+        glb_tracks = (glb_by_exact.get(entry_name)
+                      or glb_by_exact.get(anim_name)
+                      or glb_by_norm.get(entry_name)
+                      or glb_by_norm.get(anim_name)
+                      or glb_by_norm.get(_norm_anim_name(anim_name)))
+        if glb_tracks is None:
+            dll.GrannyFreeFile(gr2_file)
+            continue
+
+        # Walk transform tracks and patch matching curves
+        tg_count = ri(fi, 0x6C)
+        if tg_count == 0:
+            dll.GrannyFreeFile(gr2_file)
+            continue
+        tg0 = rq(rq(fi, 0x70), 0)
+        tt_count = ri(tg0, 0x14)
+        tt_ptr = rq(tg0, 0x18)
+        if tt_count == 0 or not _valid_ptr(tt_ptr):
+            dll.GrannyFreeFile(gr2_file)
+            continue
+
+        tracks_patched = 0
+        for ti in range(tt_count):
+            t_base = tt_ptr + ti * ANIM_TRACK_STRIDE
+            t_name = read_cstr(rq(t_base, 0))
+
+            # Find matching GLB track data (try full name, then short name)
+            bone_data = glb_tracks.get(t_name)
+            if bone_data is None:
+                short = t_name.split(':')[-1]
+                bone_data = glb_tracks.get(short)
+            if bone_data is None:
+                continue
+
+            # Patch each curve type
+            for path, coff, dim in [('rotation', 0x0C, 4),
+                                     ('translation', 0x1C, 3),
+                                     ('scale', 0x2C, 3)]:
+                if path not in bone_data:
+                    continue
+                times, values = bone_data[path]
+                if len(times) == 0:
+                    continue
+
+                # Handle scale: GLB has VEC3, Granny expects 3x3 matrix (9 floats)
+                if path == 'scale' and values.shape[-1] == 3:
+                    # Convert diagonal VEC3 to 3x3 identity-based matrix
+                    mat_values = np.zeros((len(values), 9), dtype=np.float32)
+                    mat_values[:, 0] = values[:, 0]  # M00
+                    mat_values[:, 4] = values[:, 1]  # M11
+                    mat_values[:, 8] = values[:, 2]  # M22
+                    values = mat_values
+                    dim = 9
+
+                # Quaternion sign fixup
+                if path == 'rotation' and values.shape[-1] == 4:
+                    _fixup_quat_signs(values)
+
+                # Build new DaK32fC32f curve
+                data_buf, knots_buf, ctrls_buf = _build_dak32f_curve(times, values, degree=2)
+                _keepalive.extend([data_buf, knots_buf, ctrls_buf])
+
+                # Patch the curve2 variant: type_ptr at +coff, data_ptr at +coff+8
+                struct.pack_into('<Q', (ctypes.c_uint8 * 8).from_address(t_base + coff),
+                                 0, dak32f_type_ptr)
+                struct.pack_into('<Q', (ctypes.c_uint8 * 8).from_address(t_base + coff + 8),
+                                 0, ctypes.addressof(data_buf))
+
+            tracks_patched += 1
+
+        if tracks_patched > 0:
+            # Serialize the patched animation back to GR2 bytes
+            section_count = struct.unpack_from('<I', gr2_bytes, 0x20)[0]
+            new_gr2 = build_gr2_bytes(dll, fi, gr2_bytes, {}, 0)
+            gpk_entries[entry_name] = new_gr2
+            patched += 1
+
+        dll.GrannyFreeFile(gr2_file)
+
+        if (idx + 1) % 25 == 0 or idx + 1 == total:
+            print(f"    {idx+1}/{total} entries scanned ({patched} patched)", flush=True)
+
+    dll.GrannyFreeFile(sdb_file)
+    _keepalive.clear()
+    return patched
+
+
 # ── Vertex buffer builder ─────────────────────────────────────────────────────
 
 def build_vertex_buffer_40(m: dict, fallback_normals: np.ndarray = None) -> bytes:
@@ -988,10 +1223,16 @@ def convert(
     strict: bool = False,
     positional: bool = False,
     allow_topology_change: bool = False,
+    patch_animations: bool = False,
 ) -> None:
     print(f"[1/6] Parsing GLB: {glb_path}")
     glb_meshes = parse_glb(glb_path)
     print(f"  Found {len(glb_meshes)} mesh(es) in GLB")
+
+    glb_animations = {}
+    if patch_animations:
+        glb_animations = parse_glb_animations(glb_path)
+        print(f"  Found {len(glb_animations)} animation(s) in GLB")
 
     print(f"[2/6] Extracting GPK: {gpk_path}")
     gpk_entries = extract_gpk(gpk_path)
@@ -1049,8 +1290,17 @@ def convert(
 
     # Replace the mesh entry in the GPK, keep all other entries unchanged
     gpk_entries[entry_name] = new_gr2_bytes
+
+    # Patch animation entries if requested
+    n_anim_patched = 0
+    if glb_animations:
+        print(f"[7/7] Patching animation entries")
+        n_anim_patched = patch_animation_entries(dll, gpk_entries, sdb_bytes, glb_animations)
+        print(f"  {n_anim_patched} animation(s) patched")
+
     pack_gpk(gpk_entries, output_gpk)
-    print(f"\nDone!  {n_patched} mesh(es) patched -> {output_gpk!r}")
+    anim_msg = f", {n_anim_patched} animation(s)" if n_anim_patched else ""
+    print(f"\nDone!  {n_patched} mesh(es){anim_msg} patched -> {output_gpk!r}")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -1079,6 +1329,9 @@ def main():
                         help='Allow different vertex/triangle counts between GLB and GR2. '
                              'Enables sculpting, subdivide, decimate, and other mesh edits '
                              'that change topology. EXPERIMENTAL.')
+    parser.add_argument('--patch-animations', action='store_true',
+                        help='Also patch animation entries if the GLB contains animations. '
+                             'Matches by animation name. EXPERIMENTAL.')
     args = parser.parse_args()
 
     out_gpk = args.output_gpk or args.gpk.replace('.gpk', '_mod.gpk')
@@ -1096,6 +1349,7 @@ def main():
         strict=args.strict,
         positional=args.positional,
         allow_topology_change=args.allow_topology_change,
+        patch_animations=args.patch_animations,
     )
 
 
