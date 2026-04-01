@@ -1,6 +1,9 @@
 # CG3H — Custom Geometry 3D for Hades II
 
+[![Release](https://img.shields.io/github/v/release/Enderclem0/CG3H)](https://github.com/Enderclem0/CG3H/releases)
+
 Extract, edit, and repack 3D models for Hades II (Supergiant Games).
+Reshape characters, paint bone weights, add/remove geometry, and install mods — all from Blender or the standalone GUI.
 
 ## What Works
 
@@ -29,11 +32,11 @@ Extract, edit, and repack 3D models for Hades II (Supergiant Games).
 | **Textures** | Not stored in GR2 files (separate engine asset pipeline) |
 | **Animations** | Complex Granny curve formats, separate from mesh data |
 
-## Known Issues
+## Limits
 
-- **Mesh clipping at camera edges** (mitigated): The importer recomputes per-bone
-  bounding boxes after patching, but extreme deformations may still cause
-  edge-case culling. Keep edits closer to the original silhouette if you see clipping.
+- **65,535 vertices max per mesh** — engine uses uint16 index buffers. The tool rejects meshes over this limit.
+- **Scaling mesh without skeleton** causes animation stretching — bones still pivot at original positions. This is expected; skeleton editing is not yet supported.
+- **Extreme deformations** may cause edge-case frustum culling artifacts despite OBB recomputation.
 
 ## Requirements
 
