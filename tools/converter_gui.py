@@ -243,7 +243,15 @@ class App:
             box,
             text="Patch animations \u2014 import modified animation data from GLB",
             variable=self.imp_patch_anims,
-        ).pack(anchor=tk.W, pady=(2, 6))
+        ).pack(anchor=tk.W, pady=(2, 0))
+        anim_patch_row = ttk.Frame(box)
+        anim_patch_row.pack(fill=tk.X, pady=(0, 6), padx=(20, 0))
+        ttk.Label(anim_patch_row, text="Filter:", foreground="#555").pack(side=tk.LEFT)
+        self.imp_anim_filter = tk.StringVar()
+        ttk.Entry(anim_patch_row, textvariable=self.imp_anim_filter, width=28).pack(
+            side=tk.LEFT, padx=4)
+        ttk.Label(anim_patch_row, text="required \u2014 e.g. NoWeapon_Base_Idle_00",
+                  foreground="#888", font=("", 8)).pack(side=tk.LEFT)
 
         ttk.Checkbutton(
             box,
@@ -667,6 +675,9 @@ class App:
             cmd.append("--allow-topology-change")
         if self.imp_patch_anims.get():
             cmd.append("--patch-animations")
+            anim_filter = self.imp_anim_filter.get().strip()
+            if anim_filter:
+                cmd += ["--anim-patch-filter", anim_filter]
         if self.imp_save_gr2.get():
             cmd += ["--output-gr2", os.path.join(out_dir, f"{character}_mod.gr2")]
 
