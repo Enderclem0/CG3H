@@ -1471,6 +1471,25 @@ def patch_vertex_data(
                     struct.pack_into('<Q', (ctypes.c_uint8 * 8).from_address(fi + _meshes_off + 4),
                                      0, ctypes.addressof(new_arr))
 
+                    # Also expand Model[0]->MeshBindings so the game renders it
+                    model_count = ri(fi, 0x60)
+                    if model_count > 0:
+                        model0 = rq(rq(fi, 0x64), 0)
+                        # MeshBindings at model+0x54 (after Name(8)+Skeleton(8)+Transform(68))
+                        mb_off = 0x54
+                        old_mb_count = ri(model0, mb_off)
+                        old_mb_ptr = rq(model0, mb_off + 4)
+                        new_mb_count = old_mb_count + 1
+                        new_mb_arr = (ctypes.c_uint8 * (new_mb_count * 8))()
+                        if _valid_ptr(old_mb_ptr):
+                            ctypes.memmove(new_mb_arr, old_mb_ptr, old_mb_count * 8)
+                        struct.pack_into('<Q', new_mb_arr, old_mb_count * 8, new_mesh_ptr)
+                        _keepalive.append(new_mb_arr)
+                        struct.pack_into('<i', (ctypes.c_uint8 * 4).from_address(model0 + mb_off),
+                                         0, new_mb_count)
+                        struct.pack_into('<Q', (ctypes.c_uint8 * 8).from_address(model0 + mb_off + 4),
+                                         0, ctypes.addressof(new_mb_arr))
+
                     # Refresh mesh list for subsequent iterations
                     gr2_mesh_list = get_gr2_meshes(fi)
                     patched += 1
