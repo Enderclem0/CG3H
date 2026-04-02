@@ -1435,7 +1435,15 @@ def patch_vertex_data(
                 continue
 
             # Use first existing mesh as template + get bone names from its bindings
-            template = gr2_mesh_list[0] if gr2_mesh_list else None
+            # Pick template: prefer body mesh over outline (outline uses a
+            # different material/shader that renders behind the character)
+            template = None
+            for _gm in gr2_mesh_list:
+                if 'Outline' not in _gm['name'] and 'Shadow' not in _gm['name']:
+                    template = _gm
+                    break
+            if template is None:
+                template = gr2_mesh_list[0] if gr2_mesh_list else None
             if template is None:
                 print(f"  ERROR: No existing mesh to use as template — cannot add new meshes")
                 continue
