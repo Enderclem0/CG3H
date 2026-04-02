@@ -248,6 +248,101 @@ def _build_dak32f_curve(knots, controls, degree=2):
     return data_buf, knots_buf, ctrls_buf
 
 
+def _patch_quantized_curve_inplace(dll, curve2_addr, data_ptr, new_values_xyzw):
+    """
+    Patch a DaK8uC8u (fmt=9) or DaK16uC16u (fmt=8) curve IN PLACE.
+
+    Instead of allocating a new DaK32fC32f curve (which changes format and
+    breaks SDB string remapping), this modifies the uint8/uint16 control bytes
+    in the original KC buffer using the existing scale/offset.
+
+    new_values_xyzw: float32 array (N, 4) of XYZW quaternions. Only XYZ is
+    stored (W is derived). N must match the original knot count.
+
+    Returns True if patched, False if format not supported or mismatch.
+    """
+    if not _valid_ptr(data_ptr):
+        return False
+
+    fmt = safe_bytes(data_ptr, 1)[0]
+    if fmt not in (8, 9):
+        return False
+
+    is_16bit = (fmt == 8)
+    dtype = np.uint16 if is_16bit else np.uint8
+    max_val = 65535.0 if is_16bit else 255.0
+    bytes_per = 2 if is_16bit else 1
+
+    # Read KC {count, ptr} at data_ptr + 0x08
+    kc_count = struct.unpack_from('<I', safe_bytes(data_ptr + 8, 4))[0]
+    kc_ptr = struct.unpack_from('<Q', safe_bytes(data_ptr + 12, 8))[0]
+    if not _valid_ptr(kc_ptr) or kc_count == 0:
+        return False
+
+    dim = 3  # quaternion stored as XYZ
+    n_knots = kc_count // (dim + 1)
+    if n_knots == 0 or n_knots != len(new_values_xyzw):
+        return False
+
+    # Read the original KC data
+    kc_data = np.frombuffer(safe_bytes(kc_ptr, kc_count * bytes_per), dtype=dtype).copy()
+    ctrl_start = n_knots  # controls start after knots
+    orig_ctrls = kc_data[ctrl_start:].reshape(n_knots, dim)
+
+    # Convert the original uint controls to float using the DLL converter
+    # to get the exact scale/offset the original uses
+    sz = dll.GrannyGetResultingDaK32fC32fCurveSize(ctypes.c_void_p(curve2_addr))
+    if sz <= 0:
+        return False
+    buf = (ctypes.c_uint8 * sz)()
+    ret = dll.GrannyCurveConvertToDaK32fC32f(
+        ctypes.c_void_p(curve2_addr), ctypes.cast(buf, ctypes.c_void_p))
+    if not ret:
+        return False
+    conv_data = rq(ret, 8)
+    if not _valid_ptr(conv_data):
+        dll.GrannyFreeCurve(ctypes.c_void_p(ret))
+        return False
+    conv_raw = safe_bytes(conv_data, 28)
+    conv_kc = struct.unpack_from('<I', conv_raw, 4)[0]
+    conv_cc = struct.unpack_from('<I', conv_raw, 16)[0]
+    conv_cp = struct.unpack_from('<Q', conv_raw, 20)[0]
+    if conv_kc != n_knots or not _valid_ptr(conv_cp):
+        dll.GrannyFreeCurve(ctypes.c_void_p(ret))
+        return False
+    orig_floats = np.frombuffer(safe_bytes(conv_cp, conv_cc * 4),
+                                dtype=np.float32).copy().reshape(conv_kc, 4)
+    dll.GrannyFreeCurve(ctypes.c_void_p(ret))
+
+    # Compute per-component scale and offset from original data
+    # value = uint_ctrl * scale + offset → uint_ctrl = (value - offset) / scale
+    new_ctrls = np.zeros((n_knots, dim), dtype=dtype)
+    for comp in range(dim):
+        orig_bytes = orig_ctrls[:, comp].astype(np.float64)
+        orig_vals = orig_floats[:, comp].astype(np.float64)
+
+        # Least-squares to find scale, offset
+        A = np.column_stack([orig_bytes, np.ones_like(orig_bytes)])
+        result = np.linalg.lstsq(A, orig_vals, rcond=None)
+        scale, offset = result[0]
+
+        if abs(scale) < 1e-15:
+            new_ctrls[:, comp] = orig_ctrls[:, comp]
+            continue
+
+        # Encode new values (XYZ only, index comp from XYZW)
+        new_vals = new_values_xyzw[:, comp].astype(np.float64)
+        encoded = np.round((new_vals - offset) / scale)
+        encoded = np.clip(encoded, 0, max_val)
+        new_ctrls[:, comp] = encoded.astype(dtype)
+
+    # Write new control bytes back to the original KC buffer
+    new_kc = kc_data.copy()
+    new_kc[ctrl_start:] = new_ctrls.flatten()
+    ctypes.memmove(kc_ptr, new_kc.tobytes(), len(new_kc) * bytes_per)
+    return True
+
+
 def _fixup_quat_signs(values):
     """Ensure consecutive quaternions have positive dot product."""
     if len(values) < 2 or values.shape[-1] != 4:
@@ -356,7 +451,9 @@ def patch_animation_entries(dll, gpk_entries, sdb_bytes, glb_animations,
             dll.GrannyFreeFile(gr2_file)
             continue
 
-        track_patches = []
+        tracks_modified = 0
+        needs_reserialize = False
+
         for ti in range(tt_count):
             t_base = tt_ptr + ti * ANIM_TRACK_STRIDE
             t_name = read_cstr(rq(t_base, 0))
@@ -388,18 +485,28 @@ def patch_animation_entries(dll, gpk_entries, sdb_bytes, glb_animations,
                 if path == 'rotation' and values.shape[-1] == 4:
                     _fixup_quat_signs(values)
 
-                track_patches.append((t_base, coff, times, values))
+                # Try in-place quantized patching first (preserves original format)
+                if path == 'rotation' and values.shape[-1] == 4:
+                    data_p = rq(t_base, coff + 8)
+                    if _valid_ptr(data_p) and safe_bytes(data_p, 1)[0] in (8, 9):
+                        if _patch_quantized_curve_inplace(dll, t_base + coff, data_p, values):
+                            tracks_modified += 1
+                            continue  # patched in-place, no reserialization needed
 
-        if track_patches:
-            # Apply all patches for this animation
-            for t_base, coff, times, values in track_patches:
+                # Fallback: allocate new DaK32fC32f curve
                 data_buf, knots_buf, ctrls_buf = _build_dak32f_curve(times, values, degree=2)
                 _keepalive.extend([data_buf, knots_buf, ctrls_buf])
                 struct.pack_into('<Q', (ctypes.c_uint8 * 8).from_address(t_base + coff),
                                  0, dak32f_type_ptr)
                 struct.pack_into('<Q', (ctypes.c_uint8 * 8).from_address(t_base + coff + 8),
                                  0, ctypes.addressof(data_buf))
+                tracks_modified += 1
+                needs_reserialize = True
 
+        if tracks_modified > 0:
+            # Only re-serialize if we used DaK32fC32f fallback (changed format).
+            # In-place patches modify the existing buffer directly — serialize always
+            # to capture the changes in the output GR2.
             new_gr2 = build_gr2_bytes(dll, fi, gr2_bytes, {}, 0)
             gpk_entries[entry_name] = new_gr2
             patched += 1
