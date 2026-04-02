@@ -1268,7 +1268,72 @@ def _create_new_mesh(dll, fi, glb_m, skeleton_bones, template_mesh):
     _keepalive.append(name_buf)
     struct.pack_into('<Q', mesh_buf, 0x00, ctypes.addressof(name_buf))
 
-    # ── Build + replace vertex buffer ──
+    # ── Build BoneBindings FIRST (needed to remap vertex bone indices) ──
+    bb_entries = []
+    bb_name_list = []  # ordered list of bone names in our bindings
+    bone_palette = glb_m.get('bone_palette') or []
+    bj_u8 = glb_m.get('bj_u8')
+    skel_name_set = set(skeleton_bones)
+
+    for bp_idx, bp_name in enumerate(bone_palette):
+        matched = bp_name if bp_name in skel_name_set else None
+        if matched is None:
+            short = bp_name.split(':')[-1]
+            matched = next((s for s in skeleton_bones if s.split(':')[-1] == short), None)
+        if matched is None:
+            continue
+
+        if bj_u8 is not None:
+            mask = np.any(bj_u8 == bp_idx, axis=1)
+            pos = glb_m['positions'][mask] if np.any(mask) else glb_m['positions'][:1]
+        else:
+            pos = glb_m['positions']
+        obb_min = pos.min(axis=0).astype(np.float32)
+        obb_max = pos.max(axis=0).astype(np.float32)
+
+        bb = (ctypes.c_uint8 * 44)()
+        bn_bytes = matched.encode('utf-8') + b'\x00'
+        bn_buf = (ctypes.c_uint8 * len(bn_bytes))(*bn_bytes)
+        _keepalive.append(bn_buf)
+        struct.pack_into('<Q', bb, 0, ctypes.addressof(bn_buf))
+        struct.pack_into('<3f', bb, 8, *obb_min)
+        struct.pack_into('<3f', bb, 20, *obb_max)
+        bb_entries.append(bytes(bb))
+        bb_name_list.append(matched)
+
+    if not bb_entries:
+        bn = (skeleton_bones[0] if skeleton_bones else 'root').encode('utf-8') + b'\x00'
+        bn_buf = (ctypes.c_uint8 * len(bn))(*bn)
+        _keepalive.append(bn_buf)
+        bb = (ctypes.c_uint8 * 44)()
+        struct.pack_into('<Q', bb, 0, ctypes.addressof(bn_buf))
+        struct.pack_into('<3f', bb, 8, *glb_m['positions'].min(axis=0))
+        struct.pack_into('<3f', bb, 20, *glb_m['positions'].max(axis=0))
+        bb_entries.append(bytes(bb))
+        bb_name_list.append(skeleton_bones[0] if skeleton_bones else 'root')
+
+    # ── Remap bone indices: GLB palette index → new BoneBindings index ──
+    glb_m = dict(glb_m)  # don't modify original
+    if bj_u8 is not None and glb_m.get('bw_u8') is not None:
+        # Build remap: glb_palette_idx → bb_entries index
+        remap = np.zeros(len(bone_palette), dtype=np.uint8)
+        for bp_idx, bp_name in enumerate(bone_palette):
+            # Find this bone in our bb_name_list
+            matched = bp_name
+            if matched not in bb_name_list:
+                short = bp_name.split(':')[-1]
+                matched = next((n for n in bb_name_list if n.split(':')[-1] == short), None)
+            if matched and matched in bb_name_list:
+                remap[bp_idx] = bb_name_list.index(matched)
+
+        # Apply remap to all vertices
+        new_bj = np.zeros_like(bj_u8)
+        for j in range(4):
+            col = np.clip(bj_u8[:, j], 0, len(remap) - 1)
+            new_bj[:, j] = remap[col]
+        glb_m['bj_u8'] = new_bj
+
+    # ── Build + replace vertex buffer (now with correct bone indices) ──
     vbuf_bytes = build_vertex_buffer_40(glb_m)
     vbuf = (ctypes.c_uint8 * len(vbuf_bytes))()
     ctypes.memmove(vbuf, vbuf_bytes, len(vbuf_bytes))
@@ -1308,49 +1373,7 @@ def _create_new_mesh(dll, fi, glb_m, skeleton_bones, template_mesh):
         struct.pack_into('<Q', topo_buf, 0x04, ctypes.addressof(grp_buf))
     struct.pack_into('<Q', mesh_buf, 0x1C, ctypes.addressof(topo_buf))
 
-    # ── Build + replace BoneBindings ──
-    bb_entries = []
-    bone_palette = glb_m.get('bone_palette') or []
-    bj_u8 = glb_m.get('bj_u8')
-    skel_name_set = set(skeleton_bones)
-
-    for bp_idx, bp_name in enumerate(bone_palette):
-        matched = bp_name if bp_name in skel_name_set else None
-        if matched is None:
-            short = bp_name.split(':')[-1]
-            matched = next((s for s in skeleton_bones if s.split(':')[-1] == short), None)
-        if matched is None:
-            continue
-
-        # Compute OBB
-        if bj_u8 is not None:
-            mask = np.any(bj_u8 == bp_idx, axis=1)
-            pos = glb_m['positions'][mask] if np.any(mask) else glb_m['positions'][:1]
-        else:
-            pos = glb_m['positions']
-        obb_min = pos.min(axis=0).astype(np.float32)
-        obb_max = pos.max(axis=0).astype(np.float32)
-
-        bb = (ctypes.c_uint8 * 44)()
-        bn_bytes = matched.encode('utf-8') + b'\x00'
-        bn_buf = (ctypes.c_uint8 * len(bn_bytes))(*bn_bytes)
-        _keepalive.append(bn_buf)
-        struct.pack_into('<Q', bb, 0, ctypes.addressof(bn_buf))
-        struct.pack_into('<3f', bb, 8, *obb_min)
-        struct.pack_into('<3f', bb, 20, *obb_max)
-        bb_entries.append(bytes(bb))
-
-    if not bb_entries:
-        # Rigid mesh — single binding
-        bb = (ctypes.c_uint8 * 44)()
-        bn = (skeleton_bones[0] if skeleton_bones else 'root').encode('utf-8') + b'\x00'
-        bn_buf = (ctypes.c_uint8 * len(bn))(*bn)
-        _keepalive.append(bn_buf)
-        struct.pack_into('<Q', bb, 0, ctypes.addressof(bn_buf))
-        struct.pack_into('<3f', bb, 8, *glb_m['positions'].min(axis=0))
-        struct.pack_into('<3f', bb, 20, *glb_m['positions'].max(axis=0))
-        bb_entries.append(bytes(bb))
-
+    # ── Write BoneBindings (built earlier, before vertex buffer) ──
     bb_array = (ctypes.c_uint8 * (44 * len(bb_entries)))()
     for i, bb_data in enumerate(bb_entries):
         ctypes.memmove(ctypes.addressof(bb_array) + i * 44, bb_data, 44)
@@ -1451,15 +1474,8 @@ def patch_vertex_data(
             skel_bones = template.get('bb_names', [])
 
             for glb_m in glb_group:
-                # Remap bone indices from GLB palette to GR2 bone binding names
-                if glb_m.get('bone_palette') and glb_m.get('bj_u8') is not None:
-                    remapped_bj, remapped_bw, _ = _remap_bone_indices(
-                        glb_m, skel_bones)
-                    if remapped_bj is not None:
-                        glb_m = dict(glb_m)
-                        glb_m['bj_u8'] = remapped_bj
-                        glb_m['bw_u8'] = remapped_bw
-
+                # _create_new_mesh handles bone index remapping internally
+                # (maps GLB palette indices to the new mesh's BoneBindings order)
                 new_mesh_ptr = _create_new_mesh(dll, fi, glb_m, skel_bones, template)
                 if new_mesh_ptr is not None:
                     # Expand fi->Meshes array
