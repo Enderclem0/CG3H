@@ -805,9 +805,23 @@ def build_gltf(character_name, mesh_data_list, mesh_names, bones, animations=Non
         total_anims = len(animations)
         print(f"  Building {total_anims} animation(s) into glTF...", flush=True)
         for anim_idx, anim_data in enumerate(animations):
+            # Compute content hash from all keyframe data for diff-on-import
+            import hashlib
+            h = hashlib.md5()
+            for t in anim_data['tracks']:
+                for key in ('orient', 'pos', 'scale'):
+                    if t[key] is not None:
+                        knots, values, _ = t[key]
+                        h.update(knots.tobytes())
+                        h.update(values.tobytes())
+            content_hash = h.hexdigest()
+
             anim = Animation(
                 name=anim_data['name'], channels=[], samplers=[],
-                extras={'granny_name': anim_data.get('granny_name', '')},
+                extras={
+                    'granny_name': anim_data.get('granny_name', ''),
+                    'content_hash': content_hash,
+                },
             )
 
             for track in anim_data['tracks']:

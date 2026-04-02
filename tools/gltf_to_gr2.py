@@ -171,19 +171,21 @@ def parse_glb(glb_path: str) -> list[dict]:
     return meshes_out
 
 
-def parse_glb_animations(glb_path: str) -> dict:
+def parse_glb_animations(glb_path: str) -> tuple:
     """
     Parse animation channels from a .glb file.
-    Returns dict: {animation_name: {bone_name: {path: (times, values)}}}
-    Where path is 'translation', 'rotation', or 'scale'.
+    Returns (animations_dict, hashes_dict):
+      animations: {animation_name: {bone_name: {path: (times, values)}}}
+      hashes: {animation_name: content_hash_from_export} (for diff detection)
     """
     gltf = pygltflib.GLTF2().load(glb_path)
     blob = bytes(gltf.binary_blob())
 
     if not gltf.animations:
-        return {}
+        return {}, {}
 
     result = {}
+    hashes = {}
     for anim in gltf.animations:
         tracks = {}
         for channel in anim.channels:
@@ -191,7 +193,7 @@ def parse_glb_animations(glb_path: str) -> dict:
             if node_idx is None or node_idx >= len(gltf.nodes):
                 continue
             bone_name = gltf.nodes[node_idx].name
-            path = channel.target.path  # "translation", "rotation", "scale"
+            path = channel.target.path
 
             sampler = anim.samplers[channel.sampler]
             times = _accessor_to_numpy(gltf, blob, sampler.input).flatten().astype(np.float32)
@@ -203,8 +205,13 @@ def parse_glb_animations(glb_path: str) -> dict:
 
         if tracks:
             result[anim.name] = tracks
+            # Extract content_hash from extras (stamped by our exporter)
+            if anim.extras and isinstance(anim.extras, dict):
+                h = anim.extras.get('content_hash')
+                if h:
+                    hashes[anim.name] = h
 
-    return result
+    return result, hashes
 
 
 ANIM_TRACK_STRIDE = 60  # granny_transform_track: Name(8)+Flags(4)+3×Curve2(16)
@@ -252,12 +259,16 @@ def _fixup_quat_signs(values):
         values[i + 1] *= flip
 
 
-def patch_animation_entries(dll, gpk_entries, sdb_bytes, glb_animations):
+def patch_animation_entries(dll, gpk_entries, sdb_bytes, glb_animations,
+                            anim_patch_filter=None):
     """
     Patch animation entries in the GPK using data from glTF animations.
-    glb_animations: dict from parse_glb_animations().
-    Returns number of patched entries.
+    Only patches entries matching anim_patch_filter (required — prevents
+    accidental re-encoding of all animations which causes rendering corruption).
     """
+    if anim_patch_filter is None:
+        print("  WARNING: --anim-patch-filter required to specify which animations to patch")
+        return 0
     if not glb_animations:
         return 0
 
@@ -277,6 +288,11 @@ def patch_animation_entries(dll, gpk_entries, sdb_bytes, glb_animations):
 
     patched = 0
     anim_entries = {k: v for k, v in gpk_entries.items() if not k.endswith('_Mesh')}
+
+    # Filter entries to only those matching the patch filter
+    pattern = anim_patch_filter.lower()
+    anim_entries = {k: v for k, v in anim_entries.items() if pattern in k.lower()}
+    print(f"  {len(anim_entries)} entries match filter '{anim_patch_filter}'", flush=True)
 
     # Build lookup tables for matching GLB animation names to GPK entries.
     # Primary: exact match by GPK entry name (from our exporter).
@@ -340,12 +356,11 @@ def patch_animation_entries(dll, gpk_entries, sdb_bytes, glb_animations):
             dll.GrannyFreeFile(gr2_file)
             continue
 
-        tracks_patched = 0
+        track_patches = []
         for ti in range(tt_count):
             t_base = tt_ptr + ti * ANIM_TRACK_STRIDE
             t_name = read_cstr(rq(t_base, 0))
 
-            # Find matching GLB track data (try full name, then short name)
             bone_data = glb_tracks.get(t_name)
             if bone_data is None:
                 short = t_name.split(':')[-1]
@@ -353,7 +368,6 @@ def patch_animation_entries(dll, gpk_entries, sdb_bytes, glb_animations):
             if bone_data is None:
                 continue
 
-            # Patch each curve type
             for path, coff, dim in [('rotation', 0x0C, 4),
                                      ('translation', 0x1C, 3),
                                      ('scale', 0x2C, 3)]:
@@ -363,38 +377,33 @@ def patch_animation_entries(dll, gpk_entries, sdb_bytes, glb_animations):
                 if len(times) == 0:
                     continue
 
-                # Handle scale: GLB has VEC3, Granny expects 3x3 matrix (9 floats)
                 if path == 'scale' and values.shape[-1] == 3:
-                    # Convert diagonal VEC3 to 3x3 identity-based matrix
                     mat_values = np.zeros((len(values), 9), dtype=np.float32)
-                    mat_values[:, 0] = values[:, 0]  # M00
-                    mat_values[:, 4] = values[:, 1]  # M11
-                    mat_values[:, 8] = values[:, 2]  # M22
+                    mat_values[:, 0] = values[:, 0]
+                    mat_values[:, 4] = values[:, 1]
+                    mat_values[:, 8] = values[:, 2]
                     values = mat_values
                     dim = 9
 
-                # Quaternion sign fixup
                 if path == 'rotation' and values.shape[-1] == 4:
                     _fixup_quat_signs(values)
 
-                # Build new DaK32fC32f curve
+                track_patches.append((t_base, coff, times, values))
+
+        if track_patches:
+            # Apply all patches for this animation
+            for t_base, coff, times, values in track_patches:
                 data_buf, knots_buf, ctrls_buf = _build_dak32f_curve(times, values, degree=2)
                 _keepalive.extend([data_buf, knots_buf, ctrls_buf])
-
-                # Patch the curve2 variant: type_ptr at +coff, data_ptr at +coff+8
                 struct.pack_into('<Q', (ctypes.c_uint8 * 8).from_address(t_base + coff),
                                  0, dak32f_type_ptr)
                 struct.pack_into('<Q', (ctypes.c_uint8 * 8).from_address(t_base + coff + 8),
                                  0, ctypes.addressof(data_buf))
 
-            tracks_patched += 1
-
-        if tracks_patched > 0:
-            # Serialize the patched animation back to GR2 bytes
-            section_count = struct.unpack_from('<I', gr2_bytes, 0x20)[0]
             new_gr2 = build_gr2_bytes(dll, fi, gr2_bytes, {}, 0)
             gpk_entries[entry_name] = new_gr2
             patched += 1
+            print(f"    Patched: {entry_name}", flush=True)
 
         dll.GrannyFreeFile(gr2_file)
 
@@ -1224,6 +1233,7 @@ def convert(
     positional: bool = False,
     allow_topology_change: bool = False,
     patch_animations: bool = False,
+    anim_patch_filter: str = None,
 ) -> None:
     print(f"[1/6] Parsing GLB: {glb_path}")
     glb_meshes = parse_glb(glb_path)
@@ -1231,7 +1241,7 @@ def convert(
 
     glb_animations = {}
     if patch_animations:
-        glb_animations = parse_glb_animations(glb_path)
+        glb_animations, _ = parse_glb_animations(glb_path)
         print(f"  Found {len(glb_animations)} animation(s) in GLB")
 
     print(f"[2/6] Extracting GPK: {gpk_path}")
@@ -1295,7 +1305,8 @@ def convert(
     n_anim_patched = 0
     if glb_animations:
         print(f"[7/7] Patching animation entries")
-        n_anim_patched = patch_animation_entries(dll, gpk_entries, sdb_bytes, glb_animations)
+        n_anim_patched = patch_animation_entries(dll, gpk_entries, sdb_bytes, glb_animations,
+                                                    anim_patch_filter=anim_patch_filter)
         print(f"  {n_anim_patched} animation(s) patched")
 
     pack_gpk(gpk_entries, output_gpk)
@@ -1331,7 +1342,11 @@ def main():
                              'that change topology. EXPERIMENTAL.')
     parser.add_argument('--patch-animations', action='store_true',
                         help='Also patch animation entries if the GLB contains animations. '
-                             'Matches by animation name. EXPERIMENTAL.')
+                             'Requires --anim-patch-filter. EXPERIMENTAL.')
+    parser.add_argument('--anim-patch-filter', default=None,
+                        help='Only patch animation entries matching this pattern '
+                             '(e.g. "NoWeapon_Base_Idle_00"). Required with --patch-animations '
+                             'to prevent accidental mass re-encoding.')
     args = parser.parse_args()
 
     out_gpk = args.output_gpk or args.gpk.replace('.gpk', '_mod.gpk')
@@ -1350,6 +1365,7 @@ def main():
         positional=args.positional,
         allow_topology_change=args.allow_topology_change,
         patch_animations=args.patch_animations,
+        anim_patch_filter=args.anim_patch_filter,
     )
 
 
