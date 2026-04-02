@@ -1227,6 +1227,143 @@ def _apply_patch(glb_m: dict, gm: dict, strict: bool,
     return True
 
 
+def _create_new_mesh(dll, fi, glb_m, skeleton_bones, template_mesh):
+    """
+    Create a new granny_mesh by CLONING an existing mesh and replacing
+    vertex data, index data, bone bindings, and name.
+
+    Cloning ensures all metadata (material bindings, extended data, etc.)
+    is valid — the serializer accepts the struct without crashes.
+
+    Returns new mesh pointer (int) or None on failure.
+    """
+    vc = len(glb_m['positions'])
+    if vc > 65535:
+        print(f"  ERROR: New mesh '{glb_m['name']}' has {vc} vertices — exceeds uint16 limit")
+        return None
+
+    indices = glb_m.get('indices')
+    if indices is None or len(indices) == 0:
+        print(f"  ERROR: New mesh '{glb_m['name']}' has no indices")
+        return None
+
+    # ── Clone the template mesh struct ──
+    # Use GrannyGetTotalObjectSize for correct struct sizes
+    from granny_types import _type_sym_addr
+    mesh_size = dll.GrannyGetTotalObjectSize(ctypes.c_void_p(
+        _type_sym_addr(dll, 'GrannyMeshType')))
+    vd_size = dll.GrannyGetTotalObjectSize(ctypes.c_void_p(
+        _type_sym_addr(dll, 'GrannyVertexDataType')))
+    topo_size = dll.GrannyGetTotalObjectSize(ctypes.c_void_p(
+        _type_sym_addr(dll, 'GrannyTriTopologyType')))
+
+    tmpl_ptr = template_mesh['mesh_ptr']
+    mesh_buf = (ctypes.c_uint8 * mesh_size)()
+    ctypes.memmove(mesh_buf, tmpl_ptr, mesh_size)
+    _keepalive.append(mesh_buf)
+
+    # ── Replace Name ──
+    name_bytes = glb_m['name'].encode('utf-8') + b'\x00'
+    name_buf = (ctypes.c_uint8 * len(name_bytes))(*name_bytes)
+    _keepalive.append(name_buf)
+    struct.pack_into('<Q', mesh_buf, 0x00, ctypes.addressof(name_buf))
+
+    # ── Build + replace vertex buffer ──
+    vbuf_bytes = build_vertex_buffer_40(glb_m)
+    vbuf = (ctypes.c_uint8 * len(vbuf_bytes))()
+    ctypes.memmove(vbuf, vbuf_bytes, len(vbuf_bytes))
+    _keepalive.append(vbuf)
+
+    # Clone VertexData struct, update vertices
+    tmpl_vd = rq(tmpl_ptr, 0x08)
+    vd_buf = (ctypes.c_uint8 * vd_size)()
+    ctypes.memmove(vd_buf, tmpl_vd, vd_size)
+    _keepalive.append(vd_buf)
+    # Keep original vertex type, update count + data ptr
+    struct.pack_into('<I', vd_buf, 0x08, vc)
+    struct.pack_into('<Q', vd_buf, 0x0C, ctypes.addressof(vbuf))
+    struct.pack_into('<Q', mesh_buf, 0x08, ctypes.addressof(vd_buf))
+
+    # ── Build + replace index buffer ──
+    idx_np = indices.astype(np.uint16)
+    idx_buf = (ctypes.c_uint8 * idx_np.nbytes)()
+    ctypes.memmove(idx_buf, idx_np.tobytes(), idx_np.nbytes)
+    _keepalive.append(idx_buf)
+
+    # Clone Topology struct, update indices
+    tmpl_topo = rq(tmpl_ptr, 0x1C)
+    topo_buf = (ctypes.c_uint8 * topo_size)()
+    ctypes.memmove(topo_buf, tmpl_topo, topo_size)
+    _keepalive.append(topo_buf)
+    # Update Indices16
+    struct.pack_into('<I', topo_buf, 0x18, len(idx_np))
+    struct.pack_into('<Q', topo_buf, 0x1C, ctypes.addressof(idx_buf))
+    # Update Groups[0].TriCount (at +8 in the group entry)
+    grp_ptr = struct.unpack_from('<Q', bytes(topo_buf), 0x04)[0]
+    if _valid_ptr(grp_ptr):
+        grp_buf = (ctypes.c_uint8 * 24)()
+        ctypes.memmove(grp_buf, grp_ptr, 24)
+        struct.pack_into('<i', grp_buf, 8, len(idx_np) // 3)
+        _keepalive.append(grp_buf)
+        struct.pack_into('<Q', topo_buf, 0x04, ctypes.addressof(grp_buf))
+    struct.pack_into('<Q', mesh_buf, 0x1C, ctypes.addressof(topo_buf))
+
+    # ── Build + replace BoneBindings ──
+    bb_entries = []
+    bone_palette = glb_m.get('bone_palette') or []
+    bj_u8 = glb_m.get('bj_u8')
+    skel_name_set = set(skeleton_bones)
+
+    for bp_idx, bp_name in enumerate(bone_palette):
+        matched = bp_name if bp_name in skel_name_set else None
+        if matched is None:
+            short = bp_name.split(':')[-1]
+            matched = next((s for s in skeleton_bones if s.split(':')[-1] == short), None)
+        if matched is None:
+            continue
+
+        # Compute OBB
+        if bj_u8 is not None:
+            mask = np.any(bj_u8 == bp_idx, axis=1)
+            pos = glb_m['positions'][mask] if np.any(mask) else glb_m['positions'][:1]
+        else:
+            pos = glb_m['positions']
+        obb_min = pos.min(axis=0).astype(np.float32)
+        obb_max = pos.max(axis=0).astype(np.float32)
+
+        bb = (ctypes.c_uint8 * 44)()
+        bn_bytes = matched.encode('utf-8') + b'\x00'
+        bn_buf = (ctypes.c_uint8 * len(bn_bytes))(*bn_bytes)
+        _keepalive.append(bn_buf)
+        struct.pack_into('<Q', bb, 0, ctypes.addressof(bn_buf))
+        struct.pack_into('<3f', bb, 8, *obb_min)
+        struct.pack_into('<3f', bb, 20, *obb_max)
+        bb_entries.append(bytes(bb))
+
+    if not bb_entries:
+        # Rigid mesh — single binding
+        bb = (ctypes.c_uint8 * 44)()
+        bn = (skeleton_bones[0] if skeleton_bones else 'root').encode('utf-8') + b'\x00'
+        bn_buf = (ctypes.c_uint8 * len(bn))(*bn)
+        _keepalive.append(bn_buf)
+        struct.pack_into('<Q', bb, 0, ctypes.addressof(bn_buf))
+        struct.pack_into('<3f', bb, 8, *glb_m['positions'].min(axis=0))
+        struct.pack_into('<3f', bb, 20, *glb_m['positions'].max(axis=0))
+        bb_entries.append(bytes(bb))
+
+    bb_array = (ctypes.c_uint8 * (44 * len(bb_entries)))()
+    for i, bb_data in enumerate(bb_entries):
+        ctypes.memmove(ctypes.addressof(bb_array) + i * 44, bb_data, 44)
+    _keepalive.append(bb_array)
+    struct.pack_into('<I', mesh_buf, 0x30, len(bb_entries))
+    struct.pack_into('<Q', mesh_buf, 0x34, ctypes.addressof(bb_array))
+
+    tri_count = len(idx_np) // 3
+    print(f"  NEW MESH '{glb_m['name']}': {vc} verts, {tri_count} tris, "
+          f"{len(bb_entries)} bone bindings")
+    return ctypes.addressof(mesh_buf)
+
+
 def patch_vertex_data(
     dll, fi: int, glb_meshes: list[dict],
     strict: bool = False,
@@ -1292,9 +1429,51 @@ def patch_vertex_data(
                 print(f"  Fuzzy match: '{glb_key}' -> '{matched_key}'")
 
         if matched_key is None:
-            print(f"  WARNING: GLB group '{glb_key}' has no matching GR2 group — skipping")
-            print(f"    Available: {sorted(gr2_by_name)}")
-            print(f"    Tip: use --positional to match by index instead of name")
+            # No GR2 match — this is a NEW mesh to add
+            if not allow_topology_change:
+                print(f"  WARNING: GLB mesh '{glb_key}' not in GR2 — use --allow-topology-change to add new meshes")
+                continue
+
+            # Use first existing mesh as template + get bone names from its bindings
+            template = gr2_mesh_list[0] if gr2_mesh_list else None
+            if template is None:
+                print(f"  ERROR: No existing mesh to use as template — cannot add new meshes")
+                continue
+
+            skel_bones = template.get('bb_names', [])
+
+            for glb_m in glb_group:
+                # Remap bone indices from GLB palette to GR2 bone binding names
+                if glb_m.get('bone_palette') and glb_m.get('bj_u8') is not None:
+                    remapped_bj, remapped_bw, _ = _remap_bone_indices(
+                        glb_m, skel_bones)
+                    if remapped_bj is not None:
+                        glb_m = dict(glb_m)
+                        glb_m['bj_u8'] = remapped_bj
+                        glb_m['bw_u8'] = remapped_bw
+
+                new_mesh_ptr = _create_new_mesh(dll, fi, glb_m, skel_bones, template)
+                if new_mesh_ptr is not None:
+                    # Expand fi->Meshes array
+                    _meshes_off = _t('granny_file_info', 'Meshes')
+                    old_count = ri(fi, _meshes_off)
+                    old_arr = rq(fi, _meshes_off + 4)
+
+                    new_count = old_count + 1
+                    new_arr = (ctypes.c_uint8 * (new_count * 8))()
+                    if _valid_ptr(old_arr):
+                        ctypes.memmove(new_arr, old_arr, old_count * 8)
+                    struct.pack_into('<Q', new_arr, old_count * 8, new_mesh_ptr)
+                    _keepalive.append(new_arr)
+
+                    struct.pack_into('<i', (ctypes.c_uint8 * 4).from_address(fi + _meshes_off),
+                                     0, new_count)
+                    struct.pack_into('<Q', (ctypes.c_uint8 * 8).from_address(fi + _meshes_off + 4),
+                                     0, ctypes.addressof(new_arr))
+
+                    # Refresh mesh list for subsequent iterations
+                    gr2_mesh_list = get_gr2_meshes(fi)
+                    patched += 1
             continue
 
         gr2_group = gr2_by_name[matched_key]
