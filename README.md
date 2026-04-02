@@ -22,6 +22,7 @@ Reshape characters, paint bone weights, add/remove geometry, and install mods â€
 | **Blender addon** (File > Import/Export) | Working |
 | **Animation export** (`--animations`) | Working |
 | **Animation import** (`--patch-animations`) | Working |
+| **Add new meshes** (accessories, armor, custom geometry) | Working |
 | **Backup & restore** originals before installing | Working |
 | Any character model (all 144 pairs in `_Optimized/`) | Working |
 
@@ -30,7 +31,6 @@ Reshape characters, paint bone weights, add/remove geometry, and install mods â€
 | Feature | Why |
 |---|---|
 | **Adding/removing bones** | Skeleton is read-only from the original GR2 |
-| **Adding/removing meshes** | Mesh count is fixed at load time |
 | **Textures** | Not stored in GR2 files (separate engine asset pipeline) |
 
 ## Limits
