@@ -929,9 +929,10 @@ def build_gltf(character_name, mesh_data_list, mesh_names, bones, animations=Non
 
 # ─────────────────────────── Texture extraction ─────────────────────────────
 
-def _extract_model_texture(fx_pkg_path, character_name):
+def _extract_model_texture(pkg_dir, character_name):
     """
-    Extract the 3D model texture from Fx.pkg for the given character.
+    Extract the 3D model texture from .pkg files for the given character.
+    Searches all .pkg files in pkg_dir for matching texture entries.
     Returns (png_bytes, dds_bytes) or (None, None) if not found.
     """
     import io
@@ -946,7 +947,6 @@ def _extract_model_texture(fx_pkg_path, character_name):
     from pkg_texture import read_pkg_chunks, _swap32, _read_7bit_int, _read_csstring, build_dds_header
 
     # Search patterns for the character's model texture
-    # Exact names found in Fx.pkg: "MelinoeTransform_Color", "Melinoe_Color512"
     cn = character_name.lower()
     search = [
         f"{cn}transform_color",
@@ -954,74 +954,85 @@ def _extract_model_texture(fx_pkg_path, character_name):
         f"{cn}_color",
     ]
 
-    chunks, _, _ = read_pkg_chunks(fx_pkg_path)
+    # Search all .pkg files, starting with Fx.pkg (most common) then others
+    pkg_files = []
+    fx = os.path.join(pkg_dir, "Fx.pkg")
+    if os.path.isfile(fx):
+        pkg_files.append(fx)
+    for f in sorted(os.listdir(pkg_dir)):
+        full = os.path.join(pkg_dir, f)
+        if f.endswith('.pkg') and f != 'Fx.pkg' and os.path.isfile(full):
+            pkg_files.append(full)
 
-    for ci, (chunk, _) in enumerate(chunks):
-        doff = 0
-        while doff < len(chunk) - 5:
-            tag = chunk[doff]; doff += 1
-            if tag in (0xFF, 0xBE):
-                break
-            if tag == 0xAD:  # Tex2D
-                name, doff = _read_csstring(chunk, doff)
-                total_sz = _swap32(struct.unpack_from('<I', chunk, doff)[0])
-                doff += 4
-                data_start = doff
+    for pkg_path in pkg_files:
+        try:
+            chunks, _, _ = read_pkg_chunks(pkg_path)
+        except Exception:
+            continue
 
-                # Match on filename only (not path) to avoid false positives
-                filename_lower = name.lower().replace('\\', '/').split('/')[-1]
-                if any(filename_lower.startswith(s) or filename_lower == s for s in search):
-                    # Found! Parse XNB + texture
-                    if chunk[doff:doff+3] == b'XNB':
-                        doff += 10  # skip XNB header
-                        fmt = struct.unpack_from('<I', chunk, doff)[0]
-                        tw = struct.unpack_from('<I', chunk, doff+4)[0]
-                        th = struct.unpack_from('<I', chunk, doff+8)[0]
-                        tps = struct.unpack_from('<I', chunk, doff+16)[0]
-                        pixel_data = chunk[doff+20:doff+20+tps]
+        for ci, (chunk, _) in enumerate(chunks):
+            doff = 0
+            while doff < len(chunk) - 5:
+                tag = chunk[doff]; doff += 1
+                if tag in (0xFF, 0xBE):
+                    break
+                if tag == 0xAD:  # Tex2D
+                    name, doff = _read_csstring(chunk, doff)
+                    total_sz = _swap32(struct.unpack_from('<I', chunk, doff)[0])
+                    doff += 4
+                    data_start = doff
 
-                        # Build DDS (original, with mipmaps)
-                        dds_header = build_dds_header(tw, th, fmt, tps)
-                        dds_bytes = dds_header + pixel_data
+                    filename_lower = name.lower().replace('\\', '/').split('/')[-1]
+                    if any(filename_lower.startswith(s) or filename_lower == s for s in search):
+                        if chunk[doff:doff+3] == b'XNB':
+                            doff += 10
+                            fmt = struct.unpack_from('<I', chunk, doff)[0]
+                            tw = struct.unpack_from('<I', chunk, doff+4)[0]
+                            th = struct.unpack_from('<I', chunk, doff+8)[0]
+                            tps = struct.unpack_from('<I', chunk, doff+16)[0]
+                            pixel_data = chunk[doff+20:doff+20+tps]
 
-                        # Decode BC7 mip 0 to PNG (BGRA → RGBA swap)
-                        if fmt == 0x1C:  # BC7
-                            blocks = max(tw//4, 1) * max(th//4, 1)
-                            mip0_size = blocks * 16
-                            bgra = texture2ddecoder.decode_bc7(pixel_data[:mip0_size], tw, th)
-                            img = Image.frombytes('RGBA', (tw, th), bgra)
-                            r, g, b, a = img.split()
-                            img = Image.merge('RGBA', (b, g, r, a))
-                        elif fmt in (0x00, 0x0E):  # BGRA/RGBA uncompressed
-                            mip0_size = tw * th * 4
-                            img = Image.frombytes('RGBA', (tw, th), pixel_data[:mip0_size])
-                        elif fmt == 0x06:  # BC3/DXT5
-                            blocks = max(tw//4, 1) * max(th//4, 1)
-                            mip0_size = blocks * 16
-                            bgra = texture2ddecoder.decode_bc3(pixel_data[:mip0_size], tw, th)
-                            img = Image.frombytes('RGBA', (tw, th), bgra)
-                            r, g, b, a = img.split()
-                            img = Image.merge('RGBA', (b, g, r, a))
-                        else:
-                            print(f"  Unsupported texture format 0x{fmt:X}")
-                            return None, None
+                            dds_header = build_dds_header(tw, th, fmt, tps)
+                            dds_bytes = dds_header + pixel_data
 
-                        # Encode to PNG bytes
-                        png_buf = io.BytesIO()
-                        img.save(png_buf, format='PNG')
-                        png_bytes = png_buf.getvalue()
+                            if fmt == 0x1C:  # BC7
+                                blocks = max(tw//4, 1) * max(th//4, 1)
+                                mip0_size = blocks * 16
+                                bgra = texture2ddecoder.decode_bc7(pixel_data[:mip0_size], tw, th)
+                                img = Image.frombytes('RGBA', (tw, th), bgra)
+                                r, g, b, a = img.split()
+                                img = Image.merge('RGBA', (b, g, r, a))
+                            elif fmt in (0x00, 0x0E):
+                                mip0_size = tw * th * 4
+                                img = Image.frombytes('RGBA', (tw, th), pixel_data[:mip0_size])
+                            elif fmt == 0x06:  # BC3/DXT5
+                                blocks = max(tw//4, 1) * max(th//4, 1)
+                                mip0_size = blocks * 16
+                                bgra = texture2ddecoder.decode_bc3(pixel_data[:mip0_size], tw, th)
+                                img = Image.frombytes('RGBA', (tw, th), bgra)
+                                r, g, b, a = img.split()
+                                img = Image.merge('RGBA', (b, g, r, a))
+                            else:
+                                print(f"  Unsupported texture format 0x{fmt:X}")
+                                continue
 
-                        print(f"  Found: {name} ({tw}x{th} fmt=0x{fmt:X} {tps:,} bytes)")
-                        return png_bytes, dds_bytes
+                            png_buf = io.BytesIO()
+                            img.save(png_buf, format='PNG')
+                            png_bytes = png_buf.getvalue()
 
-                doff = data_start + total_sz
-            elif tag == 0xDE:
-                sz = struct.unpack_from('<i', chunk, doff)[0]; doff += 4 + sz
-            elif tag == 0xAA:
-                nl, doff = _read_7bit_int(chunk, doff); doff += nl
-                sz = struct.unpack_from('<i', chunk, doff)[0]; doff += 4 + max(sz, 0)
-            else:
-                break
+                            pkg_name = os.path.basename(pkg_path)
+                            print(f"  Found: {name} ({tw}x{th} fmt=0x{fmt:X} "
+                                  f"{tps:,} bytes) in {pkg_name}")
+                            return png_bytes, dds_bytes
+
+                    doff = data_start + total_sz
+                elif tag == 0xDE:
+                    sz = struct.unpack_from('<i', chunk, doff)[0]; doff += 4 + sz
+                elif tag == 0xAA:
+                    nl, doff = _read_7bit_int(chunk, doff); doff += nl
+                    sz = struct.unpack_from('<i', chunk, doff)[0]; doff += 4 + max(sz, 0)
+                else:
+                    break
 
     return None, None
 
@@ -1123,10 +1134,9 @@ def main():
             # Auto-detect: gpk_dir is .../Content/GR2/_Optimized, pkg_dir is .../Content/Packages/1080p
             content_dir = os.path.dirname(os.path.dirname(args.gpk_dir))
             pkg_dir = os.path.join(content_dir, "Packages", "1080p")
-        fx_pkg = os.path.join(pkg_dir, "Fx.pkg")
-        if os.path.isfile(fx_pkg):
+        if os.path.isdir(pkg_dir):
             try:
-                texture_png, dds_data = _extract_model_texture(fx_pkg, args.name)
+                texture_png, dds_data = _extract_model_texture(pkg_dir, args.name)
                 if texture_png:
                     print(f"  Texture embedded as PNG in GLB", flush=True)
                     # Save original DDS alongside
@@ -1141,7 +1151,7 @@ def main():
             except Exception as e:
                 print(f"  Texture extraction failed: {e}")
         else:
-            print(f"  Fx.pkg not found at {fx_pkg}")
+            print(f"  Package directory not found: {pkg_dir}")
 
     step = "6/6" if (args.animations or args.anim_filter) else "5/5"
     print(f"[{step}] Building glTF -> {out_path}", flush=True)
