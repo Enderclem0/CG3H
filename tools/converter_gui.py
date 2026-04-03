@@ -867,18 +867,31 @@ class App:
             "Launch the game to see your changes.",
         )
 
+    def _pkg_backup_dir(self):
+        return os.path.join(self.game_path.get(), "Content", "Packages", "1080p", "_backups")
+
     def _refresh_backups(self):
         self._restore_lb.delete(0, tk.END)
+        # GR2 model backups
         backup_dir = self._backup_dir()
-        if not os.path.isdir(backup_dir):
-            return
-        for f in sorted(os.listdir(backup_dir)):
-            if f.endswith(".gpk"):
-                name = os.path.splitext(f)[0]
-                ts = datetime.fromtimestamp(
-                    os.path.getmtime(os.path.join(backup_dir, f))
-                ).strftime("%Y-%m-%d %H:%M")
-                self._restore_lb.insert(tk.END, f"{name}  (backed up {ts})")
+        if os.path.isdir(backup_dir):
+            for f in sorted(os.listdir(backup_dir)):
+                if f.endswith(".gpk"):
+                    name = os.path.splitext(f)[0]
+                    ts = datetime.fromtimestamp(
+                        os.path.getmtime(os.path.join(backup_dir, f))
+                    ).strftime("%Y-%m-%d %H:%M")
+                    self._restore_lb.insert(tk.END, f"{name}  (model, backed up {ts})")
+        # PKG texture backups
+        pkg_backup = self._pkg_backup_dir()
+        if os.path.isdir(pkg_backup):
+            for f in sorted(os.listdir(pkg_backup)):
+                if f.endswith(".pkg"):
+                    name = os.path.splitext(f)[0]
+                    ts = datetime.fromtimestamp(
+                        os.path.getmtime(os.path.join(pkg_backup, f))
+                    ).strftime("%Y-%m-%d %H:%M")
+                    self._restore_lb.insert(tk.END, f"{name}  (texture, backed up {ts})")
 
     def _restore_selected(self):
         sel = self._restore_lb.curselection()
@@ -888,13 +901,19 @@ class App:
 
         backup_dir = self._backup_dir()
         gpk_dir = self._gpk_dir()
+        pkg_backup = self._pkg_backup_dir()
+        pkg_dir = os.path.join(self.game_path.get(), "Content", "Packages", "1080p")
         restored = []
 
         for idx in sel:
             text = self._restore_lb.get(idx)
             name = text.split("  (")[0].strip()
-            src = os.path.join(backup_dir, f"{name}.gpk")
-            dst = os.path.join(gpk_dir, f"{name}.gpk")
+            if "texture" in text:
+                src = os.path.join(pkg_backup, f"{name}.pkg")
+                dst = os.path.join(pkg_dir, f"{name}.pkg")
+            else:
+                src = os.path.join(backup_dir, f"{name}.gpk")
+                dst = os.path.join(gpk_dir, f"{name}.gpk")
             if os.path.isfile(src):
                 shutil.copy2(src, dst)
                 restored.append(name)
@@ -905,7 +924,7 @@ class App:
             messagebox.showinfo(
                 "Restore complete",
                 f"Restored {len(restored)} original(s):\n" +
-                "\n".join(f"  {n}.gpk" for n in restored),
+                "\n".join(f"  {n}" for n in restored),
             )
 
     # ── Thread-safe UI helpers ────────────────────────────────────────────────
