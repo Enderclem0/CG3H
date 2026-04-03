@@ -138,12 +138,9 @@ class App:
         ttk.Button(orow, text="Browse\u2026",
                    command=lambda: self._browse_dir(self.exp_output)).pack(side=tk.LEFT)
 
-        self.exp_all_lods   = tk.BooleanVar(value=False)
         self.exp_animations = tk.BooleanVar(value=False)
         self.exp_anim_filter = tk.StringVar()
         self.exp_debug_scan = tk.BooleanVar(value=False)
-        ttk.Checkbutton(box, text="Export all LODs (includes lower-resolution duplicates)",
-                        variable=self.exp_all_lods).pack(anchor=tk.W, pady=2)
         ttk.Checkbutton(box, text="Include animations (slow \u2014 can take several minutes per model)",
                         variable=self.exp_animations).pack(anchor=tk.W, pady=2)
         anim_row = ttk.Frame(box)
@@ -632,52 +629,171 @@ class App:
     def _export_worker(self, names, out_dir, dll):
         gpk_dir = self._gpk_dir()
         ok = errors = 0
+        max_workers = min(os.cpu_count() or 8, len(names))
 
-        for i, name in enumerate(names):
-            self._ui(lambda n=name, t=len(names), idx=i:
-                self._status.set(f"Exporting {n}  ({idx+1}/{t})\u2026"))
-            self._log_write_ui(
-                self._exp_log,
-                f"\n{'\u2500'*52}\n  [{i+1}/{len(names)}]  {name}\n{'\u2500'*52}\n",
-            )
+        # Pre-build texture index for fast parallel lookups
+        if self.exp_textures.get() and len(names) > 1:
+            try:
+                content_dir = os.path.dirname(os.path.dirname(gpk_dir))
+                pkg_dir = os.path.join(content_dir, "Packages", "1080p")
+                idx_path = os.path.join(pkg_dir, '_texture_index.json')
+                if os.path.isdir(pkg_dir) and not os.path.isfile(idx_path):
+                    self._log_write_ui(self._exp_log,
+                                       "  Building texture index (one-time)...\n")
+                    from pkg_texture import save_texture_index
+                    save_texture_index(pkg_dir)
+                    self._log_write_ui(self._exp_log, "  Texture index built!\n")
+            except Exception as e:
+                self._log_write_ui(self._exp_log,
+                                   f"  Texture index build failed: {e}\n")
 
+        cpus = os.cpu_count() or 4
+        has_anims = self.exp_animations.get()
+
+        # When animations are enabled, limit outer concurrency so each
+        # subprocess can use multiple cores for animation decoding.
+        # Non-animation characters finish in seconds and free their slots,
+        # so the heavy animation ones naturally absorb the freed CPU.
+        if has_anims and len(names) > 1:
+            max_workers = min(max_workers, max(2, cpus // 4))
+        anim_w = 0  # auto — each subprocess decides based on available cores
+
+        # Build command list for all exports
+        def _build_cmd(name):
             cmd = [
                 sys.executable, EXPORTER, name,
                 "--gpk-dir", gpk_dir,
                 "--dll",     dll,
                 "-o",        os.path.join(out_dir, f"{name}.glb"),
             ]
-            if self.exp_all_lods.get():
-                cmd.append("--all-lods")
             if self.exp_animations.get():
                 cmd.append("--animations")
                 anim_filter = self.exp_anim_filter.get().strip()
                 if anim_filter:
                     cmd += ["--anim-filter", anim_filter]
+                cmd += ["--anim-workers", str(anim_w)]
             if self.exp_textures.get():
                 cmd.append("--textures")
             if self.exp_debug_scan.get():
                 cmd.append("--debug")
+            return cmd
 
-            try:
-                proc = subprocess.Popen(
-                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, bufsize=1,
+        if max_workers <= 1:
+            # Single-character or single-core: sequential (preserves log order)
+            for i, name in enumerate(names):
+                self._ui(lambda n=name, t=len(names), idx=i:
+                    self._status.set(f"Exporting {n}  ({idx+1}/{t})\u2026"))
+                self._log_write_ui(
+                    self._exp_log,
+                    f"\n{'\u2500'*52}\n  [{i+1}/{len(names)}]  {name}\n{'\u2500'*52}\n",
                 )
-                for line in proc.stdout:
-                    self._log_write_ui(self._exp_log, line)
-                proc.wait()
-                if proc.returncode == 0:
-                    ok += 1
-                else:
+                try:
+                    proc = subprocess.Popen(
+                        _build_cmd(name), stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT, text=True, bufsize=1,
+                    )
+                    for line in proc.stdout:
+                        self._log_write_ui(self._exp_log, line)
+                    proc.wait()
+                    if proc.returncode == 0:
+                        ok += 1
+                    else:
+                        errors += 1
+                        self._log_write_ui(self._exp_log,
+                                           f"  exited with code {proc.returncode}\n")
+                except Exception as exc:
                     errors += 1
-                    self._log_write_ui(self._exp_log,
-                                       f"  exited with code {proc.returncode}\n")
-            except Exception as exc:
-                errors += 1
-                self._log_write_ui(self._exp_log, f"  ERROR: {exc}\n")
+                    self._log_write_ui(self._exp_log, f"  ERROR: {exc}\n")
+                self._ui(lambda v=i+1: self._exp_progress.config(value=v))
+        else:
+            # Parallel export: run up to max_workers subprocesses concurrently
+            self._log_write_ui(
+                self._exp_log,
+                f"  Parallel export: {max_workers} workers for {len(names)} characters\n",
+            )
+            self._ui(lambda: self._status.set(
+                f"Exporting {len(names)} characters ({max_workers} parallel)\u2026"))
 
-            self._ui(lambda v=i+1: self._exp_progress.config(value=v))
+            import queue as _queue
+
+            active = {}       # name → Popen
+            readers = {}      # name → Thread
+            output_q = {}     # name → Queue (non-blocking line collection)
+            pending = list(names)
+            done_count = 0
+
+            def _reader_thread(proc, q):
+                """Drain stdout in a background thread so polling never blocks."""
+                try:
+                    for line in proc.stdout:
+                        q.put(line)
+                except Exception:
+                    pass
+
+            def _launch(name):
+                proc = subprocess.Popen(
+                    _build_cmd(name), stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT, text=True, bufsize=1,
+                )
+                active[name] = proc
+                q = _queue.Queue()
+                output_q[name] = q
+                t = threading.Thread(target=_reader_thread, args=(proc, q), daemon=True)
+                t.start()
+                readers[name] = t
+
+            while pending or active:
+                # Launch up to max_workers
+                while pending and len(active) < max_workers:
+                    name = pending.pop(0)
+                    try:
+                        _launch(name)
+                    except Exception as exc:
+                        errors += 1
+                        done_count += 1
+                        self._log_write_ui(
+                            self._exp_log,
+                            f"\n{'\u2500'*52}\n  [{done_count}/{len(names)}]  "
+                            f"{name}\n{'\u2500'*52}\n  ERROR: {exc}\n",
+                        )
+                        self._ui(lambda v=done_count: self._exp_progress.config(value=v))
+
+                # Poll active processes (non-blocking)
+                finished = []
+                for name, proc in active.items():
+                    if proc.poll() is not None:
+                        finished.append(name)
+
+                for name in finished:
+                    proc = active.pop(name)
+                    readers[name].join(timeout=2)
+                    # Drain remaining lines
+                    lines = []
+                    q = output_q.pop(name)
+                    while not q.empty():
+                        lines.append(q.get_nowait())
+                    if proc.returncode == 0:
+                        ok += 1
+                    else:
+                        errors += 1
+                        lines.append(f"  exited with code {proc.returncode}\n")
+                    done_count += 1
+                    self._log_write_ui(
+                        self._exp_log,
+                        f"\n{'\u2500'*52}\n  [{done_count}/{len(names)}]  "
+                        f"{name}\n{'\u2500'*52}\n",
+                    )
+                    for ln in lines:
+                        self._log_write_ui(self._exp_log, ln)
+                    self._ui(lambda v=done_count:
+                             self._exp_progress.config(value=v))
+                    self._ui(lambda n=name, dc=done_count, t=len(names):
+                             self._status.set(f"Exported {n}  ({dc}/{t})\u2026"))
+                    del readers[name]
+
+                if active:
+                    import time
+                    time.sleep(0.05)
 
         self._ui(lambda: self._exp_finish(ok, errors, out_dir))
 

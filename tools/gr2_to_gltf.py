@@ -600,18 +600,104 @@ def _postprocess_track(track):
                 track['orient'] = (knots[:1], values[:1], deg)
 
 
-def extract_animations(dll, gpk_entries, sdb_bytes, anim_filter=None):
+def _process_single_anim(dll, str_db, entry_name, gr2_bytes):
+    """Process one animation entry, return dict or None."""
+    gr2_buf = ctypes.create_string_buffer(gr2_bytes)
+    gr2_file = dll.GrannyReadEntireFileFromMemory(len(gr2_bytes), gr2_buf)
+    if not gr2_file:
+        return None
+    dll.GrannyRemapFileStrings(gr2_file, str_db)
+    fi = dll.GrannyGetFileInfo(gr2_file)
+    if not fi:
+        dll.GrannyFreeFile(gr2_file)
+        return None
+
+    anim_count = ri(fi, 0x78)
+    if anim_count == 0:
+        dll.GrannyFreeFile(gr2_file)
+        return None
+
+    anim0 = rq(rq(fi, 0x7C), 0)
+    anim_name = read_cstr(rq(anim0, 0))
+    duration = struct.unpack_from('<f', safe_bytes(anim0 + 8, 4))[0]
+    if duration <= 0:
+        dll.GrannyFreeFile(gr2_file)
+        return None
+
+    tg_count = ri(fi, 0x6C)
+    if tg_count == 0:
+        dll.GrannyFreeFile(gr2_file)
+        return None
+    tg0 = rq(rq(fi, 0x70), 0)
+    tt_count = ri(tg0, 0x14)
+    tt_ptr = rq(tg0, 0x18)
+    if tt_count == 0 or not _valid_ptr(tt_ptr):
+        dll.GrannyFreeFile(gr2_file)
+        return None
+
+    tracks = []
+    for ti in range(tt_count):
+        t_base = tt_ptr + ti * TRACK_STRIDE
+        t_name = read_cstr(rq(t_base, 0))
+
+        orient = _decode_curve(dll, t_base + 0x0C, rq(t_base, 0x14), 4)
+        pos    = _decode_curve(dll, t_base + 0x1C, rq(t_base, 0x24), 3)
+        scale  = _decode_curve(dll, t_base + 0x2C, rq(t_base, 0x34), 9)
+
+        if orient is None and pos is None and scale is None:
+            continue
+        track = {'name': t_name, 'orient': orient, 'pos': pos, 'scale': scale}
+        _postprocess_track(track)
+        if track['orient'] is None and track['pos'] is None and track['scale'] is None:
+            continue
+        tracks.append(track)
+
+    dll.GrannyFreeFile(gr2_file)
+
+    if tracks:
+        return {
+            'name': entry_name,
+            'granny_name': anim_name,
+            'duration': duration,
+            'tracks': tracks,
+        }
+    return None
+
+
+def _anim_worker_batch(args):
     """
-    Extract animation data from all non-mesh GPK entries.
-    Returns list of dicts with name, duration, and decoded track data.
+    Worker function for multiprocessing animation extraction.
+    Each worker loads its own DLL + SDB instance and processes a batch of entries.
+    args: (dll_path, sdb_bytes, entries_list)  where entries_list = [(name, gr2_bytes), ...]
+    Returns list of animation dicts.
     """
-    animations = []
+    dll_path, sdb_bytes, entries_list = args
+    # Each worker gets its own DLL instance
+    dll = setup_granny(dll_path)
     sdb_buf = ctypes.create_string_buffer(sdb_bytes)
     sdb_file = dll.GrannyReadEntireFileFromMemory(len(sdb_bytes), sdb_buf)
     if not sdb_file:
-        return animations
+        return []
     str_db = dll.GrannyGetStringDatabase(sdb_file)
 
+    results = []
+    for entry_name, gr2_bytes in entries_list:
+        anim = _process_single_anim(dll, str_db, entry_name, gr2_bytes)
+        if anim:
+            results.append(anim)
+
+    dll.GrannyFreeFile(sdb_file)
+    return results
+
+
+def extract_animations(dll, gpk_entries, sdb_bytes, anim_filter=None,
+                       dll_path=None, anim_workers=0):
+    """
+    Extract animation data from all non-mesh GPK entries.
+    Uses multiprocessing when dll_path is provided and entry count is large enough.
+    anim_workers: 0 = auto (cpu_count), 1 = sequential, N = use N workers.
+    Returns list of dicts with name, duration, and decoded track data.
+    """
     anim_entries = {k: v for k, v in gpk_entries.items() if not k.endswith('_Mesh')}
     if anim_filter:
         pattern = anim_filter.lower()
@@ -621,67 +707,47 @@ def extract_animations(dll, gpk_entries, sdb_bytes, anim_filter=None):
     print(f"  Processing {total} animation entries" +
           (f" (filtered by '{anim_filter}')" if anim_filter else ""), flush=True)
 
+    if total == 0:
+        return []
+
+    # Use multiprocessing for large animation sets
+    if anim_workers == 0:
+        n_workers = min(os.cpu_count() or 4, max(1, total // 10))
+    else:
+        n_workers = anim_workers
+    if dll_path and n_workers > 1 and total >= 20:
+        import multiprocessing
+        print(f"  Using {n_workers} parallel workers", flush=True)
+
+        # Split entries into roughly equal chunks
+        entries_list = list(anim_entries.items())
+        chunk_size = (total + n_workers - 1) // n_workers
+        chunks = []
+        for i in range(0, total, chunk_size):
+            chunks.append((dll_path, sdb_bytes, entries_list[i:i+chunk_size]))
+
+        animations = []
+        with multiprocessing.Pool(n_workers) as pool:
+            for batch_idx, batch_result in enumerate(pool.imap_unordered(_anim_worker_batch, chunks)):
+                animations.extend(batch_result)
+                print(f"    Worker done: +{len(batch_result)} animations "
+                      f"({len(animations)} total)", flush=True)
+
+        print(f"  Extracted {len(animations)} animations")
+        return animations
+
+    # Sequential fallback
+    animations = []
+    sdb_buf = ctypes.create_string_buffer(sdb_bytes)
+    sdb_file = dll.GrannyReadEntireFileFromMemory(len(sdb_bytes), sdb_buf)
+    if not sdb_file:
+        return animations
+    str_db = dll.GrannyGetStringDatabase(sdb_file)
+
     for idx, (entry_name, gr2_bytes) in enumerate(anim_entries.items()):
-        gr2_buf = ctypes.create_string_buffer(gr2_bytes)
-        gr2_file = dll.GrannyReadEntireFileFromMemory(len(gr2_bytes), gr2_buf)
-        if not gr2_file:
-            continue
-        dll.GrannyRemapFileStrings(gr2_file, str_db)
-        fi = dll.GrannyGetFileInfo(gr2_file)
-        if not fi:
-            dll.GrannyFreeFile(gr2_file)
-            continue
-
-        anim_count = ri(fi, 0x78)
-        if anim_count == 0:
-            dll.GrannyFreeFile(gr2_file)
-            continue
-
-        anim0 = rq(rq(fi, 0x7C), 0)
-        anim_name = read_cstr(rq(anim0, 0))
-        duration = struct.unpack_from('<f', safe_bytes(anim0 + 8, 4))[0]
-        if duration <= 0:
-            dll.GrannyFreeFile(gr2_file)
-            continue
-
-        tg_count = ri(fi, 0x6C)
-        if tg_count == 0:
-            dll.GrannyFreeFile(gr2_file)
-            continue
-        tg0 = rq(rq(fi, 0x70), 0)
-        tt_count = ri(tg0, 0x14)
-        tt_ptr = rq(tg0, 0x18)
-        if tt_count == 0 or not _valid_ptr(tt_ptr):
-            dll.GrannyFreeFile(gr2_file)
-            continue
-
-        tracks = []
-        for ti in range(tt_count):
-            t_base = tt_ptr + ti * TRACK_STRIDE
-            t_name = read_cstr(rq(t_base, 0))
-
-            orient = _decode_curve(dll, t_base + 0x0C, rq(t_base, 0x14), 4)
-            pos    = _decode_curve(dll, t_base + 0x1C, rq(t_base, 0x24), 3)
-            scale  = _decode_curve(dll, t_base + 0x2C, rq(t_base, 0x34), 9)
-
-            if orient is None and pos is None and scale is None:
-                continue
-            track = {'name': t_name, 'orient': orient, 'pos': pos, 'scale': scale}
-            _postprocess_track(track)
-            # Skip if post-processing removed all data
-            if track['orient'] is None and track['pos'] is None and track['scale'] is None:
-                continue
-            tracks.append(track)
-
-        if tracks:
-            animations.append({
-                'name': entry_name,          # GPK entry name (stable, used for roundtrip matching)
-                'granny_name': anim_name,    # internal Granny name (for reference)
-                'duration': duration,
-                'tracks': tracks,
-            })
-
-        dll.GrannyFreeFile(gr2_file)
+        anim = _process_single_anim(dll, str_db, entry_name, gr2_bytes)
+        if anim:
+            animations.append(anim)
         if (idx + 1) % 25 == 0 or idx + 1 == total:
             print(f"    {idx+1}/{total} processed ({len(animations)} animations)", flush=True)
 
@@ -693,7 +759,7 @@ def extract_animations(dll, gpk_entries, sdb_bytes, anim_filter=None):
 # ─────────────────────────── glTF export ─────────────────────────────────────
 
 def build_gltf(character_name, mesh_data_list, mesh_names, bones, animations=None,
-               texture_png_bytes=None):
+               texture_png_bytes=None, texture_map=None):
     gltf = GLTF2()
     gltf.scene = 0
     gltf.scenes = [Scene(nodes=[])]
@@ -761,10 +827,47 @@ def build_gltf(character_name, mesh_data_list, mesh_names, bones, animations=Non
     gltf.skins.append(skin)
     skin_idx = 0
 
-    # ── Texture + Material ──
-    mat_idx = None
-    if texture_png_bytes is not None:
-        # Embed PNG as a buffer view
+    # ── Textures + Materials ──
+    # texture_map: {tex_base_name: (png_bytes, mesh_indices)} — multi-texture support
+    # texture_png_bytes: legacy single-texture (backwards compat)
+    tex_name_to_mat = {}  # tex_base_name → glTF material index
+    mesh_idx_to_mat = {}  # GR2 mesh index → glTF material index
+
+    if texture_map:
+        # Multi-texture: each unique texture gets its own image/material
+        for tex_name, (png_bytes, mesh_indices) in texture_map.items():
+            png_bv_offset = sum(len(b) for b in all_buffers)
+            pad = (4 - (len(png_bytes) % 4)) % 4
+            all_buffers.append(png_bytes + b'\x00' * pad)
+            png_bv_idx = len(gltf.bufferViews)
+            gltf.bufferViews.append(BufferView(
+                buffer=0, byteOffset=png_bv_offset, byteLength=len(png_bytes),
+            ))
+
+            img_idx = len(gltf.images)
+            gltf.images.append(pygltflib.Image(
+                bufferView=png_bv_idx, mimeType="image/png", name=tex_name,
+            ))
+
+            tex_idx = len(gltf.textures)
+            gltf.textures.append(pygltflib.Texture(source=img_idx))
+
+            mat_idx = len(gltf.materials)
+            gltf.materials.append(pygltflib.Material(
+                name=f"Mat_{tex_name}",
+                pbrMetallicRoughness=pygltflib.PbrMetallicRoughness(
+                    baseColorTexture=pygltflib.TextureInfo(index=tex_idx),
+                    metallicFactor=0.0,
+                    roughnessFactor=1.0,
+                ),
+                doubleSided=True,
+            ))
+            tex_name_to_mat[tex_name] = mat_idx
+            for mi in mesh_indices:
+                mesh_idx_to_mat[mi] = mat_idx
+
+    elif texture_png_bytes is not None:
+        # Legacy single-texture fallback
         png_bv_offset = sum(len(b) for b in all_buffers)
         pad = (4 - (len(texture_png_bytes) % 4)) % 4
         all_buffers.append(texture_png_bytes + b'\x00' * pad)
@@ -773,7 +876,7 @@ def build_gltf(character_name, mesh_data_list, mesh_names, bones, animations=Non
             buffer=0, byteOffset=png_bv_offset, byteLength=len(texture_png_bytes),
         ))
 
-        img_idx = len(gltf.images) if hasattr(gltf, 'images') and gltf.images else 0
+        img_idx = len(gltf.images)
         gltf.images.append(pygltflib.Image(
             bufferView=png_bv_idx, mimeType="image/png", name=f"{character_name}_Color",
         ))
@@ -781,7 +884,7 @@ def build_gltf(character_name, mesh_data_list, mesh_names, bones, animations=Non
         tex_idx = len(gltf.textures)
         gltf.textures.append(pygltflib.Texture(source=img_idx))
 
-        mat_idx = len(gltf.materials)
+        default_mat = len(gltf.materials)
         gltf.materials.append(pygltflib.Material(
             name=f"Mat_{character_name}",
             pbrMetallicRoughness=pygltflib.PbrMetallicRoughness(
@@ -791,9 +894,12 @@ def build_gltf(character_name, mesh_data_list, mesh_names, bones, animations=Non
             ),
             doubleSided=True,
         ))
+        # Assign to all non-outline/shadow meshes
+        for i in range(len(mesh_names)):
+            mesh_idx_to_mat[i] = default_mat
 
     # ── Mesh nodes ──
-    for mesh_data, mesh_name in zip(mesh_data_list, mesh_names):
+    for mesh_i, (mesh_data, mesh_name) in enumerate(zip(mesh_data_list, mesh_names)):
         positions, normals, uvs, weights, joints, indices = mesh_data
         skinned = weights is not None
 
@@ -807,10 +913,10 @@ def build_gltf(character_name, mesh_data_list, mesh_names, bones, animations=Non
             attrs.JOINTS_0  = add_accessor(joints.astype(np.uint16), UNSIGNED_SHORT, VEC4, ARRAY_BUFFER)
             attrs.WEIGHTS_0 = add_accessor(weights.astype(np.float32), FLOAT, VEC4, ARRAY_BUFFER)
 
-        # Assign material to non-outline, non-shadow meshes
+        # Assign material — skip outline/shadow meshes
         prim_mat = None
-        if mat_idx is not None and 'Outline' not in mesh_name and 'Shadow' not in mesh_name:
-            prim_mat = mat_idx
+        if 'Outline' not in mesh_name and 'Shadow' not in mesh_name:
+            prim_mat = mesh_idx_to_mat.get(mesh_i)
 
         gltf.meshes.append(Mesh(
             name=mesh_name,
@@ -872,7 +978,9 @@ def build_gltf(character_name, mesh_data_list, mesh_names, bones, animations=Non
                 # Translation channel
                 if track['pos'] is not None:
                     knots, values, _ = track['pos']
-                    if len(knots) > 0 and values.shape[-1] == 3:
+                    if (len(knots) > 0 and values.shape[-1] == 3
+                            and np.all(np.isfinite(values))
+                            and not np.any(np.abs(values) > 1000.0)):
                         time_acc = add_accessor(knots.astype(np.float32), FLOAT, SCALAR)
                         val_acc = add_accessor(values.astype(np.float32), FLOAT, VEC3)
                         si = len(anim.samplers)
@@ -885,7 +993,11 @@ def build_gltf(character_name, mesh_data_list, mesh_names, bones, animations=Non
                 # Rotation channel (quaternion XYZW — same order as glTF)
                 if track['orient'] is not None:
                     knots, values, _ = track['orient']
-                    if len(knots) > 0 and values.shape[-1] == 4:
+                    if len(knots) > 0 and values.shape[-1] == 4 and np.all(np.isfinite(values)):
+                        # Normalize quaternions — non-unit quats cause mesh stretching
+                        norms = np.linalg.norm(values, axis=1, keepdims=True)
+                        norms = np.maximum(norms, 1e-10)
+                        values = values / norms
                         time_acc = add_accessor(knots.astype(np.float32), FLOAT, SCALAR)
                         val_acc = add_accessor(values.astype(np.float32), FLOAT, VEC4)
                         si = len(anim.samplers)
@@ -902,10 +1014,20 @@ def build_gltf(character_name, mesh_data_list, mesh_names, bones, animations=Non
                         if values.shape[-1] == 9:
                             # 3x3 matrix → extract diagonal as scale
                             scale_vals = values[:, [0, 4, 8]]  # M00, M11, M22
+                            # Check if the matrix has significant off-diagonal elements
+                            # (rotation/shear) — if so, diagonal is NOT a valid scale
+                            off_diag = values[:, [1, 2, 3, 5, 6, 7]]
+                            if np.any(np.abs(off_diag) > 0.01):
+                                continue  # skip — shear/rotation matrix, not pure scale
                         elif values.shape[-1] == 3:
                             scale_vals = values
                         else:
                             continue
+                        # Validate: skip NaN/Inf/extreme values
+                        if not np.all(np.isfinite(scale_vals)):
+                            continue
+                        if np.any(np.abs(scale_vals) > 100.0):
+                            continue  # extreme scale values — likely corrupt
                         time_acc = add_accessor(knots.astype(np.float32), FLOAT, SCALAR)
                         val_acc = add_accessor(scale_vals.astype(np.float32), FLOAT, VEC3)
                         si = len(anim.samplers)
@@ -929,11 +1051,355 @@ def build_gltf(character_name, mesh_data_list, mesh_names, bones, animations=Non
 
 # ─────────────────────────── Texture extraction ─────────────────────────────
 
-def _extract_model_texture(pkg_dir, character_name):
+def _read_gr2_texture_names(fi):
+    """
+    Read texture filenames from the GR2 file_info's Textures array.
+    Returns list of base filenames (without extension or path), e.g. ["Melinoe_Color512"].
+    """
+    names = []
+    try:
+        tex_off = _t('granny_file_info', 'Textures')
+    except KeyError:
+        return names
+
+    tex_count = ri(fi, tex_off)
+    if tex_count <= 0:
+        return names
+    tex_arr = rq(fi, tex_off + 4)
+    if not _valid_ptr(tex_arr):
+        return names
+
+    # Get FromFileName offset from granny_texture type map
+    try:
+        fn_off = _t('granny_texture', 'FromFileName')
+    except KeyError:
+        fn_off = 0  # fallback: first field is typically the filename
+
+    for i in range(tex_count):
+        tex_ptr = rq(tex_arr, i * 8)
+        if not _valid_ptr(tex_ptr):
+            continue
+        fn_ptr = rq(tex_ptr, fn_off)
+        fn = read_cstr(fn_ptr)
+        if fn:
+            # Extract base filename: "D:/work/.../Melinoe_Color512.png" → "Melinoe_Color512"
+            base = fn.replace('\\', '/').split('/')[-1]
+            base = base.rsplit('.', 1)[0] if '.' in base else base
+            names.append(base)
+    return names
+
+
+def _resolve_texture_from_material(mat_ptr, debug=False):
+    """
+    Given a granny_material pointer, try to find a texture filename.
+    Tries two paths:
+      1. material → Maps[0] → nested material → Texture → FromFileName
+      2. material → Texture → FromFileName (direct reference)
+    Returns base filename or None.
+    """
+    try:
+        fn_off = _t('granny_texture', 'FromFileName')
+    except KeyError:
+        fn_off = 0
+
+    try:
+        tex_ref_off = _t('granny_material', 'Texture')
+    except KeyError:
+        tex_ref_off = None
+
+    def _tex_filename(tex_ptr):
+        if not _valid_ptr(tex_ptr):
+            return None
+        fn_ptr = rq(tex_ptr, fn_off)
+        fn = read_cstr(fn_ptr)
+        if fn:
+            base = fn.replace('\\', '/').split('/')[-1]
+            return base.rsplit('.', 1)[0] if '.' in base else base
+        return None
+
+    # Path 1: material → Maps[0] → nested material → Texture → FromFileName
+    try:
+        maps_off = _t('granny_material', 'Maps')
+    except KeyError:
+        maps_off = None
+        if debug:
+            print(f"        No 'Maps' field in granny_material type map")
+
+    if maps_off is not None:
+        maps_count = ri(mat_ptr, maps_off)
+        if debug:
+            print(f"        Maps: count={maps_count} at offset 0x{maps_off:X}")
+        if maps_count > 0:
+            maps_arr = rq(mat_ptr, maps_off + 4)
+            if _valid_ptr(maps_arr):
+                try:
+                    map_mat_off = _t('granny_material_map', 'Material')
+                except KeyError:
+                    map_mat_off = 8
+
+                # Check each map entry
+                try:
+                    map_stride = _t('granny_material_map', '__stride__')
+                except KeyError:
+                    map_stride = 16  # Usage*(8) + Material*(8)
+
+                if debug:
+                    print(f"        map_stride={map_stride} map_mat_off={map_mat_off}")
+
+                for mi in range(maps_count):
+                    nested_mat = rq(maps_arr, mi * map_stride + map_mat_off)
+                    if not _valid_ptr(nested_mat):
+                        if debug:
+                            print(f"        Map[{mi}]: invalid nested_mat ptr")
+                        continue
+                    nested_name = read_cstr(rq(nested_mat, 0))
+                    if debug:
+                        print(f"        Map[{mi}]: nested material '{nested_name}' at 0x{nested_mat:X}")
+                    # Try nested material → Texture
+                    if tex_ref_off is not None:
+                        tex_ptr = rq(nested_mat, tex_ref_off)
+                        if debug:
+                            print(f"          Texture ptr at +0x{tex_ref_off:X}: 0x{tex_ptr:X} valid={_valid_ptr(tex_ptr)}")
+                        result = _tex_filename(tex_ptr)
+                        if result:
+                            return result
+                    # Try nested material → Maps recursively (one level)
+                    if maps_off is not None:
+                        inner_count = ri(nested_mat, maps_off)
+                        if inner_count > 0:
+                            inner_arr = rq(nested_mat, maps_off + 4)
+                            if debug:
+                                print(f"          Inner maps: count={inner_count}")
+                            if _valid_ptr(inner_arr):
+                                for ii in range(inner_count):
+                                    inner_mat = rq(inner_arr, ii * map_stride + map_mat_off)
+                                    if _valid_ptr(inner_mat) and tex_ref_off is not None:
+                                        tex_ptr = rq(inner_mat, tex_ref_off)
+                                        result = _tex_filename(tex_ptr)
+                                        if result:
+                                            return result
+
+    # Path 2: material → Texture directly
+    if tex_ref_off is not None:
+        tex_ptr = rq(mat_ptr, tex_ref_off)
+        result = _tex_filename(tex_ptr)
+        if result:
+            return result
+
+    return None
+
+
+def _resolve_mesh_texture(mesh_ptr, debug=False):
+    """
+    Walk the material chain for a mesh to find its texture filename.
+    Returns base filename (e.g. "Melinoe_Color512") or None.
+    """
+    try:
+        mb_off = _t('granny_mesh', 'MaterialBindings')
+        if debug:
+            print(f"      MaterialBindings offset from type map: 0x{mb_off:X}")
+    except KeyError:
+        try:
+            bb_off = _t('granny_mesh', 'BoneBindings')
+            mb_off = bb_off - 0xC
+            if debug:
+                print(f"      MaterialBindings fallback from BoneBindings(0x{bb_off:X}): 0x{mb_off:X}")
+        except KeyError:
+            if debug:
+                print(f"      No MaterialBindings or BoneBindings offset found")
+            return None
+
+    mb_count = ri(mesh_ptr, mb_off)
+    if mb_count <= 0:
+        if debug:
+            print(f"      MaterialBindings count = {mb_count}")
+        return None
+    mb_arr = rq(mesh_ptr, mb_off + 4)
+    if not _valid_ptr(mb_arr):
+        if debug:
+            print(f"      MaterialBindings ptr invalid: 0x{mb_arr:X}")
+        return None
+
+    if debug:
+        print(f"      MaterialBindings: count={mb_count} arr=0x{mb_arr:X}")
+
+    # Try each material binding until we find a texture
+    for bi in range(mb_count):
+        mat_ptr = rq(mb_arr, bi * 8)
+        if not _valid_ptr(mat_ptr):
+            if debug:
+                print(f"      Binding[{bi}]: invalid ptr")
+            continue
+        mat_name = read_cstr(rq(mat_ptr, 0))
+        if debug:
+            print(f"      Binding[{bi}]: Material '{mat_name}' at 0x{mat_ptr:X}")
+        result = _resolve_texture_from_material(mat_ptr, debug=debug)
+        if result:
+            return result
+
+    return None
+
+
+def _read_mesh_texture_map(fi, debug=False):
+    """
+    Build a mapping of mesh_index → texture base filename by walking
+    each mesh's material chain.
+    Returns dict {mesh_index: "TextureName"} and list of unique texture names.
+    """
+    _meshes = _t('granny_file_info', 'Meshes')
+    mesh_count = ri(fi, _meshes)
+    meshes_arr = rq(fi, _meshes + 4)
+
+    mesh_tex = {}
+    unique_textures = []
+    for mi in range(mesh_count):
+        mesh_ptr = rq(meshes_arr, mi * 8)
+        mesh_name = read_cstr(rq(mesh_ptr, 0))
+        tex_name = _resolve_mesh_texture(mesh_ptr, debug=debug)
+        if tex_name:
+            mesh_tex[mi] = tex_name
+            if tex_name not in unique_textures:
+                unique_textures.append(tex_name)
+            print(f"    Mesh[{mi}] {mesh_name!r} → texture: {tex_name}")
+        else:
+            print(f"    Mesh[{mi}] {mesh_name!r} → no texture found")
+
+    return mesh_tex, unique_textures
+
+
+def _decode_texture_to_png(pixel_data, tw, th, fmt):
+    """Decode raw pixel data to PNG bytes. Returns PNG bytes or None."""
+    import io
+    try:
+        import texture2ddecoder
+        from PIL import Image
+    except ImportError:
+        return None
+
+    img = None
+    if fmt == 0x1C:  # BC7
+        blocks = max(tw // 4, 1) * max(th // 4, 1)
+        mip0_size = blocks * 16
+        bgra = texture2ddecoder.decode_bc7(pixel_data[:mip0_size], tw, th)
+        img = Image.frombytes('RGBA', (tw, th), bgra)
+        r, g, b, a = img.split()
+        img = Image.merge('RGBA', (b, g, r, a))
+    elif fmt in (0x00, 0x0E):
+        mip0_size = tw * th * 4
+        img = Image.frombytes('RGBA', (tw, th), pixel_data[:mip0_size])
+    elif fmt == 0x06:  # BC3/DXT5
+        blocks = max(tw // 4, 1) * max(th // 4, 1)
+        mip0_size = blocks * 16
+        bgra = texture2ddecoder.decode_bc3(pixel_data[:mip0_size], tw, th)
+        img = Image.frombytes('RGBA', (tw, th), bgra)
+        r, g, b, a = img.split()
+        img = Image.merge('RGBA', (b, g, r, a))
+    elif fmt == 0x04:  # BC1/DXT1
+        blocks = max(tw // 4, 1) * max(th // 4, 1)
+        mip0_size = blocks * 8
+        bgra = texture2ddecoder.decode_bc1(pixel_data[:mip0_size], tw, th)
+        img = Image.frombytes('RGBA', (tw, th), bgra)
+        r, g, b, a = img.split()
+        img = Image.merge('RGBA', (b, g, r, a))
+
+    if img:
+        png_buf = io.BytesIO()
+        img.save(png_buf, format='PNG')
+        return png_buf.getvalue()
+    return None
+
+
+def _extract_all_textures(pkg_dir, texture_names):
+    """
+    Extract multiple textures by exact name from .pkg files.
+    Handles both Tex2D (0xAD) and Atlas (0xDE) texture entries.
+    texture_names: list of base filenames (e.g. ["Athena_Color", "Artemis_Color"])
+    Returns dict {base_name: (png_bytes, dds_bytes)} for found textures.
+    """
+    from pkg_texture import (read_pkg_chunks, scan_textures, build_dds_header,
+                              load_texture_index)
+
+    remaining = {n.lower(): n for n in texture_names}  # lowercase → original
+    results = {}
+
+    # Use index for fast .pkg file lookup
+    tex_index = load_texture_index(pkg_dir)
+
+    pkg_targets = {}  # pkg_path → set of lowercase names to find
+    if tex_index:
+        for lc_name in list(remaining.keys()):
+            matched = False
+            for key, info in tex_index.items():
+                if key == lc_name or key.startswith(lc_name) or lc_name.startswith(key):
+                    pkg_path = os.path.join(pkg_dir, info['pkg'])
+                    pkg_targets.setdefault(pkg_path, set()).add(lc_name)
+                    matched = True
+                    break
+            if not matched:
+                # Not in index — will need full scan for this name
+                pass
+
+    # For any names not found in index, scan all .pkg files
+    indexed_names = set()
+    for names_set in pkg_targets.values():
+        indexed_names.update(names_set)
+    unindexed = set(remaining.keys()) - indexed_names
+    if unindexed:
+        pkg_files = sorted(os.path.join(pkg_dir, f) for f in os.listdir(pkg_dir)
+                          if f.endswith('.pkg') and os.path.isfile(os.path.join(pkg_dir, f)))
+        for p in pkg_files:
+            pkg_targets.setdefault(p, set()).update(unindexed)
+
+    for pkg_path, search_names in pkg_targets.items():
+        if not remaining:
+            break
+        try:
+            chunks, _, _ = read_pkg_chunks(pkg_path)
+        except Exception:
+            continue
+
+        # Use scan_textures which handles both Tex2D and Atlas entries
+        all_textures = scan_textures(chunks)
+
+        for t in all_textures:
+            if not remaining:
+                break
+            fn_lower = t['name'].lower().replace('\\', '/').split('/')[-1]
+            fn_base = fn_lower.rsplit('.', 1)[0] if '.' in fn_lower else fn_lower
+
+            matched_key = None
+            for sn in search_names:
+                if fn_base == sn or fn_base.startswith(sn):
+                    if sn in remaining:
+                        matched_key = sn
+                        break
+
+            if matched_key:
+                ci = t['chunk_idx']
+                chunk = chunks[ci][0]
+                pixel_data = chunk[t['data_offset']:t['data_offset'] + t['pixel_size']]
+
+                dds_header = build_dds_header(t['width'], t['height'], t['format'], t['pixel_size'])
+                dds_bytes = dds_header + pixel_data
+
+                png_bytes = _decode_texture_to_png(pixel_data, t['width'], t['height'], t['format'])
+                if png_bytes:
+                    orig_name = remaining.pop(matched_key)
+                    results[orig_name] = (png_bytes, dds_bytes)
+                    pkg_name = os.path.basename(pkg_path)
+                    src = "atlas" if t.get('atlas') else "tex2d"
+                    print(f"  Found: {t['name']} ({t['width']}x{t['height']} "
+                          f"fmt=0x{t['format']:X} {src}) in {pkg_name}")
+
+    return results
+
+
+def _extract_model_texture(pkg_dir, character_name, gr2_texture_names=None):
     """
     Extract the 3D model texture from .pkg files for the given character.
-    Searches all .pkg files in pkg_dir for matching texture entries.
-    Returns (png_bytes, dds_bytes) or (None, None) if not found.
+    Uses texture names from the GR2 material chain if available, otherwise
+    falls back to name-based guessing.
+    Returns (png_bytes, dds_bytes, texture_name) or (None, None, None) if not found.
     """
     import io
     try:
@@ -944,25 +1410,58 @@ def _extract_model_texture(pkg_dir, character_name):
               "Run: pip install texture2ddecoder Pillow")
         return None, None
 
-    from pkg_texture import read_pkg_chunks, _swap32, _read_7bit_int, _read_csstring, build_dds_header
+    from pkg_texture import (read_pkg_chunks, _swap32, _read_7bit_int,
+                              _read_csstring, build_dds_header, load_texture_index)
 
-    # Search patterns for the character's model texture
+    # Build search patterns: prefer GR2 texture names (exact), fall back to guessing
+    search = []
+    if gr2_texture_names:
+        for tn in gr2_texture_names:
+            search.append(tn.lower())
+        print(f"  GR2 texture names: {gr2_texture_names}")
+    # Always add fallback patterns
     cn = character_name.lower()
-    search = [
-        f"{cn}transform_color",
-        f"{cn}_color512",
-        f"{cn}_color",
-    ]
+    for pat in [f"{cn}transform_color", f"{cn}_color512", f"{cn}_color"]:
+        if pat not in search:
+            search.append(pat)
 
-    # Search all .pkg files, starting with Fx.pkg (most common) then others
-    pkg_files = []
-    fx = os.path.join(pkg_dir, "Fx.pkg")
-    if os.path.isfile(fx):
-        pkg_files.append(fx)
-    for f in sorted(os.listdir(pkg_dir)):
-        full = os.path.join(pkg_dir, f)
-        if f.endswith('.pkg') and f != 'Fx.pkg' and os.path.isfile(full):
-            pkg_files.append(full)
+    # Fast path: use pre-built texture index to only read the right .pkg file
+    tex_index = load_texture_index(pkg_dir)
+    if tex_index:
+        # Find which .pkg contains our texture using the index
+        target_pkg = None
+        for s in search:
+            if s in tex_index:
+                target_pkg = tex_index[s]['pkg']
+                print(f"  Index hit: '{s}' in {target_pkg}")
+                break
+            # Also try startswith match for fallback patterns
+            for key in tex_index:
+                if key.startswith(s) or s.startswith(key):
+                    target_pkg = tex_index[key]['pkg']
+                    print(f"  Index hit: '{key}' ~ '{s}' in {target_pkg}")
+                    break
+            if target_pkg:
+                break
+
+        if target_pkg:
+            pkg_files = [os.path.join(pkg_dir, target_pkg)]
+        else:
+            print(f"  No index match, falling back to full scan")
+            pkg_files = None  # fall through to full scan
+    else:
+        pkg_files = None  # no index, full scan
+
+    if pkg_files is None:
+        # Full scan fallback: check all .pkg files
+        pkg_files = []
+        fx = os.path.join(pkg_dir, "Fx.pkg")
+        if os.path.isfile(fx):
+            pkg_files.append(fx)
+        for f in sorted(os.listdir(pkg_dir)):
+            full = os.path.join(pkg_dir, f)
+            if f.endswith('.pkg') and f != 'Fx.pkg' and os.path.isfile(full):
+                pkg_files.append(full)
 
     for pkg_path in pkg_files:
         try:
@@ -983,7 +1482,9 @@ def _extract_model_texture(pkg_dir, character_name):
                     data_start = doff
 
                     filename_lower = name.lower().replace('\\', '/').split('/')[-1]
-                    if any(filename_lower.startswith(s) or filename_lower == s for s in search):
+                    # Strip extension if present in pkg entry name
+                    fn_base = filename_lower.rsplit('.', 1)[0] if '.' in filename_lower else filename_lower
+                    if any(fn_base == s or fn_base.startswith(s) for s in search):
                         if chunk[doff:doff+3] == b'XNB':
                             doff += 10
                             fmt = struct.unpack_from('<I', chunk, doff)[0]
@@ -1021,9 +1522,10 @@ def _extract_model_texture(pkg_dir, character_name):
                             png_bytes = png_buf.getvalue()
 
                             pkg_name = os.path.basename(pkg_path)
+                            tex_name = name.replace('\\', '/').split('/')[-1]
                             print(f"  Found: {name} ({tw}x{th} fmt=0x{fmt:X} "
                                   f"{tps:,} bytes) in {pkg_name}")
-                            return png_bytes, dds_bytes
+                            return png_bytes, dds_bytes, tex_name
 
                     doff = data_start + total_sz
                 elif tag == 0xDE:
@@ -1034,7 +1536,7 @@ def _extract_model_texture(pkg_dir, character_name):
                 else:
                     break
 
-    return None, None
+    return None, None, None
 
 
 # ─────────────────────────── Main ────────────────────────────────────────────
@@ -1049,7 +1551,7 @@ def main():
     parser.add_argument("--mesh-index", type=int, default=None,
                         help="Export only this mesh index; default: all")
     parser.add_argument("--all-lods", action="store_true",
-                        help="(deprecated, all meshes now exported by default)")
+                        help="(deprecated, ignored — all meshes exported by default)")
     parser.add_argument("-o", "--output", default=None, help="Output .glb path")
     parser.add_argument("--debug", action="store_true",
                         help="Print per-mesh vertex layout and bone binding info")
@@ -1057,6 +1559,8 @@ def main():
                         help="Include animation data from the GPK")
     parser.add_argument("--anim-filter", default=None,
                         help="Only export animations matching this pattern (e.g. 'Idle')")
+    parser.add_argument("--anim-workers", type=int, default=0,
+                        help="Number of parallel animation workers (0=auto, 1=sequential)")
     parser.add_argument("--textures", action="store_true",
                         help="Embed 3D model texture in GLB + save original DDS alongside")
     parser.add_argument("--pkg-dir", default=None,
@@ -1100,6 +1604,7 @@ def main():
 
     mesh_data_list = []
     mesh_names = []
+    exported_gr2_indices = []  # tracks which GR2 mesh index each exported mesh came from
     seen_names: dict = {}
     for mi in mesh_indices:
         mesh_ptr = rq(meshes_arr, mi * 8)
@@ -1109,54 +1614,95 @@ def main():
         mesh_name, positions, normals, uvs, weights, joints, indices = result
         if mesh_name in seen_names:
             seen_names[mesh_name] += 1
-            mesh_name = f"{mesh_name}_LOD{seen_names[mesh_name]}"
+            mesh_name = f"{mesh_name}_{seen_names[mesh_name]}"
         else:
             seen_names[mesh_name] = 0
         mtype = "rigid" if joints is None else "skinned"
         print(f"  Mesh[{mi}] {mesh_name!r}: {len(positions)} verts, {len(indices)//3} tris  [{mtype}]")
         mesh_data_list.append((positions, normals, uvs, weights, joints, indices))
         mesh_names.append(mesh_name)
+        exported_gr2_indices.append(mi)
 
     # ── Animations ──
     anim_data = None
     if args.animations or args.anim_filter:
         print(f"[5/6] Extracting animations")
-        anim_data = extract_animations(dll, entries, sdb_bytes, anim_filter=args.anim_filter)
+        anim_data = extract_animations(dll, entries, sdb_bytes,
+                                       anim_filter=args.anim_filter, dll_path=args.dll,
+                                       anim_workers=args.anim_workers)
     else:
         print(f"[5/6] Animations: skipped (use --animations to include)")
 
     # ── Textures ──
-    texture_png = None
+    texture_map = None  # {tex_name: (png_bytes, [mesh_indices])}
+    texture_png = None  # legacy single-texture fallback
     if args.textures:
-        print(f"[*] Extracting 3D model texture", flush=True)
+        print(f"[*] Extracting 3D model textures", flush=True)
         pkg_dir = args.pkg_dir
         if pkg_dir is None:
-            # Auto-detect: gpk_dir is .../Content/GR2/_Optimized, pkg_dir is .../Content/Packages/1080p
             content_dir = os.path.dirname(os.path.dirname(args.gpk_dir))
             pkg_dir = os.path.join(content_dir, "Packages", "1080p")
+
         if os.path.isdir(pkg_dir):
             try:
-                texture_png, dds_data = _extract_model_texture(pkg_dir, args.name)
-                if texture_png:
-                    print(f"  Texture embedded as PNG in GLB", flush=True)
-                    # Save original DDS alongside
+                # Walk material chain to get per-mesh texture assignments
+                mesh_tex_map, unique_tex_names = _read_mesh_texture_map(fi, debug=args.debug)
+                # mesh_tex_map: {gr2_mesh_index: "TextureName"}
+                # Remap to local indices using exported_gr2_indices (skips shadow meshes)
+                local_mesh_tex = {}  # local_index → tex_name
+                for local_i, gr2_i in enumerate(exported_gr2_indices):
+                    if gr2_i in mesh_tex_map:
+                        local_mesh_tex[local_i] = mesh_tex_map[gr2_i]
+
+                # Also check fi->Textures as a fallback source
+                if not unique_tex_names:
+                    unique_tex_names = _read_gr2_texture_names(fi)
+                    if unique_tex_names:
+                        print(f"  fi->Textures fallback: {unique_tex_names}")
+
+                # Last resort: name-based guessing
+                if not unique_tex_names:
+                    cn = args.name.lower()
+                    guesses = [f"{cn}transform_color", f"{cn}_color512", f"{cn}_color"]
+                    unique_tex_names = guesses
+                    print(f"  Name-based fallback: {guesses}")
+
+                print(f"  Searching for textures: {unique_tex_names}")
+                extracted = _extract_all_textures(pkg_dir, unique_tex_names)
+
+                if extracted:
+                    texture_map = {}
                     dds_dir = os.path.splitext(out_path)[0] + "_textures"
                     os.makedirs(dds_dir, exist_ok=True)
-                    dds_path = os.path.join(dds_dir, f"{args.name}_Color.dds")
-                    with open(dds_path, 'wb') as f:
-                        f.write(dds_data)
-                    print(f"  Original DDS saved: {dds_path}", flush=True)
+                    for tex_name, (png_bytes, dds_bytes) in extracted.items():
+                        # Find which local meshes use this texture
+                        indices_for_tex = [li for li, tn in local_mesh_tex.items()
+                                           if tn == tex_name]
+                        # If no mesh mapping (fallback path), assign to all body meshes
+                        if not indices_for_tex:
+                            indices_for_tex = [i for i, mn in enumerate(mesh_names)
+                                               if 'Outline' not in mn and 'Shadow' not in mn]
+                        texture_map[tex_name] = (png_bytes, indices_for_tex)
+                        dds_path = os.path.join(dds_dir, f"{tex_name}.dds")
+                        with open(dds_path, 'wb') as f:
+                            f.write(dds_bytes)
+                    n_tex = len(texture_map)
+                    n_meshes = sum(len(v[1]) for v in texture_map.values())
+                    print(f"  {n_tex} texture(s) embedded, assigned to {n_meshes} mesh(es)")
                 else:
-                    print(f"  No texture found for {args.name} in Fx.pkg")
+                    print(f"  No textures found for {args.name}")
             except Exception as e:
+                import traceback
                 print(f"  Texture extraction failed: {e}")
+                traceback.print_exc()
         else:
             print(f"  Package directory not found: {pkg_dir}")
 
     step = "6/6" if (args.animations or args.anim_filter) else "5/5"
     print(f"[{step}] Building glTF -> {out_path}", flush=True)
     gltf = build_gltf(args.name, mesh_data_list, mesh_names, bones,
-                       animations=anim_data, texture_png_bytes=texture_png)
+                       animations=anim_data, texture_png_bytes=texture_png,
+                       texture_map=texture_map)
     print(f"  Saving GLB file...", flush=True)
     gltf.save(out_path)
     anim_msg = f", {len(anim_data)} animations" if anim_data else ""

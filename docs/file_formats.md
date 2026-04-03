@@ -133,7 +133,7 @@ Each `**` field is a pointer to an array of pointers (dereference twice to reach
 | +0x30 | 4 | BoneBindingCount |
 | +0x34 | 8 | BoneBindings* |
 
-Multiple meshes may share the same `Name` — these are LOD variants. The first occurrence is the highest quality.
+Multiple meshes may share the same `Name` — these are split parts of the same mesh, all rendered together by the engine. During export, duplicate names get `_1`, `_2`, `_3` suffixes. The importer strips both these and legacy `_LOD` suffixes when matching back to GR2 meshes.
 
 ---
 
@@ -187,3 +187,62 @@ Fixed format used by all Hades II character meshes:
 | +0x1C | 8 | Idx16*  (uint16 triangle list) |
 
 Hades II uses the 16-bit index path exclusively. Count is always a multiple of 3.
+
+---
+
+## PKG — Package Archive (Textures)
+
+Textures and other assets are stored in `.pkg` files under `Content/Packages/1080p/`.
+
+### Binary Layout
+
+```
+[header       : uint32 BE]  Version in low 16 bits, flags in high bits
+                             (header & 0x20000000) != 0 → LZ4-compressed chunks
+
+Chunks (repeated until EOF):
+  [flag        : uint8]      Non-zero = LZ4 compressed, 0 = uncompressed
+  If compressed:
+    [comp_size : uint32 BE]  Byte-swapped (big-endian) compressed size
+    [lz4_data  : bytes]      Raw LZ4 block
+  If uncompressed:
+    [raw bytes]              Remaining data is uncompressed
+
+Within each decompressed chunk:
+  Loop over asset entries:
+    [tag       : uint8]      Asset type (see table below)
+    [asset data...]
+```
+
+### Asset Type Tags
+
+| Tag | Type | Notes |
+|-----|------|-------|
+| 0xAA | **Texture3D** | Name + big-endian size + XNB-wrapped texture data |
+| 0xAD | **Texture2D** | Name + big-endian size + XNB-wrapped texture data |
+| 0xBB | Bink video | Video data |
+| 0xBE | End of chunk | Stop processing current chunk |
+| 0xCC | Include | References another .pkg file |
+| 0xDE | **Atlas** | Sprite atlas with sub-entries and inline or referenced texture |
+| 0xEE | Bink atlas | Video atlas |
+| 0xFF | End of file | Stop processing entirely |
+
+**Key finding:** Both 0xAA (Texture3D) and 0xAD (Texture2D) entries use the same format: a name string followed by a big-endian uint32 size, then XNB-wrapped texture data. The size field for 0xAA entries is big-endian (byte-swapped), which was previously misread as little-endian, causing the scanner to skip the rest of the chunk.
+
+### Texture Entry Format (0xAA and 0xAD)
+
+```
+[CSString]         — texture name (7-bit length prefix + UTF-8)
+[uint32 BE]        — total_size (byte-swapped big-endian)
+[XNB header]       — 10 bytes: "XNB" + platform + version + flags + file_size
+[uint32 LE]        — format code (see texture_pipeline.md for format table)
+[uint32 LE]        — width
+[uint32 LE]        — height
+[uint32 LE]        — depth (1 for 2D textures)
+[uint32 LE]        — pixel_data_size (includes all mip levels)
+[bytes]            — pixel data (BCn compressed or uncompressed)
+```
+
+### 3D Model Texture Locations
+
+All character 3D model textures are stored as Texture2D (0xAD) or Texture3D (0xAA) entries across various `.pkg` files (not only `Fx.pkg`). Texture names use a `GR2\` or `Models\` path prefix. A texture index (`_texture_index.json`) can be built by scanning all `.pkg` files once for fast batch lookups.

@@ -872,20 +872,17 @@ _VARIANT_WORDS = ('overlook', 'overview', 'overworld', 'portrait')
 
 def _normalize_mesh_name(name: str) -> str:
     """
-    Strip rig prefix, LOD suffixes, Blender duplicate suffixes, and path
+    Strip rig prefix, part suffixes, Blender duplicate suffixes, and path
     separators for matching.
-    'Melinoe_Rig:MelinoeOverlook_MeshShape_LOD1.001' -> 'melinoeoverlook_meshshape'
+    'Melinoe_Rig:MelinoeOverlook_MeshShape_2.001' -> 'melinoeoverlook_meshshape'
     """
     # Drop 'Armature:' / 'Rig:' style prefixes Blender adds on export
     n = name.split(':')[-1].split('|')[-1].split('/')[-1]
     # Strip Blender duplicate suffixes (.001, .002, etc.)
     import re
     n = re.sub(r'\.\d{3,}$', '', n)
-    # Strip LOD suffixes
-    for suffix in ('_LOD1', '_LOD2', '_LOD3', '_lod1', '_lod2', '_lod3'):
-        if n.endswith(suffix):
-            n = n[: -len(suffix)]
-            break
+    # Strip part suffixes (_1, _2, _3 and legacy _LOD1, _LOD2, _LOD3)
+    n = re.sub(r'_(?:LOD)?[1-9]$', '', n, flags=re.IGNORECASE)
     return n.lower()
 
 
@@ -926,7 +923,7 @@ def _best_name_match(glb_key: str, gr2_by_name: dict) -> str | None:
 
 
 def _unique_gr2_meshes(gr2_mesh_list: list) -> list:
-    """Return one entry per unique normalised name (first = highest LOD)."""
+    """Return one entry per unique normalised name (first occurrence)."""
     seen: set = set()
     out = []
     for gm in gr2_mesh_list:
@@ -1404,8 +1401,8 @@ def patch_vertex_data(
 
     positional=True: pair GLB mesh[i] to unique GR2 mesh[i] by index.
 
-    When allow_topology_change=False (default): only patches LODs whose vertex
-    count matches the GLB mesh. When True: patches the first matching LOD
+    When allow_topology_change=False (default): only patches parts whose vertex
+    count matches the GLB mesh. When True: patches the first matching part
     regardless of vertex count (allocates new buffers for the serializer).
 
     Returns n_patched (int).
@@ -1431,8 +1428,8 @@ def patch_vertex_data(
         return patched
 
     # Build ordered groups: normalised name -> [GR2 meshes in file order]
-    # GR2 LODs share the same name (e.g. two "Melinoe_MeshShape" at different resolutions).
-    # We match by name first, then pair by position within the group (LOD0→LOD0, LOD1→LOD1).
+    # GR2 same-name meshes are split parts of a single mesh (not LODs).
+    # We match by name first, then pair by position within the group.
     gr2_by_name: dict[str, list] = {}
     for gm in gr2_mesh_list:
         key = _normalize_mesh_name(gm['name'])
@@ -1524,8 +1521,8 @@ def patch_vertex_data(
         # Pair by position: GLB[0]→GR2[0], GLB[1]→GR2[1], etc.
         for i, glb_m in enumerate(glb_group):
             if i >= len(gr2_group):
-                print(f"  WARNING: GLB has more LODs than GR2 for '{matched_key}' "
-                      f"— skipping GLB LOD {i}")
+                print(f"  WARNING: GLB has more parts than GR2 for '{matched_key}' "
+                      f"— skipping GLB part {i}")
                 continue
 
             gm = gr2_group[i]
@@ -1533,7 +1530,7 @@ def patch_vertex_data(
             vc_gr2 = gm['vc']
 
             if vc_glb != vc_gr2 and not allow_topology_change:
-                msg = (f"Mesh '{glb_m['name']}' LOD{i}: vertex count mismatch "
+                msg = (f"Mesh '{glb_m['name']}' part {i}: vertex count mismatch "
                        f"(GLB={vc_glb}, GR2={vc_gr2}). "
                        f"Use --allow-topology-change to enable.")
                 if strict:

@@ -298,6 +298,9 @@ def build_type_map(dll) -> dict[str, dict[str, int]]:
         'granny_vertex_data':  'GrannyVertexDataType',
         'granny_tri_topology': 'GrannyTriTopologyType',
         'granny_bone_binding': 'GrannyBoneBindingType',
+        'granny_texture':      'GrannyTextureType',
+        'granny_material':     'GrannyMaterialType',
+        'granny_material_map': 'GrannyMaterialMapType',
     }
 
     type_map: dict[str, dict[str, int]] = {}

@@ -173,14 +173,112 @@ def scan_textures(chunks):
 
                 doff = data_start + total_sz
 
-            elif tag == 0xAA:  # Texture3D
+            elif tag == 0xAA:  # Texture3D (same format as Tex2D, big-endian size)
                 name, doff = _read_csstring(chunk, doff)
-                total_sz = struct.unpack_from('<i', chunk, doff)[0]
-                doff += 4 + total_sz
+                total_sz = _swap32(struct.unpack_from('<I', chunk, doff)[0])
+                data_start = doff + 4
+                doff += 4
 
-            elif tag == 0xDE:  # Atlas
+                # Parse XNB-wrapped texture data (same as 0xAD)
+                if chunk[doff:doff + 3] == b'XNB':
+                    doff += 10
+                    tex_fmt = struct.unpack_from('<I', chunk, doff)[0]
+                    tex_w = struct.unpack_from('<I', chunk, doff + 4)[0]
+                    tex_h = struct.unpack_from('<I', chunk, doff + 8)[0]
+                    tex_d = struct.unpack_from('<I', chunk, doff + 12)[0]
+                    tex_pix_sz = struct.unpack_from('<I', chunk, doff + 16)[0]
+                    tex_data_off = doff + 20
+
+                    fmt_name = TEXTURE_FORMATS.get(tex_fmt, (f'0x{tex_fmt:X}', 0))[0]
+                    mip_count = _compute_mip_count(tex_w, tex_h, tex_fmt, tex_pix_sz)
+
+                    textures.append({
+                        'name': name,
+                        'format': tex_fmt,
+                        'format_name': fmt_name,
+                        'width': tex_w,
+                        'height': tex_h,
+                        'depth': tex_d,
+                        'pixel_size': tex_pix_sz,
+                        'mip_count': mip_count,
+                        'chunk_idx': ci,
+                        'data_offset': tex_data_off,
+                        'entry_offset': data_start - 4,
+                        'xnb_offset': data_start,
+                    })
+
+                doff = data_start + total_sz
+
+            elif tag == 0xDE:  # Atlas (character textures)
+                atlas_start = doff
                 total_sz = struct.unpack_from('<i', chunk, doff)[0]
-                doff += 4 + total_sz
+                doff += 4
+                atlas_end = atlas_start + 4 + total_sz
+
+                # Parse atlas header
+                if doff + 12 <= atlas_end:
+                    magic = struct.unpack_from('<I', chunk, doff)[0]
+                    atlas_doff = doff
+                    version = 0
+                    if magic == 0x7FB1776B:
+                        version = struct.unpack_from('<I', chunk, doff + 4)[0]
+                        sub_count = struct.unpack_from('<I', chunk, doff + 8)[0]
+                        atlas_doff = doff + 12
+                    else:
+                        sub_count = struct.unpack_from('<I', chunk, doff)[0]
+                        atlas_doff = doff + 4
+
+                    # Skip sub-entries (sprite regions)
+                    atlas_name = None
+                    for _ in range(sub_count):
+                        if atlas_doff >= atlas_end:
+                            break
+                        ename, atlas_doff = _read_csstring(chunk, atlas_doff)
+                        if atlas_name is None:
+                            # Use first sub-entry name as atlas name
+                            atlas_name = ename
+                        atlas_doff += 4 * 10  # w,h,ox,oy,rx,ry,rw,rh + scaleX,scaleY
+                        if version > 0 and atlas_doff < atlas_end:
+                            atlas_doff += 1  # flags byte
+                        if version > 2 and atlas_doff + 4 <= atlas_end:
+                            hull_count = struct.unpack_from('<I', chunk, atlas_doff)[0]
+                            atlas_doff += 4 + hull_count * 8  # (x,y) pairs
+
+                    # After sub-entries: check for inline texture (0xDD)
+                    if atlas_doff < atlas_end:
+                        marker = chunk[atlas_doff]
+                        atlas_doff += 1
+                        if marker == 0xDD:
+                            # Inline texture: name + texture data (no XNB wrapper)
+                            tex_name, atlas_doff = _read_csstring(chunk, atlas_doff)
+                            if atlas_doff + 20 <= atlas_end:
+                                tex_fmt = struct.unpack_from('<I', chunk, atlas_doff)[0]
+                                tex_w = struct.unpack_from('<I', chunk, atlas_doff + 4)[0]
+                                tex_h = struct.unpack_from('<I', chunk, atlas_doff + 8)[0]
+                                tex_d = struct.unpack_from('<I', chunk, atlas_doff + 12)[0]
+                                tex_pix_sz = struct.unpack_from('<I', chunk, atlas_doff + 16)[0]
+                                tex_data_off = atlas_doff + 20
+
+                                fmt_name = TEXTURE_FORMATS.get(tex_fmt, (f'0x{tex_fmt:X}', 0))[0]
+                                mip_count = _compute_mip_count(tex_w, tex_h, tex_fmt, tex_pix_sz)
+
+                                textures.append({
+                                    'name': tex_name,
+                                    'format': tex_fmt,
+                                    'format_name': fmt_name,
+                                    'width': tex_w,
+                                    'height': tex_h,
+                                    'depth': tex_d,
+                                    'pixel_size': tex_pix_sz,
+                                    'mip_count': mip_count,
+                                    'chunk_idx': ci,
+                                    'data_offset': tex_data_off,
+                                    'entry_offset': atlas_start,
+                                    'xnb_offset': None,
+                                    'atlas': True,
+                                })
+
+                doff = atlas_end
 
             elif tag == 0xCC:  # Include
                 _, doff = _read_csstring(chunk, doff)
@@ -412,13 +510,71 @@ def replace_texture(pkg_path, texture_name, new_dds_path, output_path):
                 sz = struct.unpack_from('<i', chunk, doff)[0]; doff += 4 + sz
             elif tag == 0xAA:
                 nl, doff = _read_7bit_int(chunk, doff); doff += nl
-                sz = struct.unpack_from('<i', chunk, doff)[0]; doff += 4 + max(sz, 0)
+                sz = _swap32(struct.unpack_from('<I', chunk, doff)[0]); doff += 4 + sz
             else:
                 break
 
     if not found:
         print(f"  Texture '{texture_name}' not found in {pkg_path}")
     return False
+
+
+# ── Texture index (for fast batch lookups) ────────────────────────────────────
+
+def build_texture_index(pkg_dir):
+    """
+    Scan all .pkg files in pkg_dir and build an index mapping
+    texture base name (lowercase) → {pkg_path, name, format, width, height, pixel_size}.
+    Returns the index dict.
+    """
+    index = {}
+    pkg_files = sorted(f for f in os.listdir(pkg_dir)
+                       if f.endswith('.pkg') and os.path.isfile(os.path.join(pkg_dir, f)))
+    for pkg_name in pkg_files:
+        pkg_path = os.path.join(pkg_dir, pkg_name)
+        try:
+            chunks, _, _ = read_pkg_chunks(pkg_path)
+        except Exception:
+            continue
+        textures = scan_textures(chunks)
+        for t in textures:
+            # Key: lowercase base filename (last path component, no extension)
+            fn = t['name'].replace('\\', '/').split('/')[-1]
+            fn_base = fn.rsplit('.', 1)[0] if '.' in fn else fn
+            key = fn_base.lower()
+            if key not in index:
+                index[key] = {
+                    'pkg': pkg_name,
+                    'name': t['name'],
+                    'format': t['format'],
+                    'width': t['width'],
+                    'height': t['height'],
+                    'pixel_size': t['pixel_size'],
+                    'mip_count': t['mip_count'],
+                }
+    return index
+
+
+def save_texture_index(pkg_dir, output_path=None):
+    """Build and save the texture index as JSON."""
+    import json
+    index = build_texture_index(pkg_dir)
+    if output_path is None:
+        output_path = os.path.join(pkg_dir, '_texture_index.json')
+    with open(output_path, 'w') as f:
+        json.dump(index, f, indent=1)
+    print(f"Texture index: {len(index)} entries -> {output_path}")
+    return output_path
+
+
+def load_texture_index(pkg_dir):
+    """Load a previously saved texture index, or return None if not found."""
+    import json
+    idx_path = os.path.join(pkg_dir, '_texture_index.json')
+    if os.path.isfile(idx_path):
+        with open(idx_path) as f:
+            return json.load(f)
+    return None
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -474,6 +630,10 @@ def main():
     p_replace.add_argument('--output', '-o', default=None,
                           help='Output .pkg path (default: overwrite original)')
 
+    p_index = sub.add_parser('index', help='Build texture index for all .pkg files in a directory')
+    p_index.add_argument('pkg_dir', help='Directory containing .pkg files')
+    p_index.add_argument('--output', '-o', default=None, help='Output JSON path')
+
     args = parser.parse_args()
     if args.command == 'list':
         cmd_list(args)
@@ -487,6 +647,8 @@ def main():
         else:
             print("Texture replacement failed.")
             sys.exit(1)
+    elif args.command == 'index':
+        save_texture_index(args.pkg_dir, args.output)
     else:
         parser.print_help()
 

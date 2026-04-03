@@ -106,14 +106,16 @@ Chunks (repeated until EndOfFile):
 
 | Tag | Type | Function |
 |-----|------|----------|
-| 0xAA | Texture3D | `ReadTexture3D` |
-| 0xAD | Texture2D | `ReadTexture2D` |
+| 0xAA | **Texture3D** | `ReadTexture3D` — big-endian size + XNB wrapper (same as 0xAD) |
+| 0xAD | **Texture2D** | `ReadTexture2D` — big-endian size + XNB wrapper |
 | 0xBB | Bink video | `ReadBink` |
 | 0xBE | End of chunk | Stop processing current chunk |
 | 0xCC | Include package | `ReadIncludePackage` (references another .pkg) |
-| 0xDE | **Atlas** | `ReadAtlas` (character textures) |
+| 0xDE | **Atlas** | `ReadAtlas` (sprite atlases — 2D portraits, not 3D model textures) |
 | 0xEE | Bink atlas | `ReadBinkAtlas` |
 | 0xFF | End of file | Stop processing entirely |
+
+**Important:** 0xAA (Texture3D) entries have a big-endian size field, just like 0xAD (Texture2D). Reading the size as little-endian produces a wrong value that causes the scanner to skip the rest of the chunk. Both entry types are XNB-wrapped with the same internal texture format.
 
 ### Atlas Entry Format (type 0xDE)
 
@@ -195,8 +197,8 @@ If format code is 0x20 (native), calls `loadTextureNative` instead (DDS/KTX).
 ```
 <game>/Content/Packages/
   1080p/
-    Fx.pkg                   — contains 3D model textures (534MB)
-    Melinoe.pkg              — 2D portrait/sprite atlases (15MB)
+    Fx.pkg                   — contains some 3D model textures (534MB)
+    <Character>.pkg          — may contain character-specific model textures + 2D sprites
     Melinoe.pkg_manifest     — human-readable entry index
   720p/
     ...                      — lower resolution variants
@@ -204,7 +206,9 @@ If format code is 0x20 (native), calls `loadTextureNative` instead (DDS/KTX).
 
 ### 3D Model Textures
 
-3D model textures are stored in **Fx.pkg** (not in the character's .pkg):
+3D model textures are spread across **multiple .pkg files** (not only `Fx.pkg`). All character textures are stored as Texture2D (0xAD) or Texture3D (0xAA) entries with a `GR2\` or `Models\` path prefix.
+
+Example:
 ```
 Fx.pkg → "Models\Melinoe\MelinoeTransform_Color"
   512x512 BC7, 6 mip levels (349,440 bytes total)
@@ -219,31 +223,58 @@ Fx.pkg → "Models\Melinoe\MelinoeTransform_Color"
 Mipmaps are stored inline (sequentially after the base level) within the
 single pixel data block. The `pixel_data_size` field includes all mip levels.
 
+### Texture Index
+
+To avoid scanning all `.pkg` files on every export, a texture index
+(`_texture_index.json`) can be built once with `pkg_texture.py build-index`.
+It maps lowercase texture base names to their `.pkg` location, format, and
+dimensions. Subsequent exports read this small JSON for fast lookups.
+
 ### 2D Portrait/Sprite Textures
 
-2D portrait textures are in the character's own .pkg:
+2D portrait textures are in the character's own .pkg as Atlas (0xDE) entries:
 ```
 Melinoe.pkg → "..\Temp\Win\Atlases\Melinoe_Textures00-06"
   Various sizes (4096x4096 to 372x908), BC7, no mipmaps
 ```
 
+Atlas entries contain sprite sub-entries (regions) and either an inline
+texture (marker 0xDD) or a texture name reference.
+
 ---
 
 ## Texture Modding Workflow
+
+### Multi-Texture Support
+
+Each mesh can have its own texture, discovered via the GR2 material chain:
+
+```
+mesh -> MaterialBindings[0] -> Material -> Maps[0] -> Material -> Texture -> FromFileName
+```
+
+The exporter walks this chain per mesh to find each mesh's texture filename.
+Multiple textures are embedded in the GLB, each with its own glTF material,
+and each mesh is assigned its correct material.
+
+Three fallback levels for texture name resolution:
+1. **Material chain** (most reliable) — walks the GR2 struct pointers
+2. **fi->Textures** — reads the file_info texture array
+3. **Name-based guessing** — derives texture name from character name
 
 ### Export
 
 The exporter produces two outputs:
 ```
-Melinoe.glb                              — meshes + skeleton + embedded PNG texture
+Melinoe.glb                              — meshes + skeleton + per-mesh embedded PNG textures
 Melinoe_textures/
-  MelinoeTransform_Color.dds             — original BC7 + mipmaps (lossless copy)
+  MelinoeTransform_Color.dds             — original BC7 + mipmaps (named per texture)
+  Melinoe_Glow.dds                       — additional textures if present
 ```
 
-The PNG in the GLB is decoded from BC7 (mip 0 only) — lossless decompression.
-It allows Blender to display the texture for UV editing and preview.
-
-The DDS alongside is the exact original data with all mipmaps preserved.
+DDS files are saved with their actual texture names from the material chain.
+The PNG in each GLB material is decoded from BC7 (mip 0 only) for Blender preview.
+The DDS files are exact copies with all mipmaps preserved for lossless editing.
 
 ### Import: Two Paths
 
@@ -285,12 +316,12 @@ If the texture wasn't modified (same pixels as original):
 ## Texture Replacement (PKG Modification)
 
 To replace a character's 3D model texture:
-1. Open `Fx.pkg`, read big-endian header
-2. Decompress LZ4 chunks sequentially
-3. Scan for the target Tex2D entry by name (`Models\Melinoe\MelinoeTransform_Color`)
+1. Look up the texture's `.pkg` file via the texture index (or scan all `.pkg` files)
+2. Open the `.pkg`, decompress LZ4 chunks
+3. Scan for the target Tex2D/Texture3D entry by name
 4. Replace the pixel data (all mip levels, same format + dimensions)
 5. LZ4-recompress the modified chunk
-6. Write back to `Fx.pkg`
+6. Write back to the `.pkg`
 
 Keeping the same format, dimensions, and mip count avoids changing any sizes
 or offsets in the PKG structure.
