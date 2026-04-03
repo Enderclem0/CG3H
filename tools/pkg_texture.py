@@ -291,6 +291,136 @@ def build_dds_header(width, height, fmt_code, pixel_size):
     return bytes(header)
 
 
+def replace_texture(pkg_path, texture_name, new_dds_path, output_path):
+    """
+    Replace a texture in a .pkg file with data from a DDS file.
+    The DDS must have the same dimensions and format as the original.
+    """
+    # Read the DDS file — skip header, get raw pixel data
+    with open(new_dds_path, 'rb') as f:
+        dds_raw = f.read()
+
+    # Parse DDS header to get pixel data offset
+    if dds_raw[:4] != b'DDS ':
+        raise ValueError(f"Not a DDS file: {new_dds_path}")
+    dds_header_size = 128
+    # Check for DX10 extended header
+    pf_fourcc = dds_raw[84:88]
+    if pf_fourcc == b'DX10':
+        dds_header_size += 20
+    new_pixels = dds_raw[dds_header_size:]
+
+    # Read the pkg
+    with open(pkg_path, 'rb') as f:
+        raw = bytearray(f.read())
+
+    header_raw = struct.unpack_from('<I', raw, 0)[0]
+    header = _swap32(header_raw)
+    compressed = (header & 0x20000000) != 0
+
+    # Parse and decompress all chunks, keeping track of file offsets
+    chunks = []  # (decompressed_bytes, flag_offset, size_offset, data_offset, comp_size)
+    off = 4
+    while off < len(raw):
+        flag_off = off
+        flag = raw[off]; off += 1
+        if flag == 0:
+            break
+        comp_size = _swap32(struct.unpack_from('<I', raw, off)[0])
+        size_off = off
+        off += 4
+        data_off = off
+        decomp = lz4.block.decompress(raw[data_off:data_off + comp_size],
+                                       uncompressed_size=0x2020020)
+        chunks.append((bytearray(decomp), flag_off, size_off, data_off, comp_size))
+        off += comp_size
+
+    # Search for the target texture in decompressed chunks
+    target_lower = texture_name.lower().replace('\\', '/').replace('..', '')
+    found = False
+
+    for ci, (chunk, flag_off, size_off, data_off, orig_comp_size) in enumerate(chunks):
+        doff = 0
+        while doff < len(chunk) - 5:
+            tag = chunk[doff]; doff += 1
+            if tag in (0xFF, 0xBE):
+                break
+            if tag == 0xAD:  # Tex2D
+                name, doff = _read_csstring(chunk, doff)
+                total_sz = _swap32(struct.unpack_from('<I', chunk, doff)[0])
+                total_sz_off = doff
+                doff += 4
+                data_start = doff
+
+                name_lower = name.lower().replace('\\', '/').replace('..', '')
+                filename = name_lower.split('/')[-1]
+
+                if target_lower in filename or filename in target_lower:
+                    # Found the texture — check XNB header
+                    if chunk[doff:doff+3] != b'XNB':
+                        print(f"  ERROR: No XNB header at expected position")
+                        return False
+
+                    tex_header_off = doff + 10  # after XNB header
+                    orig_fmt = struct.unpack_from('<I', chunk, tex_header_off)[0]
+                    orig_w = struct.unpack_from('<I', chunk, tex_header_off + 4)[0]
+                    orig_h = struct.unpack_from('<I', chunk, tex_header_off + 8)[0]
+                    orig_pix_sz = struct.unpack_from('<I', chunk, tex_header_off + 16)[0]
+                    pixel_data_off = tex_header_off + 20
+
+                    print(f"  Found: {name} ({orig_w}x{orig_h} fmt=0x{orig_fmt:X} "
+                          f"{orig_pix_sz:,} bytes) in chunk {ci}")
+
+                    # Validate new texture
+                    if len(new_pixels) != orig_pix_sz:
+                        print(f"  ERROR: DDS pixel data size mismatch: "
+                              f"new={len(new_pixels):,} vs original={orig_pix_sz:,}")
+                        print(f"  The DDS must have the same dimensions, format, and mip count")
+                        return False
+
+                    # Replace pixel data in the decompressed chunk
+                    chunk[pixel_data_off:pixel_data_off + orig_pix_sz] = new_pixels
+                    print(f"  Replaced {orig_pix_sz:,} bytes of pixel data")
+
+                    # Recompress the modified chunk
+                    new_comp = lz4.block.compress(bytes(chunk), store_size=False)
+                    new_comp_size = len(new_comp)
+                    print(f"  Recompressed: {orig_comp_size:,} -> {new_comp_size:,} bytes")
+
+                    # Rebuild the pkg file
+                    # Everything before this chunk's data stays the same
+                    # Replace: flag(1) + size(4) + compressed_data
+                    new_size_be = _swap32(new_comp_size)
+
+                    output = bytearray()
+                    output += raw[:flag_off]                    # everything before this chunk
+                    output += bytes([raw[flag_off]])             # flag byte (unchanged)
+                    output += struct.pack('<I', new_size_be)     # new size (big-endian)
+                    output += new_comp                           # new compressed data
+
+                    # Everything after this chunk
+                    after_off = data_off + orig_comp_size
+                    output += raw[after_off:]
+
+                    with open(output_path, 'wb') as f:
+                        f.write(output)
+                    print(f"  Written: {output_path} ({len(output):,} bytes)")
+                    return True
+
+                doff = data_start + total_sz
+            elif tag == 0xDE:
+                sz = struct.unpack_from('<i', chunk, doff)[0]; doff += 4 + sz
+            elif tag == 0xAA:
+                nl, doff = _read_7bit_int(chunk, doff); doff += nl
+                sz = struct.unpack_from('<i', chunk, doff)[0]; doff += 4 + max(sz, 0)
+            else:
+                break
+
+    if not found:
+        print(f"  Texture '{texture_name}' not found in {pkg_path}")
+    return False
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def cmd_list(args):
@@ -337,11 +467,26 @@ def main():
     p_extract.add_argument('pkg', help='.pkg file path')
     p_extract.add_argument('--output-dir', '-o', default=None, help='Output directory')
 
+    p_replace = sub.add_parser('replace', help='Replace a texture in a .pkg file')
+    p_replace.add_argument('pkg', help='.pkg file path')
+    p_replace.add_argument('texture_name', help='Texture name to replace (e.g. MelinoeTransform_Color)')
+    p_replace.add_argument('dds', help='New .dds file (same format + dimensions + mips)')
+    p_replace.add_argument('--output', '-o', default=None,
+                          help='Output .pkg path (default: overwrite original)')
+
     args = parser.parse_args()
     if args.command == 'list':
         cmd_list(args)
     elif args.command == 'extract':
         cmd_extract(args)
+    elif args.command == 'replace':
+        out = args.output or args.pkg
+        ok = replace_texture(args.pkg, args.texture_name, args.dds, out)
+        if ok:
+            print("Texture replaced successfully!")
+        else:
+            print("Texture replacement failed.")
+            sys.exit(1)
     else:
         parser.print_help()
 
