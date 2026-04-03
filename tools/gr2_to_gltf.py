@@ -749,9 +749,7 @@ def build_gltf(character_name, mesh_data_list, mesh_names, bones, animations=Non
         else:
             root_nodes.append(bone_node_indices[i])
 
-    # Granny stores IBMs row-major; glTF expects column-major → transpose each 4x4
-    inv_bind_np = np.array([b['inv_world'] for b in bones], dtype=np.float32).reshape(-1, 4, 4)
-    inv_bind_np = inv_bind_np.transpose(0, 2, 1).reshape(-1, 16)
+    inv_bind_np = np.array([b['inv_world'] for b in bones], dtype=np.float32).reshape(-1, 16)
     ibm_accessor = add_accessor(inv_bind_np, FLOAT, MAT4)
 
     skin = Skin(
