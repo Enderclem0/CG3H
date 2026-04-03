@@ -195,25 +195,106 @@ If format code is 0x20 (native), calls `loadTextureNative` instead (DDS/KTX).
 ```
 <game>/Content/Packages/
   1080p/
-    Melinoe.pkg              — character texture atlas (15MB)
+    Fx.pkg                   — contains 3D model textures (534MB)
+    Melinoe.pkg              — 2D portrait/sprite atlases (15MB)
     Melinoe.pkg_manifest     — human-readable entry index
   720p/
-    Melinoe.pkg              — lower resolution variant
+    ...                      — lower resolution variants
 ```
 
-## Texture Replacement Approach
+### 3D Model Textures
 
-To replace a character's texture:
-1. Open .pkg, read header
-2. For each LZ4-compressed chunk: decompress
-3. Scan for atlas asset (type 0xDE)
-4. Parse atlas sub-entries to find the target texture
-5. Locate the inline texture data (after 0xDD marker)
-6. Read: format(4) + width(4) + height(4) + depth(4) + size(4) + pixels
-7. Replace pixel data with custom BCn-compressed texture (same format + dimensions)
-8. LZ4-recompress the chunk
-9. Write back to .pkg
+3D model textures are stored in **Fx.pkg** (not in the character's .pkg):
+```
+Fx.pkg → "Models\Melinoe\MelinoeTransform_Color"
+  512x512 BC7, 6 mip levels (349,440 bytes total)
+  Mip 0: 512×512 = 262,144 bytes
+  Mip 1: 256×256 =  65,536 bytes
+  Mip 2: 128×128 =  16,384 bytes
+  Mip 3:  64×64  =   4,096 bytes
+  Mip 4:  32×32  =   1,024 bytes
+  Mip 5:  16×16  =     256 bytes
+```
 
-Keeping the same format and dimensions avoids changing any offsets or sizes
-upstream. For dimension changes, the atlas sub-entry rectangles would also
-need updating.
+Mipmaps are stored inline (sequentially after the base level) within the
+single pixel data block. The `pixel_data_size` field includes all mip levels.
+
+### 2D Portrait/Sprite Textures
+
+2D portrait textures are in the character's own .pkg:
+```
+Melinoe.pkg → "..\Temp\Win\Atlases\Melinoe_Textures00-06"
+  Various sizes (4096x4096 to 372x908), BC7, no mipmaps
+```
+
+---
+
+## Texture Modding Workflow
+
+### Export
+
+The exporter produces two outputs:
+```
+Melinoe.glb                              — meshes + skeleton + embedded PNG texture
+Melinoe_textures/
+  MelinoeTransform_Color.dds             — original BC7 + mipmaps (lossless copy)
+```
+
+The PNG in the GLB is decoded from BC7 (mip 0 only) — lossless decompression.
+It allows Blender to display the texture for UV editing and preview.
+
+The DDS alongside is the exact original data with all mipmaps preserved.
+
+### Import: Two Paths
+
+#### Path 1: DDS Editing (pixel-perfect, recommended)
+
+For modders who want maximum quality:
+
+1. Edit the `.dds` file in Photoshop, Paint.NET, or GIMP (with DDS plugin)
+2. These tools show all mip levels and regenerate them on save
+3. Save as BC7 DDS with mipmaps
+4. Import: the tool reads the DDS directly and writes it to the .pkg
+5. **Zero quality loss** — the DDS data goes in as-is
+
+#### Path 2: PNG Editing (via Blender)
+
+For modders who edit the texture in Blender or as a PNG:
+
+1. The texture is embedded as PNG in the GLB (mip 0 = base 512x512)
+2. Edit in Blender's texture paint or export the PNG and edit externally
+3. On reimport, the tool must:
+   a. Regenerate mipmaps from the edited base (Pillow `Image.resize`)
+   b. Recompress each mip to BC7 (requires external encoder)
+   c. Pack all mip levels into the .pkg
+
+**BC7 encoding options:**
+- `texconv.exe` (Microsoft DirectXTex, free) — best quality, CLI
+- `compressonator` (AMD, free) — CLI, also good
+- Fallback: write as **uncompressed RGBA** (format 0x0E) — 4x larger but no
+  encoder needed, game supports it natively
+
+#### Path 3: No Texture Change
+
+If the texture wasn't modified (same pixels as original):
+- Skip texture replacement entirely
+- Keep the original .pkg data untouched
+
+---
+
+## Texture Replacement (PKG Modification)
+
+To replace a character's 3D model texture:
+1. Open `Fx.pkg`, read big-endian header
+2. Decompress LZ4 chunks sequentially
+3. Scan for the target Tex2D entry by name (`Models\Melinoe\MelinoeTransform_Color`)
+4. Replace the pixel data (all mip levels, same format + dimensions)
+5. LZ4-recompress the modified chunk
+6. Write back to `Fx.pkg`
+
+Keeping the same format, dimensions, and mip count avoids changing any sizes
+or offsets in the PKG structure.
+
+For **dimension changes**: the pixel_data_size field, XNB file_size, and
+entry total_size all need updating, plus all mip levels regenerated at the
+new resolution.
