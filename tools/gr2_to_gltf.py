@@ -1038,7 +1038,7 @@ def main():
     parser.add_argument("--mesh-index", type=int, default=None,
                         help="Export only this mesh index; default: all")
     parser.add_argument("--all-lods", action="store_true",
-                        help="Include LOD duplicates (suffixed _LOD1, _LOD2…)")
+                        help="(deprecated, all meshes now exported by default)")
     parser.add_argument("-o", "--output", default=None, help="Output .glb path")
     parser.add_argument("--debug", action="store_true",
                         help="Print per-mesh vertex layout and bone binding info")
@@ -1097,9 +1097,6 @@ def main():
             continue
         mesh_name, positions, normals, uvs, weights, joints, indices = result
         if mesh_name in seen_names:
-            if not args.all_lods:
-                print(f"  Mesh[{mi}] {mesh_name!r}: skipped (LOD duplicate; use --all-lods)")
-                continue
             seen_names[mesh_name] += 1
             mesh_name = f"{mesh_name}_LOD{seen_names[mesh_name]}"
         else:
