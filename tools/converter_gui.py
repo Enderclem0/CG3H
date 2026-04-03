@@ -153,6 +153,9 @@ class App:
             side=tk.LEFT, padx=4)
         ttk.Label(anim_row, text="e.g. Idle, Attack, NoWeapon  (blank = all)",
                   foreground="#888", font=("", 8)).pack(side=tk.LEFT)
+        self.exp_textures = tk.BooleanVar(value=False)
+        ttk.Checkbutton(box, text="Include textures (embeds PNG in GLB + saves original DDS)",
+                        variable=self.exp_textures).pack(anchor=tk.W, pady=2)
         ttk.Checkbutton(box, text="Debug scan (print BoneBinding trace in log)",
                         variable=self.exp_debug_scan).pack(anchor=tk.W, pady=2)
 
@@ -314,6 +317,42 @@ class App:
         ttk.Button(btn_row, text="Install mod", command=self._install_mod).pack(side=tk.LEFT)
         self._inst_status = ttk.Label(btn_row, text="", foreground="#070")
         self._inst_status.pack(side=tk.LEFT, padx=12)
+
+        # ── Texture replacement section ──
+        ttk.Separator(tab, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=12)
+
+        tex_box = ttk.LabelFrame(tab, text="Replace texture in Fx.pkg", padding=12)
+        tex_box.pack(fill=tk.X)
+
+        ttk.Label(tex_box, text=(
+            "Replace a 3D model texture. The DDS must have the same format,\n"
+            "dimensions, and mipmap count as the original."
+        ), foreground="#555").pack(anchor=tk.W, pady=(0, 8))
+
+        tex_row1 = ttk.Frame(tex_box)
+        tex_row1.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(tex_row1, text="DDS file:", width=14, anchor=tk.W).pack(side=tk.LEFT)
+        self.tex_dds = tk.StringVar()
+        ttk.Entry(tex_row1, textvariable=self.tex_dds, width=42).pack(
+            side=tk.LEFT, padx=6, fill=tk.X, expand=True)
+        ttk.Button(tex_row1, text="Browse\u2026",
+                   command=self._browse_tex_dds).pack(side=tk.LEFT)
+
+        tex_row2 = ttk.Frame(tex_box)
+        tex_row2.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(tex_row2, text="Texture name:", width=14, anchor=tk.W).pack(side=tk.LEFT)
+        self.tex_name = tk.StringVar()
+        ttk.Entry(tex_row2, textvariable=self.tex_name, width=28).pack(
+            side=tk.LEFT, padx=6)
+        ttk.Label(tex_row2, text="e.g. MelinoeTransform_Color",
+                  foreground="#888").pack(side=tk.LEFT)
+
+        tex_btn_row = ttk.Frame(tex_box)
+        tex_btn_row.pack(fill=tk.X, pady=(4, 0))
+        ttk.Button(tex_btn_row, text="Replace texture",
+                   command=self._replace_texture).pack(side=tk.LEFT)
+        self._tex_status = ttk.Label(tex_btn_row, text="", foreground="#070")
+        self._tex_status.pack(side=tk.LEFT, padx=12)
 
         # ── Restore section ──
         ttk.Separator(tab, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=12)
@@ -503,6 +542,58 @@ class App:
                     break
             self.inst_character.set(base)
 
+    def _browse_tex_dds(self):
+        p = filedialog.askopenfilename(
+            title="Select modified .dds file",
+            filetypes=[("DDS Textures", "*.dds"), ("All files", "*.*")],
+        )
+        if p:
+            self.tex_dds.set(p)
+
+    def _replace_texture(self):
+        dds_path = self.tex_dds.get().strip()
+        tex_name = self.tex_name.get().strip()
+        if not dds_path or not os.path.isfile(dds_path):
+            messagebox.showwarning("No DDS file", "Select a .dds file first.")
+            return
+        if not tex_name:
+            messagebox.showwarning("No texture name", "Enter the texture name to replace.")
+            return
+
+        game = self.game_path.get()
+        fx_pkg = os.path.join(game, "Content", "Packages", "1080p", "Fx.pkg")
+        if not os.path.isfile(fx_pkg):
+            messagebox.showerror("Fx.pkg not found", f"Not found:\n{fx_pkg}")
+            return
+
+        # Backup Fx.pkg
+        backup_dir = os.path.join(game, "Content", "Packages", "1080p", "_backups")
+        os.makedirs(backup_dir, exist_ok=True)
+        backup_path = os.path.join(backup_dir, "Fx.pkg")
+        if not os.path.isfile(backup_path):
+            self._tex_status.config(text="Backing up Fx.pkg...", foreground="#555")
+            self.root.update()
+            shutil.copy2(fx_pkg, backup_path)
+
+        self._tex_status.config(text="Replacing texture...", foreground="#555")
+        self.root.update()
+
+        try:
+            from pkg_texture import replace_texture
+            ok = replace_texture(fx_pkg, tex_name, dds_path, fx_pkg)
+            if ok:
+                self._tex_status.config(text="Texture replaced!", foreground="#070")
+                messagebox.showinfo("Texture replaced",
+                                    f"Replaced '{tex_name}' in Fx.pkg.\n"
+                                    "Launch the game to see your changes.")
+            else:
+                self._tex_status.config(text="Failed", foreground="#a00")
+                messagebox.showwarning("Replace failed",
+                                       f"Could not find texture '{tex_name}' in Fx.pkg.")
+        except Exception as e:
+            self._tex_status.config(text="Error", foreground="#a00")
+            messagebox.showerror("Error", str(e))
+
     # ── Export logic ──────────────────────────────────────────────────────────
 
     def _export(self):
@@ -563,6 +654,8 @@ class App:
                 anim_filter = self.exp_anim_filter.get().strip()
                 if anim_filter:
                     cmd += ["--anim-filter", anim_filter]
+            if self.exp_textures.get():
+                cmd.append("--textures")
             if self.exp_debug_scan.get():
                 cmd.append("--debug")
 
