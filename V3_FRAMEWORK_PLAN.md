@@ -1,0 +1,229 @@
+# v3.0 — CG3H Modding Framework
+
+## Vision
+
+Transform CG3H from a patching tool into a **modding framework**. Mods become self-contained packages that coexist without conflicts. No more overwriting game files — the framework merges everything dynamically.
+
+---
+
+## Goal 1: Append, Don't Patch
+
+### Current Problem
+Replacing `Melinoe.gpk` means only ONE mod can exist for Melinoe at a time. Two modders making different outfits conflict.
+
+### Solution
+Instead of overwriting mesh entries, **append** new entries to the GPK arrays. The game's `Model->MeshBindings` already supports multiple meshes — we just need to control which ones are active.
+
+### Implementation
+
+**1.1 GPK Append Mode**
+- New meshes get appended to the end of `fi->Meshes` array (already works)
+- Original meshes remain untouched
+- Each mod's meshes get unique names: `ModName_MeshShape`, `ModName_Outline`, etc.
+
+**1.2 MeshBindings Switcher**
+- At runtime, the framework swaps `Model->MeshBindings` to point at the active mod's meshes
+- Default: original meshes. With mod: mod's meshes.
+- Multiple mods can be installed — only one is active per character at a time
+
+**1.3 Texture Append**
+- Custom textures added as new .pkg entries (already implemented in v2.1)
+- Each mod's textures use unique entry names: `GR2\ModName_TextureName`
+- No conflicts — each mod has its own texture entries
+
+### What Needs Research
+- Can we hot-swap MeshBindings without reloading the GR2? Or do we need a DLL hook?
+- Alternative: generate a merged GPK at startup that includes only the active mod's bindings
+
+---
+
+## Goal 2: Standardized mod.json
+
+### Specification
+
+```json
+{
+  "format": "cg3h-mod/1.0",
+  "metadata": {
+    "name": "Dark Melinoe Armor",
+    "author": "ModderName",
+    "version": "1.0.0",
+    "description": "A dark armor set for Melinoe",
+    "preview": "preview.png"
+  },
+  "target": {
+    "character": "Melinoe",
+    "proxy": null,
+    "mesh_entries": ["Melinoe_Mesh"]
+  },
+  "assets": {
+    "glb": "DarkArmor.glb",
+    "textures": [
+      {
+        "name": "DarkArmor_Color",
+        "file": "DarkArmor_Color.png",
+        "width": 512,
+        "height": 512
+      }
+    ],
+    "sdb_strings": []
+  },
+  "meshes": [
+    {
+      "name": "DarkArmor_MeshShape",
+      "type": "body",
+      "texture": "DarkArmor_Color"
+    },
+    {
+      "name": "DarkArmorOutline_MeshShape",
+      "type": "outline"
+    },
+    {
+      "name": "DarkArmorShadowMesh_MeshShape",
+      "type": "shadow"
+    }
+  ],
+  "hooks": {
+    "replaces": ["Melinoe_MeshShape"],
+    "lua_const": "Mesh_DarkArmor"
+  }
+}
+```
+
+### Why This Format
+- **Metadata**: mod managers can display name/author/preview without parsing GLB
+- **Target**: defines which character and mesh entries this mod affects
+- **Assets**: all files listed explicitly — no scanning, no guessing
+- **Meshes**: declares types (body/outline/shadow) so the framework applies correct shaders
+- **Hooks**: what vanilla meshes to replace, and a Lua constant name for scripting
+
+### Tools That Read It
+- CG3H GUI: install/uninstall
+- External mod managers: can manage mods without CG3H's Python code
+- Conflict detection: two mods targeting the same character are flagged
+
+---
+
+## Goal 3: Drop-in Mod Folder
+
+### Structure
+
+```
+Hades II/
+  Content/
+    Mods/                          ← NEW: mod staging directory
+      CoolSword/
+        mod.json
+        CoolSword.glb
+        CoolSword_Color.png
+        preview.png
+      DarkArmor/
+        mod.json
+        DarkArmor.glb
+        DarkArmor_Color.png
+```
+
+### Core Framework
+
+**3.1 Mod Scanner**
+- On game launch (or via GUI), scans `Content/Mods/` for `mod.json` files
+- Validates each mod: checks assets exist, target character is valid, no conflicts
+
+**3.2 Mod Merger**
+- For each target character, collects all active mods
+- Builds a merged GPK: original entries + all mod entries appended
+- Builds merged .pkg chunks: original textures + all mod textures appended
+- Writes to a `_merged/` cache directory (not touching originals)
+
+**3.3 Asset Redirect**
+- The game loads from `Content/GR2/_Optimized/` and `Content/Packages/1080p/`
+- Option A: symlink/copy merged files to game directories
+- Option B: DLL hook that redirects file reads to the merged cache
+- Option C: pre-build at install time (current approach, simplest)
+
+### Cache Invalidation
+- Hash each mod's `mod.json` + asset files
+- Only rebuild merged files when a mod changes
+- Store build hashes in `_merged/_build_cache.json`
+
+### What Needs Research
+- Does the game support loading from alternative paths? (unlikely — probably need file replacement)
+- Can we use Steam workshop integration for mod distribution?
+- DLL injection for hot-loading (complex but enables runtime mod switching)
+
+---
+
+## Goal 4: Lua Integration
+
+### const_names.lua
+
+During merge, the framework generates:
+
+```lua
+-- Auto-generated by CG3H Framework
+-- Do not edit manually
+
+CG3H = CG3H or {}
+CG3H.Meshes = {
+    DarkArmor = {
+        MeshIndex = 502,
+        Character = "Melinoe",
+        TextureName = "DarkArmor_Color",
+        Author = "ModderName",
+    },
+    CoolSword = {
+        MeshIndex = 503,
+        Character = "Melinoe",
+        TextureName = "CoolSword_Color",
+        Author = "SwordMaker",
+    },
+}
+```
+
+### How Lua Mods Use It
+
+```lua
+-- In a gameplay mod's script:
+if CG3H and CG3H.Meshes.DarkArmor then
+    -- Switch Melinoe to dark armor outfit
+    SetModelMeshBindings("Melinoe", CG3H.Meshes.DarkArmor.MeshIndex)
+end
+```
+
+### What This Enables
+- Visual mods become gameplay mods
+- Outfit switching at runtime (wardrobe system)
+- Conditional appearances (different outfit per biome)
+- Mod interop: one mod's Lua can reference another mod's meshes
+
+### What Needs Research
+- How does Hades II's Lua modding work? (sgmod system, Import/ModUtil)
+- Can we hook into the game's Lua state to register custom functions?
+- `SetModelMeshBindings` would need to be a custom function we inject
+
+---
+
+## Implementation Priority
+
+| Phase | Feature | Complexity | Dependency |
+|-------|---------|-----------|------------|
+| 3.0-alpha | mod.json spec + validator | Low | None |
+| 3.0-alpha | Mod folder scanner | Low | mod.json |
+| 3.0-beta | GPK append mode (multi-mod per character) | Medium | Scanner |
+| 3.0-beta | Mod merger (builds merged GPK/PKG) | Medium | Append mode |
+| 3.0-beta | Cache invalidation | Low | Merger |
+| 3.0-rc | const_names.lua generation | Low | Merger |
+| 3.0-rc | Conflict detection + resolution UI | Medium | Scanner |
+| 3.1 | DLL hook for runtime mod switching | High | Framework |
+| 3.1 | Lua API (SetModelMeshBindings etc.) | High | DLL hook |
+| 3.2 | Steam Workshop integration | Medium | mod.json |
+
+## Risks
+
+| Risk | Impact | Mitigation |
+|------|--------|------------|
+| Game updates break merged files | High | Rebuild on update detection (checksums) |
+| DLL injection flagged by anti-cheat | High | Start with file replacement, DLL hook as opt-in |
+| Lua API requires deep engine hooks | Medium | Start with const_names.lua (passive), active API later |
+| Multiple mods with same mesh names | Medium | Prefix all mod assets with mod name |
+| Performance with many appended meshes | Low | Game only renders MeshBindings-referenced meshes |
