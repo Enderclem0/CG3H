@@ -4,9 +4,11 @@ All notable changes to CG3H are documented here.
 
 ---
 
-## v1.3.0
+## v2.0.0
 
 Full end-to-end texture pipeline, multi-entry GPK support, unified install workflow, and animation fixes.
+
+**Breaking changes:** Export directory structure changed (per-character folders with manifest). Old exports without `manifest.json` are not compatible with the new Install tab. Re-export your characters to use the new pipeline.
 
 ### Added
 
