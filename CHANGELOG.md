@@ -4,6 +4,36 @@ All notable changes to CG3H are documented here.
 
 ---
 
+## v2.1.0
+
+Custom materials and new texture support for added meshes.
+
+### Added
+
+- **New material support** -- new meshes added in Blender can have their own custom textures
+- Material chain creation in DLL memory (granny_material + granny_material_map + granny_texture)
+- `FromFileName` hash lookup verified in-game: game finds custom textures via `"GR2/" + basename`
+- **Add texture entries to .pkg** -- custom textures inserted as new 0xAD entries (no existing textures replaced)
+- Custom texture auto-resize to 512x512 (prevents oversized chunks)
+- GLB material/texture extraction: `parse_glb` reads material_name, texture_name per mesh
+- `extract_glb_textures` returns embedded PNG bytes by image name
+- Unmatched GLB meshes (added in Blender) auto-created as new meshes in the first entry
+- Outline/shadow template selection: new meshes named with "Outline" or "ShadowMesh" inherit the correct template material (Mat_Outline / shadow shader)
+- `fi->Materials` and `fi->Textures` arrays expanded for new material structs
+
+### Changed
+
+- Custom texture target .pkg chosen from manifest (same pkg as character's existing textures) instead of hardcoded Fx.pkg
+- `_create_new_mesh` accepts `material_ptr` parameter to override template MaterialBindings
+- Outline/shadow meshes skip custom material creation (use template's shader material)
+
+### Known Issues
+
+- Custom outline meshes need manual vertex offset (~0.6 units via Alt+S in Blender) to produce correct silhouette effect. Game's outline meshes are pre-authored with different topology, not simple duplicates.
+- Custom texture image in Blender should be named meaningfully (not "Image_0") as the name becomes the .pkg entry key
+
+---
+
 ## v2.0.0
 
 Full end-to-end texture pipeline, multi-entry GPK support, unified install workflow, and animation fixes.
