@@ -237,6 +237,21 @@ def build_mod(mod_dir, game_dir=None):
     else:
         lua_lines.append(f'rom.log.info("[CG3H] Loaded: {name}")')
 
+    # If this is a mesh mod, add auto-build logic
+    if mod_type in ('mesh_add', 'mesh_replace', 'mesh_patch'):
+        lua_lines.extend([
+            f'',
+            f'-- Auto-build GPK on first launch if missing',
+            f'local gpk_path = rom.path.combine(_PLUGIN.plugins_data_mod_folder_path, "{character}.gpk")',
+            f'local builder_path = rom.path.combine(_PLUGIN.plugins_data_mod_folder_path, "cg3h_builder.exe")',
+            f'local mod_json_path = rom.path.combine(_PLUGIN.plugins_data_mod_folder_path, "..")',
+            f'if not rom.path.exists(gpk_path) and rom.path.exists(builder_path) then',
+            f'    rom.log.info("[CG3H] Building GPK for {name}...")',
+            f'    os.execute(builder_path .. " " .. mod_json_path)',
+            f'    rom.log.info("[CG3H] GPK build complete")',
+            f'end',
+        ])
+
     with open(os.path.join(plugins, 'main.lua'), 'w') as f:
         f.write('\n'.join(lua_lines) + '\n')
 
@@ -329,6 +344,18 @@ def package_thunderstore(mod_dir):
         manifest_file = os.path.join(mod_dir, 'manifest.json')
         if os.path.isfile(manifest_file):
             zf.write(manifest_file, 'manifest.json')
+
+        # Include builder exe for mesh mods (auto-build GPK on user's machine)
+        if mod.get('type') in ('mesh_add', 'mesh_replace', 'mesh_patch'):
+            exe_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    'dist', 'cg3h_builder.exe')
+            if os.path.isfile(exe_path):
+                zf.write(exe_path,
+                         f'plugins_data/{mod_id}/cg3h_builder.exe')
+                print(f"  Included cg3h_builder.exe (29MB)")
+            else:
+                print(f"  WARNING: cg3h_builder.exe not found at {exe_path}")
+                print(f"  Run: pyinstaller --onefile tools/cg3h_builder_entry.py")
 
     print(f"\n  Thunderstore package: {zip_path}.zip")
     return True

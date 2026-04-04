@@ -39,3 +39,4 @@ Desktop.ini
 
 # Claude Code settings (local only)
 .claude/
+dist/
