@@ -158,6 +158,22 @@ def parse_glb(glb_path: str) -> list[dict]:
                 max_local = int(joints_raw.max()) + 1
                 bone_palette = skin_joint_names[:max_local] if skin_joint_names else None
 
+            # Extract material/texture info for new-material support
+            mat_name = None
+            tex_name = None
+            tex_image_index = None
+            if prim.material is not None and prim.material < len(gltf.materials):
+                mat = gltf.materials[prim.material]
+                mat_name = mat.name
+                if (mat.pbrMetallicRoughness and
+                        mat.pbrMetallicRoughness.baseColorTexture is not None):
+                    tex_idx = mat.pbrMetallicRoughness.baseColorTexture.index
+                    if tex_idx is not None and tex_idx < len(gltf.textures):
+                        src = gltf.textures[tex_idx].source
+                        if src is not None and src < len(gltf.images):
+                            tex_image_index = src
+                            tex_name = gltf.images[src].name
+
             meshes_out.append({
                 'name':         gltf_mesh.name,
                 'positions':    positions,
@@ -168,9 +184,27 @@ def parse_glb(glb_path: str) -> list[dict]:
                 'bj_u8':        bj_u8,
                 'indices':      indices,
                 'bone_palette': bone_palette,
+                'material_name': mat_name,
+                'texture_name':  tex_name,
+                'texture_image_index': tex_image_index,
             })
 
     return meshes_out
+
+
+def extract_glb_textures(glb_path: str) -> dict:
+    """
+    Extract all embedded texture images from a GLB file.
+    Returns dict {image_name: png_bytes}.
+    """
+    gltf = pygltflib.GLTF2().load(glb_path)
+    blob = gltf.binary_blob()
+    result = {}
+    for img in (gltf.images or []):
+        if img.bufferView is not None and img.name:
+            bv = gltf.bufferViews[img.bufferView]
+            result[img.name] = bytes(blob[bv.byteOffset:bv.byteOffset + bv.byteLength])
+    return result
 
 
 def parse_glb_animations(glb_path: str) -> tuple:
@@ -1226,7 +1260,76 @@ def _apply_patch(glb_m: dict, gm: dict, strict: bool,
     return True
 
 
-def _create_new_mesh(dll, fi, glb_m, skeleton_bones, template_mesh):
+def _create_granny_texture(dll, filename):
+    """
+    Create a granny_texture struct in Python memory with the given FromFileName.
+    Returns pointer (int).
+    """
+    from granny_types import _type_sym_addr
+    tex_size = dll.GrannyGetTotalObjectSize(
+        ctypes.c_void_p(_type_sym_addr(dll, 'GrannyTextureType')))
+    tex_buf = (ctypes.c_uint8 * tex_size)()
+    _keepalive.append(tex_buf)
+
+    # Set FromFileName at +0x00
+    fn_bytes = filename.encode('utf-8') + b'\x00'
+    fn_buf = (ctypes.c_uint8 * len(fn_bytes))(*fn_bytes)
+    _keepalive.append(fn_buf)
+    struct.pack_into('<Q', tex_buf, 0x00, ctypes.addressof(fn_buf))
+
+    return ctypes.addressof(tex_buf)
+
+
+def _create_granny_material_chain(dll, mesh_name, texture_filename):
+    """
+    Create a full material chain: outer material -> material_map -> inner material -> texture.
+    The texture's FromFileName is set to texture_filename (basename used for game hash lookup).
+
+    Returns outer material pointer (int).
+    """
+    from granny_types import _type_sym_addr
+
+    mat_size = dll.GrannyGetTotalObjectSize(
+        ctypes.c_void_p(_type_sym_addr(dll, 'GrannyMaterialType')))
+    map_size = dll.GrannyGetTotalObjectSize(
+        ctypes.c_void_p(_type_sym_addr(dll, 'GrannyMaterialMapType')))
+
+    # 1. Create texture
+    tex_ptr = _create_granny_texture(dll, texture_filename)
+
+    # 2. Create inner material (holds the texture reference)
+    inner_mat = (ctypes.c_uint8 * mat_size)()
+    _keepalive.append(inner_mat)
+    inner_name = f"mod_texture_{mesh_name}".encode('utf-8') + b'\x00'
+    inner_name_buf = (ctypes.c_uint8 * len(inner_name))(*inner_name)
+    _keepalive.append(inner_name_buf)
+    struct.pack_into('<Q', inner_mat, 0x00, ctypes.addressof(inner_name_buf))  # Name
+    struct.pack_into('<Q', inner_mat, 0x14, tex_ptr)  # Texture*
+
+    # 3. Create material_map: Usage="color", Material=inner_mat
+    mat_map = (ctypes.c_uint8 * map_size)()
+    _keepalive.append(mat_map)
+    usage_str = b'color\x00'
+    usage_buf = (ctypes.c_uint8 * len(usage_str))(*usage_str)
+    _keepalive.append(usage_buf)
+    struct.pack_into('<Q', mat_map, 0x00, ctypes.addressof(usage_buf))  # Usage*
+    struct.pack_into('<Q', mat_map, 0x08, ctypes.addressof(inner_mat))  # Map* (inner material)
+
+    # 4. Create outer material: Name="Mat_<mesh>", Maps={count=1, ptr}
+    outer_mat = (ctypes.c_uint8 * mat_size)()
+    _keepalive.append(outer_mat)
+    outer_name = f"Mat_{mesh_name}".encode('utf-8') + b'\x00'
+    outer_name_buf = (ctypes.c_uint8 * len(outer_name))(*outer_name)
+    _keepalive.append(outer_name_buf)
+    struct.pack_into('<Q', outer_mat, 0x00, ctypes.addressof(outer_name_buf))  # Name
+    # Maps: count(4) + ptr(8) at offset +0x08
+    struct.pack_into('<I', outer_mat, 0x08, 1)  # Maps count
+    struct.pack_into('<Q', outer_mat, 0x0C, ctypes.addressof(mat_map))  # Maps ptr
+
+    return ctypes.addressof(outer_mat)
+
+
+def _create_new_mesh(dll, fi, glb_m, skeleton_bones, template_mesh, material_ptr=None):
     """
     Create a new granny_mesh by CLONING an existing mesh and replacing
     vertex data, index data, bone bindings, and name.
@@ -1380,9 +1483,19 @@ def _create_new_mesh(dll, fi, glb_m, skeleton_bones, template_mesh):
     struct.pack_into('<I', mesh_buf, 0x30, len(bb_entries))
     struct.pack_into('<Q', mesh_buf, 0x34, ctypes.addressof(bb_array))
 
+    # ── Override MaterialBindings if custom material provided ──
+    if material_ptr is not None:
+        # Allocate a new MaterialBindings array with one pointer entry
+        mb_array = (ctypes.c_uint8 * 8)()
+        struct.pack_into('<Q', mb_array, 0, material_ptr)
+        _keepalive.append(mb_array)
+        struct.pack_into('<I', mesh_buf, 0x24, 1)  # MaterialBindingCount
+        struct.pack_into('<Q', mesh_buf, 0x28, ctypes.addressof(mb_array))  # MaterialBindings*
+
     tri_count = len(idx_np) // 3
+    mat_info = " [custom material]" if material_ptr else ""
     print(f"  NEW MESH '{glb_m['name']}': {vc} verts, {tri_count} tris, "
-          f"{len(bb_entries)} bone bindings")
+          f"{len(bb_entries)} bone bindings{mat_info}")
     return ctypes.addressof(mesh_buf)
 
 
@@ -1472,10 +1585,32 @@ def patch_vertex_data(
 
             skel_bones = template.get('bb_names', [])
 
+            # Collect existing texture names from GR2 materials for comparison
+            existing_tex_names = set()
+            for _gm in gr2_mesh_list:
+                # Read texture from material chain
+                try:
+                    from gr2_to_gltf import _resolve_mesh_texture
+                    tex = _resolve_mesh_texture(_gm['mesh_ptr'])
+                    if tex:
+                        existing_tex_names.add(tex)
+                except Exception:
+                    pass
+
             for glb_m in glb_group:
-                # _create_new_mesh handles bone index remapping internally
-                # (maps GLB palette indices to the new mesh's BoneBindings order)
-                new_mesh_ptr = _create_new_mesh(dll, fi, glb_m, skel_bones, template)
+                # Check if this mesh needs a custom material
+                custom_mat_ptr = None
+                glb_tex = glb_m.get('texture_name')
+                if glb_tex and glb_tex not in existing_tex_names:
+                    # New texture — create a new material chain
+                    # Use a synthetic path; the basename is what matters for the game's hash lookup
+                    tex_filename = f"D:/mod/{glb_tex}.png"
+                    custom_mat_ptr = _create_granny_material_chain(
+                        dll, glb_m['name'].split(':')[-1], tex_filename)
+                    print(f"  Custom material for '{glb_m['name']}': texture={glb_tex}")
+
+                new_mesh_ptr = _create_new_mesh(dll, fi, glb_m, skel_bones, template,
+                                                material_ptr=custom_mat_ptr)
                 if new_mesh_ptr is not None:
                     # Expand fi->Meshes array
                     _meshes_off = _t('granny_file_info', 'Meshes')
@@ -1512,6 +1647,49 @@ def patch_vertex_data(
                                          0, new_mb_count)
                         struct.pack_into('<Q', (ctypes.c_uint8 * 8).from_address(model0 + mb_off + 4),
                                          0, ctypes.addressof(new_mb_arr))
+
+                    # Expand fi->Materials and fi->Textures if custom material was created
+                    if custom_mat_ptr is not None:
+                        # fi->Materials (ArrayOfReferences)
+                        try:
+                            mats_off = _t('granny_file_info', 'Materials')
+                            old_mat_count = ri(fi, mats_off)
+                            old_mat_arr = rq(fi, mats_off + 4)
+                            new_mat_count = old_mat_count + 1
+                            new_mat_arr = (ctypes.c_uint8 * (new_mat_count * 8))()
+                            if _valid_ptr(old_mat_arr):
+                                ctypes.memmove(new_mat_arr, old_mat_arr, old_mat_count * 8)
+                            struct.pack_into('<Q', new_mat_arr, old_mat_count * 8, custom_mat_ptr)
+                            _keepalive.append(new_mat_arr)
+                            struct.pack_into('<i', (ctypes.c_uint8 * 4).from_address(fi + mats_off),
+                                             0, new_mat_count)
+                            struct.pack_into('<Q', (ctypes.c_uint8 * 8).from_address(fi + mats_off + 4),
+                                             0, ctypes.addressof(new_mat_arr))
+                        except KeyError:
+                            pass
+
+                        # fi->Textures (ArrayOfReferences)
+                        try:
+                            texs_off = _t('granny_file_info', 'Textures')
+                            old_tex_count = ri(fi, texs_off)
+                            old_tex_arr = rq(fi, texs_off + 4)
+                            # Get the texture ptr from the material chain
+                            # outer_mat -> Maps[0] -> inner_mat -> Texture
+                            maps_ptr = rq(custom_mat_ptr, 0x0C)  # Maps ptr
+                            inner_mat_ptr = rq(maps_ptr, 0x08)   # Map->Material
+                            tex_ptr = rq(inner_mat_ptr, 0x14)    # Material->Texture
+                            new_tex_count = old_tex_count + 1
+                            new_tex_arr = (ctypes.c_uint8 * (new_tex_count * 8))()
+                            if _valid_ptr(old_tex_arr):
+                                ctypes.memmove(new_tex_arr, old_tex_arr, old_tex_count * 8)
+                            struct.pack_into('<Q', new_tex_arr, old_tex_count * 8, tex_ptr)
+                            _keepalive.append(new_tex_arr)
+                            struct.pack_into('<i', (ctypes.c_uint8 * 4).from_address(fi + texs_off),
+                                             0, new_tex_count)
+                            struct.pack_into('<Q', (ctypes.c_uint8 * 8).from_address(fi + texs_off + 4),
+                                             0, ctypes.addressof(new_tex_arr))
+                        except KeyError:
+                            pass
 
                     # Refresh mesh list for subsequent iterations
                     gr2_mesh_list = get_gr2_meshes(fi)
