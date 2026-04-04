@@ -136,6 +136,52 @@ def _strip_unchanged_data(glb_path, mod_dir):
         return None
 
 
+def _infer_operations(mod):
+    """
+    Infer what operations a mod performs from its assets.
+    Returns a set of operations: {'adds_meshes', 'replaces_meshes', 'patches_meshes',
+                                   'replaces_textures', 'adds_textures'}
+    """
+    ops = set()
+    mod_type = mod.get('type', '')
+    assets = mod.get('assets', {})
+    meshes = mod.get('meshes', [])
+    textures = assets.get('textures', [])
+
+    # Explicit type (backwards compat)
+    if isinstance(mod_type, list):
+        for t in mod_type:
+            if t == 'mesh_add': ops.add('adds_meshes')
+            elif t == 'mesh_replace': ops.add('replaces_meshes')
+            elif t == 'mesh_patch': ops.add('patches_meshes')
+            elif t == 'texture_replace': ops.add('replaces_textures')
+    elif mod_type:
+        if mod_type == 'mesh_add': ops.add('adds_meshes')
+        elif mod_type == 'mesh_replace': ops.add('replaces_meshes')
+        elif mod_type == 'mesh_patch': ops.add('patches_meshes')
+        elif mod_type == 'texture_replace': ops.add('replaces_textures')
+
+    # Infer from assets
+    if assets.get('glb'):
+        # Check if meshes are new or replacing existing
+        has_replacements = any(m.get('replaces') for m in meshes)
+        has_new = any(not m.get('replaces') for m in meshes)
+        if has_replacements:
+            ops.add('replaces_meshes')
+        if has_new or not meshes:
+            # GLB with no explicit mesh declarations = could be add or replace
+            if 'replaces_meshes' not in ops and 'patches_meshes' not in ops:
+                ops.add('adds_meshes')
+
+    for tex in textures:
+        if tex.get('custom'):
+            ops.add('adds_textures')
+        elif tex.get('replaces') or tex.get('name'):
+            ops.add('replaces_textures')
+
+    return ops
+
+
 def detect_conflicts(mod_dir, r2_plugins_dir):
     """Scan r2modman plugins directory for conflicts with the current mod.
 
@@ -150,7 +196,7 @@ def detect_conflicts(mod_dir, r2_plugins_dir):
     with open(mod_json_path) as f:
         mod = json.load(f)
 
-    my_type = mod.get('type', '')
+    my_ops = _infer_operations(mod)
     my_character = mod.get('target', {}).get('character', '')
     my_name = mod.get('metadata', {}).get('name', 'UnnamedMod')
     my_textures = {t.get('name') for t in mod.get('assets', {}).get('textures', [])
@@ -183,34 +229,37 @@ def detect_conflicts(mod_dir, r2_plugins_dir):
     safe = True
     for other in other_mods:
         o_name = other.get('metadata', {}).get('name', '?')
-        o_type = other.get('type', '')
+        o_ops = _infer_operations(other)
         o_char = other.get('target', {}).get('character', '')
         o_textures = {t.get('name') for t in other.get('assets', {}).get('textures', [])
                       if t.get('name')}
 
-        # Check texture conflicts: two mods replacing the same texture name
-        if my_type == 'texture_replace' and o_type == 'texture_replace':
+        # Texture conflict: two mods replacing/adding the same texture name
+        if my_textures & o_textures:
             overlap = my_textures & o_textures
-            if overlap:
-                print(f"CONFLICT: '{my_name}' and '{o_name}' both replace "
-                      f"texture(s): {', '.join(sorted(overlap))}")
-                safe = False
-
-        # Check mesh conflicts: two mesh_replace on same character
-        if (my_type == 'mesh_replace' and o_type == 'mesh_replace'
-                and my_character and my_character == o_char):
-            print(f"CONFLICT: '{my_name}' and '{o_name}' both mesh_replace "
-                  f"character '{my_character}'")
+            print(f"CONFLICT: '{my_name}' and '{o_name}' both modify "
+                  f"texture(s): {', '.join(sorted(overlap))}")
             safe = False
 
-        # mesh_add + mesh_replace on same character = warning (not hard conflict)
+        # Same character checks
         if my_character and my_character == o_char:
-            combo = {my_type, o_type}
-            if combo == {'mesh_add', 'mesh_replace'}:
-                print(f"WARNING: '{my_name}' ({my_type}) and '{o_name}' ({o_type}) "
-                      f"both target '{my_character}' -- results may be unpredictable")
+            # Two mesh_replace = hard conflict
+            if 'replaces_meshes' in my_ops and 'replaces_meshes' in o_ops:
+                print(f"CONFLICT: '{my_name}' and '{o_name}' both replace "
+                      f"meshes for '{my_character}'")
+                safe = False
 
-        # mesh_add + mesh_add = OK, texture_replace + mesh_add = OK (no message)
+            # mesh_add + mesh_replace = warning
+            my_adds = 'adds_meshes' in my_ops
+            my_replaces = 'replaces_meshes' in my_ops
+            o_adds = 'adds_meshes' in o_ops
+            o_replaces = 'replaces_meshes' in o_ops
+            if (my_adds and o_replaces) or (my_replaces and o_adds):
+                print(f"WARNING: '{my_name}' and '{o_name}' both target "
+                      f"'{my_character}' (add + replace may conflict)")
+
+            # mesh_add + mesh_add = OK (mergeable)
+            # patches + anything = OK (vertex edits are independent)
 
     if safe:
         print(f"CONFLICT CHECK: No conflicts detected for '{my_name}'")
@@ -220,12 +269,12 @@ def detect_conflicts(mod_dir, r2_plugins_dir):
 def _build_conflicts_json(mod):
     """Build a conflicts.json describing what this mod touches."""
     touches = {}
-    mod_type = mod.get('type', '')
     character = mod.get('target', {}).get('character', '')
+    ops = _infer_operations(mod)
 
     if character:
         touches['character'] = character
-    touches['type'] = mod_type
+    touches['operations'] = sorted(ops)
 
     tex_names = [t.get('name') for t in mod.get('assets', {}).get('textures', [])
                  if t.get('name')]
@@ -251,6 +300,7 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
 
     meta = mod.get('metadata', {})
     mod_type = mod.get('type', '')
+    ops = _infer_operations(mod)
     target = mod.get('target', {})
     assets = mod.get('assets', {})
     character = target.get('character', '')
@@ -263,7 +313,7 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
         detect_conflicts(mod_dir, r2_plugins_dir)
 
     print(f"Building: {meta.get('name', '?')} by {author}")
-    print(f"  Type: {mod_type}")
+    print(f"  Operations: {', '.join(sorted(ops)) or mod_type}")
     print(f"  Character: {character}")
 
     # Auto-detect game dir
@@ -294,7 +344,8 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
     glb_path = os.path.join(mod_dir, assets.get('glb', ''))
     mesh_entries = target.get('mesh_entries', [f"{character}_Mesh"])
 
-    if mod_type in ('mesh_add', 'mesh_replace', 'mesh_patch') and os.path.isfile(glb_path):
+    has_mesh_ops = ops & {'adds_meshes', 'replaces_meshes', 'patches_meshes'}
+    if has_mesh_ops and os.path.isfile(glb_path):
         gpk_path = os.path.join(gpk_dir, f"{character}.gpk")
         sdb_path = os.path.join(gpk_dir, f"{character}.sdb")
 
@@ -317,7 +368,7 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
                 dll_path=dll_path,
                 output_gpk=output_gpk,
                 manifest_path=manifest_path if os.path.isfile(manifest_path) else None,
-                allow_topology_change=(mod_type in ('mesh_replace', 'mesh_add')),
+                allow_topology_change=bool(ops & {'replaces_meshes', 'adds_meshes'}),
             )
         except Exception as e:
             print(f"ERROR: GPK build failed: {e}")
@@ -407,7 +458,7 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
         lua_lines.append(f'rom.log.info("[CG3H] Loaded: {name}")')
 
     # If this is a mesh mod, add auto-build logic
-    if mod_type in ('mesh_add', 'mesh_replace', 'mesh_patch'):
+    if has_mesh_ops:
         lua_lines.extend([
             f'',
             f'-- Auto-build GPK on first launch if missing',
@@ -490,29 +541,17 @@ def package_thunderstore(mod_dir):
         # For mesh_replace/mesh_patch: needs diff format (v3.1 milestone)
         assets_cfg = mod.get('assets', {})
         glb = assets_cfg.get('glb', '')
-        if glb and mod.get('type') == 'mesh_add':
+        if glb:
             glb_full = os.path.join(mod_dir, glb)
             if os.path.isfile(glb_full):
-                # Extract only non-original meshes from the GLB
+                # Strip unchanged data — keep only new/modified meshes and textures
                 stripped = _strip_unchanged_data(glb_full, mod_dir)
                 if stripped:
                     zf.writestr(glb, stripped)
-                    print(f"  Packaged GLB: only new meshes (original geometry stripped)")
-                else:
-                    # Fallback: include full GLB if stripping failed
-                    zf.write(glb_full, glb)
-                    print(f"  WARNING: Could not strip original meshes from GLB")
-        elif glb and mod.get('type') in ('mesh_replace', 'mesh_patch'):
-            glb_full = os.path.join(mod_dir, glb)
-            if os.path.isfile(glb_full):
-                # Strip original meshes — keep only modified/new ones
-                stripped = _strip_unchanged_data(glb_full, mod_dir)
-                if stripped:
-                    zf.writestr(glb, stripped)
-                    print(f"  Packaged GLB: original meshes stripped")
+                    print(f"  Packaged GLB: unchanged data stripped")
                 else:
                     zf.write(glb_full, glb)
-                    print(f"  WARNING: Could not strip — full GLB included")
+                    print(f"  WARNING: Could not strip unchanged data")
 
         # Include conflicts.json (describes what this mod touches)
         conflicts = _build_conflicts_json(mod)
@@ -524,7 +563,8 @@ def package_thunderstore(mod_dir):
             zf.write(manifest_file, 'manifest.json')
 
         # Include builder exe for mesh mods (auto-build GPK on user's machine)
-        if mod.get('type') in ('mesh_add', 'mesh_replace', 'mesh_patch'):
+        pkg_ops = _infer_operations(mod)
+        if pkg_ops & {'adds_meshes', 'replaces_meshes', 'patches_meshes'}:
             exe_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                     'dist', 'cg3h_builder.exe')
             if os.path.isfile(exe_path):

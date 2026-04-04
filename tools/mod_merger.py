@@ -89,23 +89,26 @@ def check_conflicts(group):
     Check a group of mods targeting the same character for conflicts.
     Returns (warnings, errors) lists.
     """
+    from cg3h_build import _infer_operations
+
     warnings = []
     errors = []
-    types = [m['mod'].get('type', '') for m in group]
     names = [m['mod'].get('metadata', {}).get('name', m['id']) for m in group]
+    all_ops = [_infer_operations(m['mod']) for m in group]
 
-    # Multiple mesh_replace = hard conflict
-    replace_count = types.count('mesh_replace')
-    if replace_count > 1:
-        replacers = [n for n, t in zip(names, types) if t == 'mesh_replace']
-        errors.append(f"CONFLICT: {replace_count} mesh_replace mods: {', '.join(replacers)}")
+    # Multiple mesh replacers = hard conflict
+    replacers = [n for n, ops in zip(names, all_ops) if 'replaces_meshes' in ops]
+    if len(replacers) > 1:
+        errors.append(f"CONFLICT: {len(replacers)} mesh_replace mods: {', '.join(replacers)}")
 
     # mesh_add + mesh_replace = warning
-    if 'mesh_add' in types and 'mesh_replace' in types:
-        warnings.append("WARNING: mesh_add + mesh_replace — additive meshes may not "
+    has_add = any('adds_meshes' in ops for ops in all_ops)
+    has_replace = any('replaces_meshes' in ops for ops in all_ops)
+    if has_add and has_replace:
+        warnings.append("WARNING: mesh_add + mesh_replace -- additive meshes may not "
                         "work with the replacement model")
 
-    # Multiple texture_replace for same texture name
+    # Same texture modified by multiple mods
     all_textures = {}
     for m in group:
         for tex in m['mod'].get('assets', {}).get('textures', []):
@@ -115,7 +118,7 @@ def check_conflicts(group):
                     m['mod'].get('metadata', {}).get('name', m['id']))
     for tex_name, mod_names in all_textures.items():
         if len(mod_names) > 1:
-            errors.append(f"CONFLICT: texture '{tex_name}' replaced by: {', '.join(mod_names)}")
+            errors.append(f"CONFLICT: texture '{tex_name}' modified by: {', '.join(mod_names)}")
 
     return warnings, errors
 
