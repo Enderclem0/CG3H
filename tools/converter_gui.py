@@ -153,6 +153,14 @@ class App:
         self.exp_textures = tk.BooleanVar(value=False)
         ttk.Checkbutton(box, text="Include textures (embeds PNG in GLB + saves original DDS)",
                         variable=self.exp_textures).pack(anchor=tk.W, pady=2)
+        mesh_entry_row = ttk.Frame(box)
+        mesh_entry_row.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(mesh_entry_row, text="Mesh entries:", foreground="#555").pack(side=tk.LEFT)
+        self.exp_mesh_entry = tk.StringVar()
+        ttk.Entry(mesh_entry_row, textvariable=self.exp_mesh_entry, width=28).pack(
+            side=tk.LEFT, padx=4)
+        ttk.Label(mesh_entry_row, text="blank = all, comma-sep to filter (e.g. HecateHub_Mesh)",
+                  foreground="#888", font=("", 8)).pack(side=tk.LEFT)
         ttk.Checkbutton(box, text="Debug scan (print BoneBinding trace in log)",
                         variable=self.exp_debug_scan).pack(anchor=tk.W, pady=2)
 
@@ -638,6 +646,9 @@ class App:
                 cmd += ["--anim-workers", str(anim_w)]
             if self.exp_textures.get():
                 cmd.append("--textures")
+            mesh_entry = self.exp_mesh_entry.get().strip()
+            if mesh_entry:
+                cmd += ["--mesh-entry", mesh_entry]
             if self.exp_debug_scan.get():
                 cmd.append("--debug")
             return cmd
@@ -953,6 +964,7 @@ class App:
                 elif not os.path.isfile(sdb_orig):
                     errors.append(f"Original {character}.sdb not found")
                 else:
+                    manifest_file = os.path.join(export_dir, 'manifest.json')
                     cmd = [
                         sys.executable, IMPORTER, glb_path,
                         "--gpk", gpk_orig,
@@ -960,6 +972,8 @@ class App:
                         "--dll", dll,
                         "--output-gpk", gpk_out,
                     ]
+                    if os.path.isfile(manifest_file):
+                        cmd += ["--manifest", manifest_file]
                     if self.inst_topology.get():
                         cmd.append("--allow-topology-change")
 
@@ -998,9 +1012,40 @@ class App:
                 self._ui(lambda: self._inst_status.config(
                     text=f"Installing {character} textures...", foreground="#555"))
 
-                from pkg_texture import replace_texture, png_to_dds
+                from pkg_texture import replace_texture, png_to_dds, _update_pkg_checksum
                 backup_dir = os.path.join(pkg_dir, "_backups")
                 os.makedirs(backup_dir, exist_ok=True)
+
+                # Sync ALL modified pkg checksums before modifying anything.
+                # Handles: leftover mods from pre-checksum era, uninstall restoring
+                # backup checksums.txt that doesn't reflect other active mods.
+                checksums_path = os.path.join(pkg_dir, "checksums.txt")
+                if os.path.isfile(checksums_path):
+                    import xxhash as _xxh
+                    with open(checksums_path) as _cf:
+                        _lines = _cf.readlines()
+                    _dirty = False
+                    for _li, _line in enumerate(_lines):
+                        _parts = _line.strip().split('  ', 1)
+                        if len(_parts) != 2 or not _parts[1].endswith('.pkg'):
+                            continue
+                        _pp = os.path.join(pkg_dir, _parts[1])
+                        if not os.path.isfile(_pp):
+                            continue
+                        _h = _xxh.xxh64()
+                        with open(_pp, 'rb') as _pf:
+                            while True:
+                                _chunk = _pf.read(65536)
+                                if not _chunk: break
+                                _h.update(_chunk)
+                        if _h.hexdigest() != _parts[0]:
+                            _lines[_li] = f"{_h.hexdigest()}  {_parts[1]}\n"
+                            _dirty = True
+                    if _dirty:
+                        with open(checksums_path, 'w') as _cf:
+                            _cf.writelines(_lines)
+                        self._log_write_ui(self._inst_log,
+                            "  Synced checksums.txt\n")
 
                 # Backup checksums.txt (once)
                 checksums_src = os.path.join(pkg_dir, "checksums.txt")
@@ -1008,15 +1053,89 @@ class App:
                 if os.path.isfile(checksums_src) and not os.path.isfile(checksums_bak):
                     shutil.copy2(checksums_src, checksums_bak)
 
+                # Resolve texture source: standalone PNG vs GLB-embedded PNG
+                # Uses png_hash from manifest to detect which was edited
+                import hashlib as _hl
+                glb_file = manifest.get('glb', '')
+                glb_path = os.path.join(export_dir, glb_file)
+                glb_pngs = {}
+                if glb_file and os.path.isfile(glb_path):
+                    try:
+                        import pygltflib
+                        glb = pygltflib.GLTF2().load(glb_path)
+                        blob = glb.binary_blob()
+                        for img in (glb.images or []):
+                            if img.bufferView is not None and img.name:
+                                bv = glb.bufferViews[img.bufferView]
+                                glb_pngs[img.name] = blob[bv.byteOffset:bv.byteOffset + bv.byteLength]
+                        self._log_write_ui(self._inst_log,
+                            f"  GLB: {len(glb_pngs)} embedded texture(s)\n")
+                    except Exception as e:
+                        self._log_write_ui(self._inst_log,
+                            f"  WARNING: GLB texture read failed: {e}\n")
+                else:
+                    self._log_write_ui(self._inst_log,
+                        f"  WARNING: GLB not found: {glb_path}\n")
+
                 for tex_name, tex_info in textures.items():
+                    orig_hash = tex_info.get('png_hash', '')
+                    png_path = os.path.join(export_dir, f"{tex_name}.png")
+
+                    # Check standalone PNG
+                    standalone_hash = ''
+                    if os.path.isfile(png_path):
+                        standalone_hash = _hl.md5(open(png_path, 'rb').read()).hexdigest()
+                    standalone_changed = orig_hash and standalone_hash and standalone_hash != orig_hash
+
+                    # Check GLB-embedded PNG
+                    glb_hash = ''
+                    if tex_name in glb_pngs:
+                        glb_hash = _hl.md5(glb_pngs[tex_name]).hexdigest()
+                    glb_changed = orig_hash and glb_hash and glb_hash != orig_hash
+
+                    self._log_write_ui(self._inst_log,
+                        f"  {tex_name}: standalone={'changed' if standalone_changed else 'original'}"
+                        f" glb={'changed' if glb_changed else 'original' if glb_hash else 'n/a'}\n")
+
+                    if standalone_changed and glb_changed and standalone_hash != glb_hash:
+                        self._ui(lambda tn=tex_name: messagebox.showwarning(
+                            "Texture conflict",
+                            f"'{tn}' was edited both as standalone PNG and in Blender GLB.\n"
+                            f"Using the standalone PNG. To use the Blender version,\n"
+                            f"delete the standalone PNG and re-install."))
+                    elif glb_changed and not standalone_changed:
+                        with open(png_path, 'wb') as pf:
+                            pf.write(glb_pngs[tex_name])
+                        self._log_write_ui(self._inst_log,
+                            f"  -> Extracted {tex_name}.png from GLB\n")
+                    elif standalone_changed:
+                        self._log_write_ui(self._inst_log,
+                            f"  -> Using standalone {tex_name}.png\n")
+
+                for tex_name, tex_info in textures.items():
+                    # Skip variant textures (Lua overrides like EM) unless edited
+                    if tex_info.get('variant'):
+                        dds_check = os.path.join(export_dir, tex_info.get('dds_file', ''))
+                        png_check = os.path.join(export_dir, f"{tex_name}.png")
+                        # Only install variant if the user actually edited it
+                        dds_edited = os.path.isfile(dds_check) and \
+                            os.path.getmtime(dds_check) > os.path.getmtime(
+                                os.path.join(export_dir, 'manifest.json'))
+                        png_edited = os.path.isfile(png_check) and \
+                            os.path.getmtime(png_check) > os.path.getmtime(
+                                os.path.join(export_dir, 'manifest.json'))
+                        if not dds_edited and not png_edited:
+                            continue
                     dds_file = tex_info.get('dds_file', f"{tex_name}.dds")
                     dds_path = os.path.join(export_dir, dds_file)
                     png_path = os.path.join(export_dir, f"{tex_name}.png")
 
-                    # PNG path: compress if newer than DDS
+                    # PNG path: recompress if PNG differs from original
+                    orig_png_hash = tex_info.get('png_hash', '')
                     if os.path.isfile(png_path):
-                        if not os.path.isfile(dds_path) or \
-                                os.path.getmtime(png_path) > os.path.getmtime(dds_path):
+                        cur_png_hash = _hl.md5(open(png_path, 'rb').read()).hexdigest()
+                        png_changed = orig_png_hash and cur_png_hash != orig_png_hash
+                        if png_changed or not os.path.isfile(dds_path):
                             self._log_write_ui(
                                 self._inst_log,
                                 f"  Compressing {tex_name}.png -> DDS...\n")
@@ -1037,30 +1156,34 @@ class App:
                     if not os.path.isfile(dds_path):
                         continue
 
-                    pkg_name = tex_info.get('pkg', '')
-                    pkg_path = os.path.join(pkg_dir, pkg_name)
-                    if not os.path.isfile(pkg_path):
-                        errors.append(f"{tex_name}: {pkg_name} not found")
-                        continue
+                    # Replace in ALL .pkg files that contain this texture
+                    entry_name = tex_info.get('pkg_entry_name', tex_name)
+                    pkg_list = tex_info.get('pkgs', [tex_info.get('pkg', '')])
+                    replaced_in = []
+                    for pkg_name in pkg_list:
+                        pkg_path = os.path.join(pkg_dir, pkg_name)
+                        if not os.path.isfile(pkg_path):
+                            continue
 
-                    # Backup pkg
-                    backup_path = os.path.join(backup_dir, pkg_name)
-                    if not os.path.isfile(backup_path):
-                        shutil.copy2(pkg_path, backup_path)
+                        backup_path = os.path.join(backup_dir, pkg_name)
+                        if not os.path.isfile(backup_path):
+                            shutil.copy2(pkg_path, backup_path)
 
-                    try:
-                        entry_name = tex_info.get('pkg_entry_name', tex_name)
-                        if replace_texture(pkg_path, entry_name, dds_path, pkg_path):
-                            modified_files.append({
-                                'type': 'pkg', 'backup': backup_path, 'target': pkg_path,
-                                'texture': tex_name, 'entry_name': entry_name,
-                                'dds_path': dds_path,
-                            })
-                            results.append(f"Texture: {tex_name} -> {pkg_name}")
-                        else:
-                            errors.append(f"{tex_name}: not found in {pkg_name}")
-                    except Exception as e:
-                        errors.append(f"{tex_name}: {e}")
+                        try:
+                            if replace_texture(pkg_path, entry_name, dds_path, pkg_path):
+                                modified_files.append({
+                                    'type': 'pkg', 'backup': backup_path, 'target': pkg_path,
+                                    'texture': tex_name, 'entry_name': entry_name,
+                                    'dds_path': dds_path,
+                                })
+                                replaced_in.append(pkg_name)
+                        except Exception as e:
+                            errors.append(f"{tex_name} in {pkg_name}: {e}")
+
+                    if replaced_in:
+                        results.append(f"Texture: {tex_name} -> {', '.join(replaced_in)}")
+                    else:
+                        errors.append(f"{tex_name}: not found in any .pkg")
 
         # ── Register mod and summarize ──
         if modified_files:

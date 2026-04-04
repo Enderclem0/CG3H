@@ -1383,8 +1383,13 @@ def _extract_all_textures(pkg_dir, texture_names):
     remaining = {n.lower(): n for n in texture_names}  # lowercase → original
     results = {}
 
-    # Use index for fast .pkg file lookup
+    # Use index for fast .pkg file lookup (build if missing)
     tex_index = load_texture_index(pkg_dir)
+    if tex_index is None:
+        from pkg_texture import save_texture_index
+        print("  Building texture index (one-time)...", flush=True)
+        save_texture_index(pkg_dir)
+        tex_index = load_texture_index(pkg_dir)
 
     pkg_targets = {}  # pkg_path → set of lowercase names to find
     if tex_index:
@@ -1440,10 +1445,15 @@ def _extract_all_textures(pkg_dir, texture_names):
                 if png_bytes:
                     orig_name = remaining.pop(matched_key)
                     pkg_name = os.path.basename(pkg_path)
+                    # Find ALL .pkg files containing this texture
+                    all_pkgs = [pkg_name]
+                    if tex_index and matched_key in tex_index:
+                        all_pkgs = tex_index[matched_key].get('pkgs', [pkg_name])
                     results[orig_name] = {
                         'png': png_bytes,
                         'dds': dds_bytes,
                         'pkg': pkg_name,
+                        'pkgs': all_pkgs,
                         'pkg_entry_name': t['name'],
                         'format': t['format'],
                         'format_name': t.get('format_name', ''),
@@ -1454,7 +1464,7 @@ def _extract_all_textures(pkg_dir, texture_names):
                     }
                     src = "atlas" if t.get('atlas') else "tex2d"
                     print(f"  Found: {t['name']} ({t['width']}x{t['height']} "
-                          f"fmt=0x{t['format']:X} {src}) in {pkg_name}")
+                          f"fmt=0x{t['format']:X} {src}) in {', '.join(all_pkgs)}")
 
     return results
 
@@ -1626,6 +1636,12 @@ def main():
                         help="Only export animations matching this pattern (e.g. 'Idle')")
     parser.add_argument("--anim-workers", type=int, default=0,
                         help="Number of parallel animation workers (0=auto, 1=sequential)")
+    parser.add_argument("--mesh-entry", default=None,
+                        help="Mesh entry name(s) in GPK, comma-separated "
+                             "(e.g. 'HecateHub_Mesh,HecateBattle_Mesh'). "
+                             "Use --list-entries to see available entries.")
+    parser.add_argument("--list-entries", action="store_true",
+                        help="List all entries in the GPK and exit")
     parser.add_argument("--textures", action="store_true",
                         help="Embed 3D model texture in GLB + save original DDS alongside")
     parser.add_argument("--pkg-dir", default=None,
@@ -1642,14 +1658,37 @@ def main():
 
     print(f"[1/5] Extracting GPK: {gpk_path}")
     entries = extract_all_from_gpk(gpk_path)
-    mesh_key = f"{args.name}_Mesh"
-    if mesh_key not in entries:
-        mesh_key = next((k for k in entries if k.endswith('_Mesh')), None)
-    if not mesh_key:
-        print(f"ERROR: No _Mesh entry found. Available: {list(entries.keys())[:10]}")
-        sys.exit(1)
-    gr2_bytes = entries[mesh_key]
-    print(f"  Mesh entry: {mesh_key!r} ({len(gr2_bytes):,} bytes decompressed)")
+    all_mesh_keys = [k for k in entries if k.endswith('_Mesh')]
+
+    if args.list_entries:
+        print(f"Entries in {gpk_path}:")
+        for k, v in entries.items():
+            tag = " [MESH]" if k.endswith('_Mesh') else ""
+            print(f"  {k} ({len(v):,} bytes){tag}")
+        sys.exit(0)
+
+    # Select mesh entries to export
+    if args.mesh_entry:
+        selected_keys = [s.strip() for s in args.mesh_entry.split(',')]
+        mesh_keys = []
+        for sk in selected_keys:
+            if sk in entries:
+                mesh_keys.append(sk)
+            else:
+                match = next((k for k in all_mesh_keys if sk in k), None)
+                if match:
+                    mesh_keys.append(match)
+                else:
+                    print(f"WARNING: entry '{sk}' not found. Available: {all_mesh_keys}")
+        if not mesh_keys:
+            print(f"ERROR: No matching mesh entries. Available: {all_mesh_keys}")
+            sys.exit(1)
+    else:
+        # Default: ALL mesh entries
+        mesh_keys = all_mesh_keys
+        if not mesh_keys:
+            print(f"ERROR: No _Mesh entry found. Available: {list(entries.keys())[:10]}")
+            sys.exit(1)
 
     print(f"[2/5] Loading SDB: {sdb_path}")
     with open(sdb_path, 'rb') as f:
@@ -1657,39 +1696,57 @@ def main():
 
     print(f"[3/5] Loading Granny DLL and building type map")
     dll = setup_granny(args.dll)
-    gr2_file, sdb_file, fi, _keep = load_gr2(dll, gr2_bytes, sdb_bytes)
 
     print(f"[4/5] Reading skeleton and mesh data")
-    bones, bone_name_to_idx = read_skeleton(fi)
-    print(f"  Skeleton: {len(bones)} bones")
-
-    # 'Meshes' is ArrayOfReferencesMember: {count[4], ptr[8]}.
-    _meshes    = _t('granny_file_info', 'Meshes')
-    mesh_count = ri(fi, _meshes)
-    meshes_arr = rq(fi, _meshes + 4)
-
-    mesh_indices = [args.mesh_index] if args.mesh_index is not None else list(range(mesh_count))
-
     mesh_data_list = []
     mesh_names = []
-    exported_gr2_indices = []  # tracks which GR2 mesh index each exported mesh came from
+    exported_gr2_indices = []
+    local_mesh_tex = {}  # local_index → tex_name (resolved per-entry)
     seen_names: dict = {}
-    for mi in mesh_indices:
-        mesh_ptr = rq(meshes_arr, mi * 8)
-        result = read_mesh_data(mesh_ptr, bone_name_to_idx, dll, debug=args.debug)
-        if result is None:
-            continue
-        mesh_name, positions, normals, uvs, weights, joints, indices = result
-        if mesh_name in seen_names:
-            seen_names[mesh_name] += 1
-            mesh_name = f"{mesh_name}_{seen_names[mesh_name]}"
-        else:
-            seen_names[mesh_name] = 0
-        mtype = "rigid" if joints is None else "skinned"
-        print(f"  Mesh[{mi}] {mesh_name!r}: {len(positions)} verts, {len(indices)//3} tris  [{mtype}]")
-        mesh_data_list.append((positions, normals, uvs, weights, joints, indices))
-        mesh_names.append(mesh_name)
-        exported_gr2_indices.append(mi)
+    bones = None
+    bone_name_to_idx = None
+    _all_keeps = []  # keep all DLL buffers alive
+
+    for mk_idx, mesh_key in enumerate(mesh_keys):
+        gr2_bytes = entries[mesh_key]
+        print(f"  Mesh entry: {mesh_key!r} ({len(gr2_bytes):,} bytes decompressed)")
+        gr2_file, sdb_file, cur_fi, _keep = load_gr2(dll, gr2_bytes, sdb_bytes)
+        _all_keeps.append((gr2_file, sdb_file, _keep))
+
+        # Read skeleton from first entry only
+        if bones is None:
+            bones, bone_name_to_idx = read_skeleton(cur_fi)
+            print(f"  Skeleton: {len(bones)} bones")
+
+        # Get per-mesh texture map for THIS entry
+        entry_tex_map, _ = _read_mesh_texture_map(cur_fi, debug=args.debug)
+
+        _meshes    = _t('granny_file_info', 'Meshes')
+        mesh_count = ri(cur_fi, _meshes)
+        meshes_arr = rq(cur_fi, _meshes + 4)
+
+        mesh_indices = [args.mesh_index] if args.mesh_index is not None else list(range(mesh_count))
+
+        for mi in mesh_indices:
+            mesh_ptr = rq(meshes_arr, mi * 8)
+            result = read_mesh_data(mesh_ptr, bone_name_to_idx, dll, debug=args.debug)
+            if result is None:
+                continue
+            mesh_name, positions, normals, uvs, weights, joints, indices = result
+            if mesh_name in seen_names:
+                seen_names[mesh_name] += 1
+                mesh_name = f"{mesh_name}_{seen_names[mesh_name]}"
+            else:
+                seen_names[mesh_name] = 0
+            mtype = "rigid" if joints is None else "skinned"
+            print(f"  Mesh[{mi}] {mesh_name!r}: {len(positions)} verts, {len(indices)//3} tris  [{mtype}]")
+            local_idx = len(mesh_data_list)
+            mesh_data_list.append((positions, normals, uvs, weights, joints, indices))
+            mesh_names.append(mesh_name)
+            exported_gr2_indices.append({'entry': mesh_key, 'gr2_index': mi})
+            # Map texture from this entry's texture map
+            if mi in entry_tex_map:
+                local_mesh_tex[local_idx] = entry_tex_map[mi]
 
     # ── Animations ──
     anim_data = None
@@ -1713,26 +1770,25 @@ def main():
 
         if os.path.isdir(pkg_dir):
             try:
-                # Walk material chain to get per-mesh texture assignments
-                mesh_tex_map, unique_tex_names = _read_mesh_texture_map(fi, debug=args.debug)
-                # mesh_tex_map: {gr2_mesh_index: "TextureName"}
-                # Remap to local indices using exported_gr2_indices (skips shadow meshes)
-                local_mesh_tex = {}  # local_index → tex_name
-                for local_i, gr2_i in enumerate(exported_gr2_indices):
-                    if gr2_i in mesh_tex_map:
-                        local_mesh_tex[local_i] = mesh_tex_map[gr2_i]
+                # Collect unique texture names from the per-mesh mapping
+                unique_tex_names = []
+                for tn in local_mesh_tex.values():
+                    if tn not in unique_tex_names:
+                        unique_tex_names.append(tn)
 
                 # Check Lua GrannyTexture overrides (game can replace texture at runtime)
                 scripts_dir = os.path.join(os.path.dirname(os.path.dirname(args.gpk_dir)),
                                            "Scripts")
                 lua_overrides = _load_granny_texture_overrides(scripts_dir)
                 char_lower = args.name.lower()
+                lua_variant_names = set()
                 if char_lower in lua_overrides:
                     lua_tex = lua_overrides[char_lower]
-                    print(f"  Lua GrannyTexture overrides: {lua_tex}")
+                    print(f"  Lua GrannyTexture overrides (variants): {lua_tex}")
                     for lt in lua_tex:
                         if lt not in unique_tex_names:
                             unique_tex_names.append(lt)
+                            lua_variant_names.add(lt)
 
                 # Also check fi->Textures as a fallback source
                 if not unique_tex_names:
@@ -1758,12 +1814,22 @@ def main():
                         # Find which local meshes use this texture
                         indices_for_tex = [li for li, tn in local_mesh_tex.items()
                                            if tn == tex_name]
-                        # If no mesh mapping (fallback path), assign to all body meshes
-                        if not indices_for_tex:
+                        is_variant = tex_name in lua_variant_names
+
+                        if is_variant:
+                            # Lua variants (e.g. EM textures) — save as files
+                            # but don't embed in GLB or assign to meshes
+                            indices_for_tex = []
+                        elif not indices_for_tex:
+                            # No mesh mapping from material chain — assign to all body meshes
                             indices_for_tex = [i for i, mn in enumerate(mesh_names)
                                                if 'Outline' not in mn and 'Shadow' not in mn]
-                        texture_map[tex_name] = (tex_info['png'], indices_for_tex)
+
+                        if indices_for_tex:
+                            texture_map[tex_name] = (tex_info['png'], indices_for_tex)
                         # Save DDS + PNG alongside GLB
+                        import hashlib as _hl
+                        png_hash = _hl.md5(tex_info['png']).hexdigest()
                         dds_filename = f"{tex_name}.dds"
                         with open(os.path.join(out_dir, dds_filename), 'wb') as f:
                             f.write(tex_info['dds'])
@@ -1771,9 +1837,11 @@ def main():
                         with open(os.path.join(out_dir, png_filename), 'wb') as f:
                             f.write(tex_info['png'])
                         # Build manifest entry
-                        manifest_textures[tex_name] = {
+                        tex_manifest = {
                             'dds_file': dds_filename,
+                            'png_hash': png_hash,
                             'pkg': tex_info['pkg'],
+                            'pkgs': tex_info.get('pkgs', [tex_info['pkg']]),
                             'pkg_entry_name': tex_info['pkg_entry_name'],
                             'format': tex_info['format'],
                             'format_name': tex_info['format_name'],
@@ -1783,6 +1851,9 @@ def main():
                             'mip_count': tex_info['mip_count'],
                             'mesh_names': [mesh_names[i] for i in indices_for_tex],
                         }
+                        if is_variant:
+                            tex_manifest['variant'] = True
+                        manifest_textures[tex_name] = tex_manifest
                     n_tex = len(texture_map)
                     n_meshes = sum(len(v[1]) for v in texture_map.values())
                     print(f"  {n_tex} texture(s) embedded, assigned to {n_meshes} mesh(es)")
@@ -1814,7 +1885,8 @@ def main():
         'glb': os.path.basename(out_path),
         'gpk': f"{args.name}.gpk",
         'sdb': f"{args.name}.sdb",
-        'meshes': [{'name': mn, 'gr2_index': gi}
+        'mesh_entries': mesh_keys,
+        'meshes': [{'name': mn, 'entry': gi['entry'], 'gr2_index': gi['gr2_index']}
                    for mn, gi in zip(mesh_names, exported_gr2_indices)],
     }
     if args.textures and 'manifest_textures' in dir():
@@ -1829,8 +1901,9 @@ def main():
         json.dump(manifest, f, indent=2)
     print(f"  Manifest: {manifest_path}")
 
-    dll.GrannyFreeFile(gr2_file)
-    dll.GrannyFreeFile(sdb_file)
+    for _gf, _sf, _kp in _all_keeps:
+        dll.GrannyFreeFile(_gf)
+        dll.GrannyFreeFile(_sf)
 
 
 if __name__ == '__main__':

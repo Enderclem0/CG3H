@@ -653,6 +653,7 @@ def build_texture_index(pkg_dir):
             if key not in index:
                 index[key] = {
                     'pkg': pkg_name,
+                    'pkgs': [pkg_name],
                     'name': t['name'],
                     'format': t['format'],
                     'width': t['width'],
@@ -660,6 +661,9 @@ def build_texture_index(pkg_dir):
                     'pixel_size': t['pixel_size'],
                     'mip_count': t['mip_count'],
                 }
+            else:
+                if pkg_name not in index[key]['pkgs']:
+                    index[key]['pkgs'].append(pkg_name)
     return index
 
 

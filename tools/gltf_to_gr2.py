@@ -38,6 +38,8 @@ import ctypes
 import os
 import struct
 import sys
+if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 import tempfile
 
 import numpy as np
@@ -1555,6 +1557,7 @@ def convert(
     output_gpk: str,
     output_gr2=None,
     entry_name=None,
+    manifest_path=None,
     strict: bool = False,
     positional: bool = False,
     allow_topology_change: bool = False,
@@ -1572,21 +1575,33 @@ def convert(
 
     print(f"[2/6] Extracting GPK: {gpk_path}")
     gpk_entries = extract_gpk(gpk_path)
-    if entry_name is None:
-        candidates = [k for k in gpk_entries if k.endswith('_Mesh')]
-        if not candidates:
-            candidates = list(gpk_entries.keys())
-        # Mirror the exporter: prefer <gpk-basename>_Mesh before falling back
-        gpk_stem = os.path.splitext(os.path.basename(gpk_path))[0]
-        preferred = f"{gpk_stem}_Mesh"
-        if preferred in candidates:
-            entry_name = preferred
-        else:
-            entry_name = max(candidates, key=lambda k: len(gpk_entries[k]))
-    if entry_name not in gpk_entries:
-        raise KeyError(f"Entry {entry_name!r} not in GPK. Available: {sorted(gpk_entries)}")
-    gr2_bytes = gpk_entries[entry_name]
-    print(f"  Entry {entry_name!r}: {len(gr2_bytes):,} bytes")
+
+    # Load manifest if available — gives us mesh→entry routing
+    manifest = None
+    mesh_to_entry = {}  # glb_mesh_name → entry_name
+    if manifest_path:
+        import json
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+        for m in manifest.get('meshes', []):
+            mesh_to_entry[m['name']] = m.get('entry', '')
+        print(f"  Manifest: {len(mesh_to_entry)} mesh->entry mappings")
+
+    # Find all mesh entries to patch
+    all_mesh_entries = [k for k in gpk_entries if k.endswith('_Mesh')]
+    if entry_name is not None:
+        if entry_name not in gpk_entries:
+            raise KeyError(f"Entry {entry_name!r} not in GPK. Available: {sorted(gpk_entries)}")
+        mesh_entry_names = [entry_name]
+    elif manifest and manifest.get('mesh_entries'):
+        mesh_entry_names = [e for e in manifest['mesh_entries'] if e in gpk_entries]
+    else:
+        mesh_entry_names = all_mesh_entries
+    if not mesh_entry_names:
+        raise KeyError(f"No _Mesh entries in GPK. Available: {sorted(gpk_entries)}")
+
+    if len(mesh_entry_names) > 1:
+        print(f"  Multi-entry GPK: {mesh_entry_names}")
 
     print(f"[3/6] Reading SDB: {sdb_path}")
     with open(sdb_path, 'rb') as f:
@@ -1595,37 +1610,78 @@ def convert(
     print(f"[4/6] Loading Granny DLL + type map")
     dll = setup_granny(dll_path)
 
-    # Single load with remap=True: GrannyRemapFileStrings converts SDB indices to
-    # live RAM pointers.  The DLL walker needs valid string pointers to pass to
-    # the Python string callback during serialization.  sdb_dict is built from
-    # the str_db object in memory for callback lookups.
-    gr2_file, sdb_file, fi, sdb_dict, sdb_crc, _keep = load_gr2(dll, gr2_bytes, sdb_bytes)
-    print(f"  SDB: {len(sdb_dict)} strings indexed  CRC=0x{sdb_crc:08X}")
+    # For each mesh entry: load GR2, find matching GLB meshes, patch, serialize
+    total_patched = 0
+    remaining_glb = list(glb_meshes)  # GLB meshes not yet claimed by any entry
 
-    print(f"[5/6] Patching vertex data")
-    n_patched = patch_vertex_data(
-        dll, fi, glb_meshes, strict=strict, positional=positional,
-        allow_topology_change=allow_topology_change,
-    )
-    if n_patched == 0:
+    for me_name in mesh_entry_names:
+        gr2_bytes = gpk_entries[me_name]
+        print(f"\n  --- Entry: {me_name} ({len(gr2_bytes):,} bytes) ---")
+
+        gr2_file, sdb_file, fi, sdb_dict, sdb_crc, _keep = load_gr2(dll, gr2_bytes, sdb_bytes)
+        if total_patched == 0:
+            print(f"  SDB: {len(sdb_dict)} strings indexed  CRC=0x{sdb_crc:08X}")
+
+        # Route GLB meshes to this entry
+        entry_glb = []
+        still_remaining = []
+        if mesh_to_entry:
+            # Manifest-based routing: exact match on entry name
+            for glb_m in remaining_glb:
+                if mesh_to_entry.get(glb_m['name']) == me_name:
+                    entry_glb.append(glb_m)
+                else:
+                    still_remaining.append(glb_m)
+        else:
+            # Fallback: match by GR2 mesh names in this entry
+            gr2_mesh_list = get_gr2_meshes(fi)
+            gr2_norm_names = set()
+            for gm in gr2_mesh_list:
+                gr2_norm_names.add(_normalize_mesh_name(gm['name']))
+            for glb_m in remaining_glb:
+                glb_norm = _normalize_mesh_name(glb_m['name'])
+                glb_stripped = _strip_variants(glb_norm)
+                if glb_norm in gr2_norm_names or glb_stripped in {_strip_variants(n) for n in gr2_norm_names}:
+                    entry_glb.append(glb_m)
+                else:
+                    still_remaining.append(glb_m)
+        remaining_glb = still_remaining
+
+        if not entry_glb:
+            print(f"  No matching GLB meshes for this entry, skipping")
+            dll.GrannyFreeFile(gr2_file)
+            dll.GrannyFreeFile(sdb_file)
+            continue
+
+        print(f"[5/6] Patching vertex data ({len(entry_glb)} GLB meshes)")
+        n_patched = patch_vertex_data(
+            dll, fi, entry_glb, strict=strict, positional=positional,
+            allow_topology_change=allow_topology_change,
+        )
+        total_patched += n_patched
+
+        if n_patched > 0:
+            print(f"[6/6] Serializing modified GR2")
+            new_gr2_bytes = build_gr2_bytes(dll, fi, gr2_bytes, sdb_dict, sdb_crc)
+            gpk_entries[me_name] = new_gr2_bytes
+
+            if output_gr2 and len(mesh_entry_names) == 1:
+                with open(output_gr2, 'wb') as f:
+                    f.write(new_gr2_bytes)
+                print(f"  GR2 written: {output_gr2!r} ({len(new_gr2_bytes):,} bytes)")
+
+        _keepalive.clear()
+        dll.GrannyFreeFile(gr2_file)
+        dll.GrannyFreeFile(sdb_file)
+
+    if total_patched == 0:
         raise RuntimeError("No meshes were patched — nothing to write")
 
-    print(f"[6/6] Serializing modified GR2")
-    new_gr2_bytes = build_gr2_bytes(dll, fi, gr2_bytes, sdb_dict, sdb_crc)
-
-    # Free Python-allocated buffers now that serialization is complete
-    _keepalive.clear()
-
-    dll.GrannyFreeFile(gr2_file)
-    dll.GrannyFreeFile(sdb_file)
-
-    if output_gr2:
-        with open(output_gr2, 'wb') as f:
-            f.write(new_gr2_bytes)
-        print(f"  GR2 written: {output_gr2!r} ({len(new_gr2_bytes):,} bytes)")
-
-    # Replace the mesh entry in the GPK, keep all other entries unchanged
-    gpk_entries[entry_name] = new_gr2_bytes
+    # Warn about unmatched GLB meshes
+    if remaining_glb:
+        print(f"\n  WARNING: {len(remaining_glb)} GLB mesh(es) did not match any entry:")
+        for m in remaining_glb[:5]:
+            print(f"    {m['name']}")
 
     # Patch animation entries if requested
     n_anim_patched = 0
@@ -1637,7 +1693,7 @@ def convert(
 
     pack_gpk(gpk_entries, output_gpk)
     anim_msg = f", {n_anim_patched} animation(s)" if n_anim_patched else ""
-    print(f"\nDone!  {n_patched} mesh(es){anim_msg} patched -> {output_gpk!r}")
+    print(f"\nDone!  {total_patched} mesh(es){anim_msg} patched -> {output_gpk!r}")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -1656,6 +1712,8 @@ def main():
                         help='Output .gpk path (default: <original>_mod.gpk)')
     parser.add_argument('--output-gr2', default=None,
                         help='Also write raw .gr2 bytes to this path')
+    parser.add_argument('--manifest', default=None,
+                        help='manifest.json from exporter (routes meshes to correct entries)')
     parser.add_argument('--strict', action='store_true',
                         help='Abort on vertex-count mismatch instead of skipping')
     parser.add_argument('--positional', action='store_true',
@@ -1687,6 +1745,7 @@ def main():
         output_gpk=out_gpk,
         output_gr2=args.output_gr2,
         entry_name=args.entry_name,
+        manifest_path=args.manifest,
         strict=args.strict,
         positional=args.positional,
         allow_topology_change=args.allow_topology_change,
