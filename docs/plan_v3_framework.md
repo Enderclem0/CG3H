@@ -237,6 +237,7 @@ plugins_data/
 | 3.0-beta | Thunderstore ZIP packager | Low | Builder |
 | 3.0-rc | Outfit switcher Lua plugin | Medium | Merger |
 | 3.0-rc | CG3H Framework Lua API | Medium | Plugin |
+| 3.1 | **Mesh diff format** — CC-free distribution for mesh_replace/patch mods | High | mod.json |
 | 3.1 | In-game ImGui mod manager | High | Framework |
 | 3.1 | Runtime MeshBindings switching | High | Framework |
 

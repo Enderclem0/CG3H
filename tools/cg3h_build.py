@@ -19,6 +19,61 @@ if _tools_dir not in sys.path:
     sys.path.insert(0, _tools_dir)
 
 
+def _strip_original_meshes(glb_path, mod_dir):
+    """
+    Strip original character meshes from a GLB, keeping only new/added meshes.
+    Uses the export manifest to identify which meshes are original.
+    Returns the stripped GLB bytes, or None if stripping failed.
+    """
+    try:
+        import pygltflib
+        manifest_path = os.path.join(mod_dir, 'manifest.json')
+        if not os.path.isfile(manifest_path):
+            return None
+
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+
+        # Original mesh names from the export manifest
+        original_names = {m['name'] for m in manifest.get('meshes', [])}
+
+        gltf = pygltflib.GLTF2().load(glb_path)
+
+        # Find meshes to keep (not in original manifest)
+        keep_indices = []
+        for i, mesh in enumerate(gltf.meshes):
+            if mesh.name not in original_names:
+                keep_indices.append(i)
+
+        if not keep_indices:
+            return None  # nothing new to keep
+
+        # Remove original meshes and their nodes
+        # Build new mesh list and remap node references
+        new_meshes = [gltf.meshes[i] for i in keep_indices]
+        old_to_new = {old: new for new, old in enumerate(keep_indices)}
+
+        # Update nodes that reference meshes
+        for node in gltf.nodes:
+            if node.mesh is not None:
+                if node.mesh in old_to_new:
+                    node.mesh = old_to_new[node.mesh]
+                else:
+                    node.mesh = None  # original mesh, remove reference
+
+        gltf.meshes = new_meshes
+
+        # Save to bytes
+        import io
+        buf = io.BytesIO()
+        gltf.save(buf)
+        return buf.getvalue()
+
+    except Exception as e:
+        print(f"  Strip failed: {e}")
+        return None
+
+
 def build_mod(mod_dir, game_dir=None):
     """Build an H2M-compatible mod package from a mod.json directory."""
     mod_json_path = os.path.join(mod_dir, 'mod.json')
@@ -245,17 +300,35 @@ def package_thunderstore(mod_dir):
 
         # Include source assets for user-side GPK build
         zf.writestr('mod.json', json.dumps(mod, indent=2))
+
+        # Include GLB — but ONLY new meshes (strip original character geometry)
+        # For mesh_add: the GLB should only contain the added meshes
+        # For mesh_replace/mesh_patch: needs diff format (v3.1 milestone)
         assets_cfg = mod.get('assets', {})
         glb = assets_cfg.get('glb', '')
-        if glb:
+        if glb and mod.get('type') == 'mesh_add':
+            glb_full = os.path.join(mod_dir, glb)
+            if os.path.isfile(glb_full):
+                # Extract only non-original meshes from the GLB
+                stripped = _strip_original_meshes(glb_full, mod_dir)
+                if stripped:
+                    zf.writestr(glb, stripped)
+                    print(f"  Packaged GLB: only new meshes (original geometry stripped)")
+                else:
+                    # Fallback: include full GLB if stripping failed
+                    zf.write(glb_full, glb)
+                    print(f"  WARNING: Could not strip original meshes from GLB")
+        elif glb and mod.get('type') in ('mesh_replace', 'mesh_patch'):
+            print(f"  WARNING: {mod['type']} mods include edited character geometry.")
+            print(f"  A diff format is needed for CC-free distribution (v3.1 milestone).")
             glb_full = os.path.join(mod_dir, glb)
             if os.path.isfile(glb_full):
                 zf.write(glb_full, glb)
 
         # Include export manifest if present (for mesh routing)
-        manifest = os.path.join(mod_dir, 'manifest.json')
-        if os.path.isfile(manifest):
-            zf.write(manifest, 'manifest.json')
+        manifest_file = os.path.join(mod_dir, 'manifest.json')
+        if os.path.isfile(manifest_file):
+            zf.write(manifest_file, 'manifest.json')
 
     print(f"\n  Thunderstore package: {zip_path}.zip")
     return True
