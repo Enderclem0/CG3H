@@ -709,6 +709,134 @@ def add_texture_entry(pkg_path, entry_name, dds_path, output_path=None):
     return True
 
 
+def build_standalone_pkg(textures, output_path, output_manifest_path=None):
+    """
+    Build a standalone .pkg file from scratch containing only the given textures.
+    textures: list of dicts with {name, dds_path} or {name, png_path, width, height, fmt, mip_count}
+    output_path: path for the .pkg file
+    output_manifest_path: path for the .pkg_manifest (optional, auto-derived if None)
+    Returns True on success.
+    """
+    import tempfile
+
+    # Build the chunk data: sequence of 0xAD entries + 0xFF terminator
+    chunk = bytearray()
+
+    for tex in textures:
+        entry_name = tex['name']
+        dds_path = tex.get('dds_path')
+
+        # Compress PNG to DDS if no DDS provided
+        if not dds_path or not os.path.isfile(dds_path):
+            png_path = tex.get('png_path', '')
+            if not png_path or not os.path.isfile(png_path):
+                print(f"  WARNING: No DDS or PNG for '{entry_name}', skipping")
+                continue
+            fmt = tex.get('fmt', 0x1C)
+            w = tex.get('width', 512)
+            h = tex.get('height', 512)
+            mips = tex.get('mip_count', 6)
+            dds_bytes = png_to_dds(png_path, fmt, w, h, mips)
+            tmp = tempfile.NamedTemporaryFile(suffix='.dds', delete=False)
+            tmp.write(dds_bytes)
+            tmp.close()
+            dds_path = tmp.name
+
+        # Read DDS
+        with open(dds_path, 'rb') as f:
+            dds_raw = f.read()
+        if dds_raw[:4] != b'DDS ':
+            print(f"  WARNING: '{dds_path}' is not a valid DDS, skipping")
+            continue
+
+        dds_header_size = 128
+        if dds_raw[84:88] == b'DX10':
+            dds_header_size += 20
+        pixel_data = dds_raw[dds_header_size:]
+        dds_w = struct.unpack_from('<I', dds_raw, 16)[0]
+        dds_h = struct.unpack_from('<I', dds_raw, 12)[0]
+
+        # Detect format
+        fourcc = dds_raw[84:88]
+        if fourcc == b'DX10':
+            dxgi = struct.unpack_from('<I', dds_raw, 128)[0]
+            fmt = 0x1C if dxgi == 98 else dxgi
+        elif fourcc == b'DXT5':
+            fmt = 0x06
+        elif fourcc == b'DXT1':
+            fmt = 0x04
+        else:
+            fmt = 0x1C
+
+        # CSString: 7-bit length + raw bytes
+        name_bytes = entry_name.encode('utf-8')
+        if len(name_bytes) < 128:
+            cs_string = bytes([len(name_bytes)]) + name_bytes
+        else:
+            n = len(name_bytes)
+            cs = bytearray()
+            while n >= 128:
+                cs.append((n & 0x7F) | 0x80)
+                n >>= 7
+            cs.append(n)
+            cs_string = bytes(cs) + name_bytes
+
+        # XNB header
+        xnb_content_size = 20 + len(pixel_data)
+        xnb_total = 10 + xnb_content_size
+        xnb_header = b'XNBw\x06\x00' + struct.pack('<I', xnb_total)
+
+        # Texture header
+        tex_header = struct.pack('<IIIII', fmt, dds_w, dds_h, 1, len(pixel_data))
+
+        # Total data size (big-endian)
+        total_data = len(xnb_header) + len(tex_header) + len(pixel_data)
+
+        # Write entry
+        chunk.append(0xAD)
+        chunk.extend(cs_string)
+        chunk.extend(struct.pack('<I', _swap32(total_data)))
+        chunk.extend(xnb_header)
+        chunk.extend(tex_header)
+        chunk.extend(pixel_data)
+
+        print(f"  Added: {entry_name} ({dds_w}x{dds_h} fmt=0x{fmt:X} "
+              f"{len(pixel_data):,} bytes)")
+
+    # Terminator
+    chunk.append(0xFF)
+
+    # Compress chunk
+    comp = lz4.block.compress(bytes(chunk), store_size=False)
+
+    # Build .pkg: header + one compressed chunk
+    # Header: version 7 + compressed flag = 0x20000007
+    pkg = bytearray()
+    pkg.extend(struct.pack('<I', _swap32(0x20000007)))
+    pkg.append(0x01)  # flag: compressed
+    pkg.extend(struct.pack('<I', _swap32(len(comp))))
+    pkg.extend(comp)
+
+    with open(output_path, 'wb') as f:
+        f.write(pkg)
+    print(f"  Built: {output_path} ({len(pkg):,} bytes, {len(textures)} texture(s))")
+
+    # Build .pkg_manifest (minimal — just needs to exist for H2M)
+    if output_manifest_path is None:
+        output_manifest_path = output_path + '_manifest'
+
+    # Minimal manifest: header + empty
+    # The game's manifest format is complex, but H2M just checks file existence
+    # Write a minimal valid manifest
+    manifest = bytearray()
+    manifest.extend(struct.pack('<I', _swap32(0x20000007)))  # same header
+    with open(output_manifest_path, 'wb') as f:
+        f.write(manifest)
+    print(f"  Manifest: {output_manifest_path}")
+
+    return True
+
+
 def replace_texture(pkg_path, texture_name, new_dds_path, output_path):
     """
     Replace a texture in a .pkg file with data from a DDS file.
