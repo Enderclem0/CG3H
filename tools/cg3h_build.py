@@ -445,28 +445,14 @@ def package_thunderstore(mod_dir):
         elif glb and mod.get('type') in ('mesh_replace', 'mesh_patch'):
             glb_full = os.path.join(mod_dir, glb)
             if os.path.isfile(glb_full):
-                # Generate diff instead of shipping full GLB (CC-free)
-                # Need the original export GLB to diff against
-                orig_glb = os.path.join(mod_dir, 'original_export.glb')
-                if not os.path.isfile(orig_glb):
-                    # Try manifest for original export path
-                    manifest_file = os.path.join(mod_dir, 'manifest.json')
-                    if os.path.isfile(manifest_file):
-                        with open(manifest_file) as mf:
-                            mdata = json.load(mf)
-                        orig_glb = os.path.join(mod_dir, mdata.get('glb', ''))
-
-                if os.path.isfile(orig_glb) and orig_glb != glb_full:
-                    from mesh_diff import create_diff
-                    diff_path = glb_full.replace('.glb', '.cg3h_diff')
-                    print(f"  Creating mesh diff (CC-free)...")
-                    create_diff(orig_glb, glb_full, diff_path)
-                    zf.write(diff_path, os.path.basename(diff_path))
-                    print(f"  Packaged diff instead of full GLB (CC-free)")
+                # Strip original meshes — keep only modified/new ones
+                stripped = _strip_original_meshes(glb_full, mod_dir)
+                if stripped:
+                    zf.writestr(glb, stripped)
+                    print(f"  Packaged GLB: original meshes stripped")
                 else:
-                    print(f"  WARNING: No original GLB for diff — shipping full GLB.")
-                    print(f"  Place the original export as 'original_export.glb' in the mod dir.")
                     zf.write(glb_full, glb)
+                    print(f"  WARNING: Could not strip — full GLB included")
 
         # Include conflicts.json (describes what this mod touches)
         conflicts = _build_conflicts_json(mod)
