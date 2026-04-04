@@ -4,6 +4,8 @@ CG3H Build — Produces Hell2Modding-compatible mod packages.
 Usage:
     python cg3h_build.py <mod_dir>
     python cg3h_build.py <mod_dir> --package  (also creates Thunderstore ZIP)
+    python cg3h_build.py <mod_dir> --check-conflicts --r2-plugins-dir <path>
+    python cg3h_build.py <mod_dir> --r2-plugins-dir <path>  (build with conflict check)
 
 Reads mod.json from the mod directory, builds GPK + standalone PKG,
 and outputs to build/ in H2M folder structure.
@@ -74,7 +76,110 @@ def _strip_original_meshes(glb_path, mod_dir):
         return None
 
 
-def build_mod(mod_dir, game_dir=None):
+def detect_conflicts(mod_dir, r2_plugins_dir):
+    """Scan r2modman plugins directory for conflicts with the current mod.
+
+    Returns True if safe to install, False if a hard conflict was found.
+    Always prints warnings/errors it discovers.
+    """
+    mod_json_path = os.path.join(mod_dir, 'mod.json')
+    if not os.path.isfile(mod_json_path):
+        print("CONFLICT CHECK: No mod.json found, skipping.")
+        return True
+
+    with open(mod_json_path) as f:
+        mod = json.load(f)
+
+    my_type = mod.get('type', '')
+    my_character = mod.get('target', {}).get('character', '')
+    my_name = mod.get('metadata', {}).get('name', 'UnnamedMod')
+    my_textures = {t.get('name') for t in mod.get('assets', {}).get('textures', [])
+                   if t.get('name')}
+
+    if not r2_plugins_dir or not os.path.isdir(r2_plugins_dir):
+        print("CONFLICT CHECK: Plugins directory not found, skipping.")
+        return True
+
+    # Scan all installed CG3H mods (any directory containing mod.json)
+    other_mods = []
+    for entry in os.listdir(r2_plugins_dir):
+        entry_path = os.path.join(r2_plugins_dir, entry)
+        if not os.path.isdir(entry_path):
+            continue
+        # Check plugins_data sub-dirs and the entry itself
+        for search_dir in [entry_path]:
+            candidate = os.path.join(search_dir, 'mod.json')
+            if os.path.isfile(candidate) and os.path.abspath(candidate) != os.path.abspath(mod_json_path):
+                try:
+                    with open(candidate) as f:
+                        other_mods.append(json.load(f))
+                except (json.JSONDecodeError, OSError):
+                    pass
+
+    if not other_mods:
+        print(f"CONFLICT CHECK: No other CG3H mods found in {r2_plugins_dir}")
+        return True
+
+    safe = True
+    for other in other_mods:
+        o_name = other.get('metadata', {}).get('name', '?')
+        o_type = other.get('type', '')
+        o_char = other.get('target', {}).get('character', '')
+        o_textures = {t.get('name') for t in other.get('assets', {}).get('textures', [])
+                      if t.get('name')}
+
+        # Check texture conflicts: two mods replacing the same texture name
+        if my_type == 'texture_replace' and o_type == 'texture_replace':
+            overlap = my_textures & o_textures
+            if overlap:
+                print(f"CONFLICT: '{my_name}' and '{o_name}' both replace "
+                      f"texture(s): {', '.join(sorted(overlap))}")
+                safe = False
+
+        # Check mesh conflicts: two mesh_replace on same character
+        if (my_type == 'mesh_replace' and o_type == 'mesh_replace'
+                and my_character and my_character == o_char):
+            print(f"CONFLICT: '{my_name}' and '{o_name}' both mesh_replace "
+                  f"character '{my_character}'")
+            safe = False
+
+        # mesh_add + mesh_replace on same character = warning (not hard conflict)
+        if my_character and my_character == o_char:
+            combo = {my_type, o_type}
+            if combo == {'mesh_add', 'mesh_replace'}:
+                print(f"WARNING: '{my_name}' ({my_type}) and '{o_name}' ({o_type}) "
+                      f"both target '{my_character}' -- results may be unpredictable")
+
+        # mesh_add + mesh_add = OK, texture_replace + mesh_add = OK (no message)
+
+    if safe:
+        print(f"CONFLICT CHECK: No conflicts detected for '{my_name}'")
+    return safe
+
+
+def _build_conflicts_json(mod):
+    """Build a conflicts.json describing what this mod touches."""
+    touches = {}
+    mod_type = mod.get('type', '')
+    character = mod.get('target', {}).get('character', '')
+
+    if character:
+        touches['character'] = character
+    touches['type'] = mod_type
+
+    tex_names = [t.get('name') for t in mod.get('assets', {}).get('textures', [])
+                 if t.get('name')]
+    if tex_names:
+        touches['textures'] = sorted(tex_names)
+
+    mesh_entries = mod.get('target', {}).get('mesh_entries', [])
+    if mesh_entries:
+        touches['mesh_entries'] = mesh_entries
+
+    return touches
+
+
+def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
     """Build an H2M-compatible mod package from a mod.json directory."""
     mod_json_path = os.path.join(mod_dir, 'mod.json')
     if not os.path.isfile(mod_json_path):
@@ -92,6 +197,10 @@ def build_mod(mod_dir, game_dir=None):
     author = meta.get('author', 'Unknown')
     name = meta.get('name', 'UnnamedMod')
     mod_id = f"{author}-{name}".replace(' ', '')
+
+    # Run conflict detection if plugins dir provided
+    if r2_plugins_dir:
+        detect_conflicts(mod_dir, r2_plugins_dir)
 
     print(f"Building: {meta.get('name', '?')} by {author}")
     print(f"  Type: {mod_type}")
@@ -340,6 +449,10 @@ def package_thunderstore(mod_dir):
             if os.path.isfile(glb_full):
                 zf.write(glb_full, glb)
 
+        # Include conflicts.json (describes what this mod touches)
+        conflicts = _build_conflicts_json(mod)
+        zf.writestr('conflicts.json', json.dumps(conflicts, indent=2))
+
         # Include export manifest if present (for mesh routing)
         manifest_file = os.path.join(mod_dir, 'manifest.json')
         if os.path.isfile(manifest_file):
@@ -368,9 +481,22 @@ def main():
                         help='Hades II game directory (auto-detected from Steam)')
     parser.add_argument('--package', action='store_true',
                         help='Also create Thunderstore ZIP')
+    parser.add_argument('--r2-plugins-dir', default=None,
+                        help='r2modman plugins directory for conflict detection')
+    parser.add_argument('--check-conflicts', action='store_true',
+                        help='Only check for conflicts, do not build')
     args = parser.parse_args()
 
-    ok = build_mod(args.mod_dir, game_dir=args.game_dir)
+    if args.check_conflicts:
+        r2_dir = args.r2_plugins_dir
+        if not r2_dir:
+            print("ERROR: --r2-plugins-dir is required with --check-conflicts")
+            sys.exit(1)
+        safe = detect_conflicts(args.mod_dir, r2_dir)
+        sys.exit(0 if safe else 1)
+
+    ok = build_mod(args.mod_dir, game_dir=args.game_dir,
+                   r2_plugins_dir=args.r2_plugins_dir)
     if ok and args.package:
         package_thunderstore(args.mod_dir)
 

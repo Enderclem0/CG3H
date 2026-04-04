@@ -19,6 +19,11 @@ import tkinter as tk
 from datetime import datetime
 from tkinter import filedialog, messagebox, ttk
 
+try:
+    import cg3h_build
+except ImportError:
+    cg3h_build = None
+
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -57,6 +62,7 @@ class App:
 
         self._exp_running = False
         self._imp_running = False
+        self._build_running = False
 
         self._build_ui()
         self.game_path.trace_add("write", lambda *_: self._scan())
@@ -91,6 +97,7 @@ class App:
         self._build_export_tab()
         self._build_import_tab()
         self._build_install_tab()
+        self._build_h2m_tab()
 
         ttk.Label(
             self.root, textvariable=self._status,
@@ -366,6 +373,217 @@ class App:
 
         # Auto-refresh when tab is shown
         self._nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+
+    # ── Build for H2M tab ────────────────────────────────────────────────────
+
+    def _build_h2m_tab(self):
+        tab = ttk.Frame(self._nb, padding=8)
+        self._nb.add(tab, text="  Build for H2M  ")
+
+        top = ttk.LabelFrame(tab, text="Build mod package", padding=12)
+        top.pack(fill=tk.X)
+
+        ttk.Label(top, text=(
+            "Point to a mod directory containing mod.json.\n"
+            "The tool will build a distributable H2M mod package."
+        ), foreground="#555").pack(anchor=tk.W, pady=(0, 8))
+
+        # Mod directory picker
+        row = ttk.Frame(top)
+        row.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(row, text="Mod directory:", width=14, anchor=tk.W).pack(side=tk.LEFT)
+        self._h2m_mod_dir = tk.StringVar()
+        ttk.Entry(row, textvariable=self._h2m_mod_dir, width=42).pack(
+            side=tk.LEFT, padx=6, fill=tk.X, expand=True)
+        ttk.Button(row, text="Browse\u2026",
+                   command=self._browse_h2m_mod_dir).pack(side=tk.LEFT)
+
+        # Mod info display
+        self._h2m_info = ttk.Label(top, text="", foreground="#555")
+        self._h2m_info.pack(anchor=tk.W, pady=(2, 6))
+
+        # Options
+        self._h2m_thunderstore = tk.BooleanVar(value=False)
+        ttk.Checkbutton(top, text="Also create Thunderstore ZIP",
+                        variable=self._h2m_thunderstore).pack(anchor=tk.W, pady=(0, 6))
+
+        # Build button + status
+        btn_row = ttk.Frame(top)
+        btn_row.pack(fill=tk.X, pady=(4, 0))
+        self._h2m_btn = ttk.Button(btn_row, text="Build for H2M",
+                                   command=self._h2m_build, state=tk.DISABLED)
+        self._h2m_btn.pack(side=tk.LEFT)
+        self._h2m_status = ttk.Label(btn_row, text="", foreground="#555")
+        self._h2m_status.pack(side=tk.LEFT, padx=12)
+
+        self._h2m_progress = ttk.Progressbar(top, mode="indeterminate")
+        self._h2m_progress.pack(fill=tk.X, pady=(6, 0))
+
+        # Output path display
+        self._h2m_output_label = ttk.Label(top, text="", foreground="#070",
+                                           font=("Consolas", 9))
+        self._h2m_output_label.pack(anchor=tk.W, pady=(6, 0))
+
+        # Build log
+        self._h2m_log = self._make_log(tab)
+
+    def _browse_h2m_mod_dir(self):
+        p = filedialog.askdirectory(title="Select mod directory (containing mod.json)")
+        if p:
+            self._h2m_mod_dir.set(p)
+            self._scan_h2m_mod_dir(p)
+
+    def _scan_h2m_mod_dir(self, p):
+        """Read mod.json and show summary."""
+        mod_json_path = os.path.join(p, "mod.json")
+        if not os.path.isfile(mod_json_path):
+            self._h2m_info.config(text="No mod.json found in this directory",
+                                  foreground="#a00")
+            self._h2m_btn.config(state=tk.DISABLED)
+            return
+        import json
+        try:
+            with open(mod_json_path) as f:
+                m = json.load(f)
+        except Exception as e:
+            self._h2m_info.config(text=f"Error reading mod.json: {e}",
+                                  foreground="#a00")
+            self._h2m_btn.config(state=tk.DISABLED)
+            return
+
+        name = m.get("name", "?")
+        mod_type = m.get("type", "?")
+        character = m.get("character", "?")
+        version = m.get("version", "?")
+        self._h2m_info.config(
+            text=f"{name}  |  type: {mod_type}  |  character: {character}  |  v{version}",
+            foreground="#555",
+        )
+        if not self._build_running:
+            self._h2m_btn.config(state=tk.NORMAL)
+        self._h2m_output_label.config(text="")
+
+    def _h2m_build(self):
+        if cg3h_build is None:
+            messagebox.showerror(
+                "Module not found",
+                "cg3h_build module could not be imported.\n"
+                "Ensure cg3h_build.py is available on the Python path.",
+            )
+            return
+
+        mod_dir = self._h2m_mod_dir.get().strip()
+        if not mod_dir or not os.path.isdir(mod_dir):
+            messagebox.showwarning("No mod directory",
+                                   "Browse to a mod directory first.")
+            return
+        if not os.path.isfile(os.path.join(mod_dir, "mod.json")):
+            messagebox.showerror("No mod.json",
+                                 f"mod.json not found in:\n{mod_dir}")
+            return
+
+        self._log_clear(self._h2m_log)
+        self._build_running = True
+        self._h2m_btn.config(state=tk.DISABLED)
+        self._h2m_status.config(text="Building...", foreground="#555")
+        self._h2m_output_label.config(text="")
+        self._h2m_progress.start(12)
+
+        threading.Thread(
+            target=self._h2m_build_worker,
+            args=(mod_dir,),
+            daemon=True,
+        ).start()
+
+    def _h2m_build_worker(self, mod_dir):
+        import io
+        import contextlib
+
+        ship_dir = os.path.join(self.game_path.get(), "Ship")
+        orig_cwd = os.getcwd()
+        output_path = None
+        ts_path = None
+
+        try:
+            # Run build from Ship/ directory (same as the DLL)
+            if os.path.isdir(ship_dir):
+                os.chdir(ship_dir)
+
+            self._log_write_ui(self._h2m_log,
+                               f"Building mod from: {mod_dir}\n")
+            self._log_write_ui(self._h2m_log,
+                               f"Working directory: {os.getcwd()}\n\n")
+
+            # Capture stdout/stderr from build_mod
+            buf = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(buf), \
+                     contextlib.redirect_stderr(buf):
+                    output_path = cg3h_build.build_mod(mod_dir)
+            except Exception:
+                pass
+            finally:
+                captured = buf.getvalue()
+                if captured:
+                    self._log_write_ui(self._h2m_log, captured)
+
+            if output_path is None:
+                # build_mod may have raised — re-run without capture to get the error
+                try:
+                    output_path = cg3h_build.build_mod(mod_dir)
+                except Exception as e:
+                    self._log_write_ui(self._h2m_log,
+                                       f"\nBuild failed: {e}\n")
+                    self._ui(lambda: self._h2m_finish(False, None, None))
+                    return
+
+            self._log_write_ui(self._h2m_log,
+                               f"\nBuild output: {output_path}\n")
+
+            # Thunderstore packaging
+            if self._h2m_thunderstore.get():
+                self._log_write_ui(self._h2m_log,
+                                   "\nCreating Thunderstore ZIP...\n")
+                try:
+                    buf2 = io.StringIO()
+                    with contextlib.redirect_stdout(buf2), \
+                         contextlib.redirect_stderr(buf2):
+                        ts_path = cg3h_build.package_thunderstore(mod_dir)
+                    captured2 = buf2.getvalue()
+                    if captured2:
+                        self._log_write_ui(self._h2m_log, captured2)
+                    if ts_path:
+                        self._log_write_ui(self._h2m_log,
+                                           f"Thunderstore ZIP: {ts_path}\n")
+                except Exception as e:
+                    self._log_write_ui(self._h2m_log,
+                                       f"Thunderstore packaging failed: {e}\n")
+
+        finally:
+            os.chdir(orig_cwd)
+
+        self._ui(lambda: self._h2m_finish(True, output_path, ts_path))
+
+    def _h2m_finish(self, success, output_path, ts_path):
+        self._build_running = False
+        self._h2m_progress.stop()
+
+        # Re-enable button if a valid mod dir is still set
+        mod_dir = self._h2m_mod_dir.get().strip()
+        if mod_dir and os.path.isfile(os.path.join(mod_dir, "mod.json")):
+            self._h2m_btn.config(state=tk.NORMAL)
+
+        if success and output_path:
+            self._h2m_status.config(text="Build complete!", foreground="#070")
+            parts = [str(output_path)]
+            if ts_path:
+                parts.append(f"Thunderstore: {ts_path}")
+            self._h2m_output_label.config(text="\n".join(parts))
+            self._status.set(f"Build done -- {output_path}")
+        else:
+            self._h2m_status.config(text="Build failed", foreground="#a00")
+            self._h2m_output_label.config(text="")
+            self._status.set("Build failed -- check the log for details")
 
     # ── Shared widget factories ───────────────────────────────────────────────
 
@@ -911,7 +1129,8 @@ class App:
     # ── Install logic ─────────────────────────────────────────────────────────
 
     def _on_tab_changed(self, event):
-        if self._nb.index("current") == 2:
+        idx = self._nb.index("current")
+        if idx == 2:
             self._refresh_backups()
 
     def _install_from_folder(self):

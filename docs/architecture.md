@@ -15,8 +15,12 @@ symbols (`GrannyFileInfoType`, `GrannyMeshType`, etc.). No hardcoded offsets exc
 | `gr2_to_gltf.py` — exporter (skinned + rigid + textures + animations) | Done |
 | `gltf_to_gr2.py` — importer (golden path, multi-entry GPK) | Done |
 | `gpk_pack.py` — GPK pack/unpack | Done |
-| `pkg_texture.py` — PKG texture extractor/replacer/compressor + index builder | Done |
+| `pkg_texture.py` — PKG texture extractor/replacer/compressor + standalone .pkg builder | Done |
 | `converter_gui.py` — GUI with Export/Install + parallel batch + mod registry | Done |
+| `cg3h_build.py` — H2M mod builder (mod.json -> Thunderstore ZIP) | Done |
+| Standalone .pkg builder (custom textures from scratch) | Done |
+| H2M Lua companion generation | Done |
+| PyInstaller exe (`cg3h_builder.exe`, 29MB standalone) | Done |
 | Texture import pipeline (PNG/DDS -> BC7 DDS -> PKG replacement) | Done |
 | Multi-PKG replacement + XXH64 checksum validation | Done |
 | Export manifest (`manifest.json`) with per-mesh entry mapping | Done |
@@ -151,9 +155,108 @@ The installer can extract edited textures from a GLB file by comparing the
 embedded PNG hash against the manifest's original hash. This enables the
 Blender editing path without requiring manual PNG export.
 
+## Hell2Modding (H2M) Integration (v3.0)
+
+### Design Philosophy
+
+v3.0 shifts CG3H from a "modify game files" tool to a "build mod packages" tool.
+H2M provides the runtime layer: it loads standalone `.pkg` files and runs Lua
+companions without touching the game's original assets. This eliminates DLL
+injection, checksum management, backup/restore, and direct file modification.
+
+### `cg3h build` Pipeline
+
+The `cg3h_build.py` script reads a `mod.json` descriptor and produces an
+H2M-compatible folder structure (optionally packaged as a Thunderstore ZIP):
+
+1. Parse `mod.json` — validate type, character, asset references
+2. Auto-detect game directory from Steam library paths
+3. **texture_replace**: compress PNG to BC7/BC3 DDS, build standalone `.pkg`
+   from scratch (not a modified game package)
+4. **mesh_add**: bundle GLB containing only new geometry (no copyrighted meshes),
+   include `cg3h_builder.exe` for on-device GPK building
+5. Generate `main.lua` (H2M Lua companion)
+6. Generate Thunderstore `manifest.json`
+7. `--package` flag: ZIP everything for upload
+
+### Standalone .pkg Builder
+
+Creates `.pkg` files from scratch rather than patching game packages:
+
+- Each custom texture is compressed to BC7/BC3/BC1 DDS with full mipchain
+- Wrapped in 0xAD (Texture2D) chunks with correct XNB headers
+- Written as a new `.pkg` with proper chunk table and offsets
+- H2M's `rom.game.LoadPackages` loads the standalone `.pkg` at runtime
+- Game resolves textures by name (same `FromFileName` hash lookup)
+
+This means texture mods never touch any game file. The standalone `.pkg` is
+side-loaded by H2M and the game's texture resolver picks it up transparently.
+
+### H2M Lua Companion
+
+Auto-generated `main.lua` that CG3H includes in every mod package:
+
+```lua
+-- Load standalone texture package
+rom.game.LoadPackages({"path/to/custom.pkg"})
+
+-- For mesh mods: auto-build GPK on first launch
+rom.on_import.post(function()
+    if not file_exists("path/to/Character_mod.gpk") then
+        os.execute("cg3h_builder.exe")
+    end
+end)
+```
+
+- `rom.game.LoadPackages` — H2M API for loading additional `.pkg` files
+- `rom.on_import.post` — deferred hook, runs after game import phase
+- `cg3h_builder.exe` — PyInstaller-bundled builder (29MB), runs the
+  `gltf_to_gr2.py` pipeline without requiring Python on the end user's machine
+
+### mod.json Specification
+
+Four mod types, each with different distribution and copyright properties:
+
+| Type | What it does | Assets distributed | CC-free |
+|---|---|---|---|
+| `texture_replace` | Custom PNG -> standalone .pkg | PNG textures only | Yes |
+| `mesh_add` | Append new meshes to character | GLB with new geometry only | Yes |
+| `mesh_replace` | Swap character meshes | GLB with replacement geometry | Needs v3.1 diff |
+| `mesh_patch` | Edit vertices in-place | GLB with modified geometry | Needs v3.1 diff |
+
+`texture_replace` and `mesh_add` are fully CC-free: no copyrighted game content
+is included in the distribution. `mesh_replace` and `mesh_patch` currently require
+distributing modified versions of original meshes; a v3.1 diff format will allow
+distributing only the delta.
+
+### PyInstaller Standalone Builder
+
+`cg3h_builder.exe` is a PyInstaller-frozen version of the mesh build pipeline:
+
+- Bundles Python + numpy + pygltflib + lz4 + ctypes Granny DLL loader
+- 29MB single-file executable
+- Included in Thunderstore ZIP for mesh mods only (texture mods don't need it)
+- The Lua companion auto-runs it on first launch when the built GPK is missing
+- Uses the end user's local `granny2_x64.dll` (auto-detected from Steam path)
+
+### What's No Longer Needed
+
+The H2M integration removes several v2.x requirements:
+
+| v2.x Requirement | Why it's gone |
+|---|---|
+| DLL injection | H2M handles runtime asset loading natively |
+| `checksums.txt` patching | Standalone `.pkg` files bypass checksum validation |
+| `_backups/` directory | No game files are modified |
+| Mod registry (`_mods.json`) | H2M manages mod lifecycle; uninstall = remove mod folder |
+
+The v2.x legacy workflow (GUI Install tab, direct file modification) still works
+for users who prefer it, but is no longer the recommended path.
+
 ## Future Work
 
 | Feature | Approach |
 |---|---|
+| v3.1 diff format | Distribute mesh deltas instead of full geometry (CC-free mesh_replace/mesh_patch) |
 | Bone changes | Build new bone array + update every mesh's `BoneBindings` |
 | String-stripped output | Fix sec[3] descriptor patching (zeroing f0/f1 isn't sufficient) |

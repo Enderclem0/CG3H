@@ -5,6 +5,8 @@
 Extract, edit, and repack 3D models and textures for Hades II (Supergiant Games).
 Reshape characters, paint bone weights, add/remove geometry, replace textures, and install mods — all from Blender or the standalone GUI.
 
+**v3.0**: CG3H now integrates with [Hell2Modding (H2M)](https://github.com/SGG-Modding/Hell2Modding) for non-destructive mod distribution. Zero game files modified.
+
 ## What Works
 
 | Feature | Status |
@@ -23,13 +25,14 @@ Reshape characters, paint bone weights, add/remove geometry, replace textures, a
 | **Animation export** (`--animations`) | Working |
 | **Animation import** (`--patch-animations`) | Working |
 | **Add new meshes** (accessories, armor, custom geometry) | Working |
-| **Backup & restore** originals before installing | Working |
 | **Texture export** (per-mesh DDS + embedded PNG in GLB) | Working |
-| **Texture import** (PNG/DDS/Blender edits -> PKG replacement) | Working |
+| **Texture import** (PNG/DDS/Blender edits -> standalone .pkg) | Working |
 | **Multi-texture per character** (per-mesh material chain) | Working |
 | **Multi-entry GPK** (characters with multiple mesh entries) | Working |
 | **Parallel batch export** (N subprocesses, auto-scaled) | Working |
-| **Mod registry** (track, install, uninstall mods per character) | Working |
+| **H2M mod packages** (`cg3h build` -> Thunderstore ZIP) | Working |
+| **Standalone .pkg builder** (custom textures, no game files modified) | Working |
+| **PyInstaller exe** (cg3h_builder.exe, no Python needed) | Working |
 | Any character model (all 144 pairs in `_Optimized/`) | Working |
 
 ## What Doesn't Work (Yet)
@@ -37,6 +40,7 @@ Reshape characters, paint bone weights, add/remove geometry, replace textures, a
 | Feature | Why |
 |---|---|
 | **Adding/removing bones** | Skeleton is read-only from the original GR2 |
+| **mesh_replace / mesh_patch CC-free distribution** | Requires v3.1 diff format (planned) |
 
 ## Limits
 
@@ -47,15 +51,114 @@ Reshape characters, paint bone weights, add/remove geometry, replace textures, a
 
 ## Requirements
 
+For development / CLI usage:
+
 ```
 pip install numpy pygltflib lz4 Pillow etcpak xxhash
 ```
 
 The game's `granny2_x64.dll` is required (auto-detected from Steam path).
 
-## Quick Start
+For end users installing mods: **no Python needed** — mesh mods include `cg3h_builder.exe` (29MB standalone), and texture mods are pre-built `.pkg` files.
 
-### GUI (recommended)
+---
+
+## Quick Start — H2M Workflow (recommended)
+
+The H2M workflow is the primary way to build and distribute mods in v3.0. It produces Thunderstore-ready ZIP packages that install via Hell2Modding with zero game file modification.
+
+### Building a mod package
+
+1. Create a `mod.json` descriptor (see [mod.json specification](#modjson-specification) below)
+2. Place your assets alongside it (GLB for meshes, PNG for textures)
+3. Run the build command:
+
+```bash
+# Build H2M folder structure
+python tools/cg3h_build.py
+
+# Build + create Thunderstore-ready ZIP
+python tools/cg3h_build.py --package
+```
+
+The builder auto-detects the game directory from Steam paths.
+
+### What `cg3h build` produces
+
+For **texture_replace** mods:
+- Standalone `.pkg` file (built from scratch, not a modified game file)
+- H2M manifest + Lua companion
+- Ready for Thunderstore upload
+
+For **mesh_add** mods:
+- `.glb` with new meshes only (no copyrighted geometry)
+- `cg3h_builder.exe` (29MB standalone builder)
+- Lua companion that auto-builds the GPK on first launch
+- Standalone `.pkg` for any custom textures
+- Ready for Thunderstore upload
+
+### Thunderstore ZIP contents
+
+```
+MyMod/
+  mod.json                  Mod descriptor
+  manifest.json             Thunderstore manifest
+  main.lua                  H2M Lua companion (auto-generated)
+  *.glb                     New meshes (mesh_add only, CC-free)
+  *.png                     Custom textures
+  *.pkg                     Standalone texture package
+  cg3h_builder.exe          Standalone builder (mesh mods only)
+```
+
+### H2M Lua companion
+
+The auto-generated `main.lua` handles runtime loading:
+- Loads standalone `.pkg` via `rom.game.LoadPackages`
+- Auto-builds GPK on first launch if missing (runs `cg3h_builder.exe`)
+- Deferred loading via `rom.on_import.post`
+
+### mod.json specification
+
+```json
+{
+  "name": "MyMod",
+  "version": "1.0.0",
+  "author": "YourName",
+  "description": "Description of the mod",
+  "type": "texture_replace",
+  "character": "Melinoe",
+  "assets": {
+    "textures": ["custom_color.png"]
+  }
+}
+```
+
+Four mod types are supported:
+
+| Type | Description | CC-free | Status |
+|---|---|---|---|
+| `texture_replace` | Custom PNG -> standalone .pkg | Yes | Working |
+| `mesh_add` | Append new meshes (original geometry not distributed) | Yes | Working |
+| `mesh_replace` | Swap character meshes | Needs v3.1 diff format | Planned |
+| `mesh_patch` | Edit vertices in-place | Needs v3.1 diff format | Planned |
+
+### What's no longer needed (thanks to H2M)
+
+The v3.0 H2M workflow eliminates several pain points from v2.x:
+- No DLL injection
+- No checksum management
+- No backup/restore system
+- No game file modification
+
+H2M's `LoadPackages` API loads standalone `.pkg` files at runtime, and the Lua companion handles GPK building on the end user's machine.
+
+---
+
+## Advanced / Legacy Workflow (v2.x)
+
+The GUI and CLI tools from v2.x still work for direct game file modification. This workflow requires Python and modifies files in the game directory.
+
+### GUI
 
 ```bash
 python tools/converter_gui.py
@@ -97,6 +200,8 @@ python C:/path/to/tools/gltf_to_gr2.py Melinoe_sculpted.glb \
     --output-gpk ~/Documents/Hades2Mods/Melinoe_mod.gpk \
     --allow-topology-change
 ```
+
+---
 
 ## Blender Workflow
 
@@ -156,10 +261,11 @@ extra vertices. Turn normals off to keep the mesh clean.
 blender_addon/
   cg3h/__init__.py     Blender addon (File > Import/Export for .gpk)
 tools/
+  cg3h_build.py        H2M mod builder (mod.json -> Thunderstore ZIP)
   converter_gui.py     Standalone GUI (Export + Install tabs)
   gr2_to_gltf.py       CLI exporter: .gpk + .sdb -> .glb (with textures + animations)
   gltf_to_gr2.py       CLI importer: .glb + .gpk + .sdb -> .gpk
-  pkg_texture.py        PKG texture extractor/replacer + index builder + DDS compression
+  pkg_texture.py        PKG texture extractor/replacer + standalone .pkg builder
   gpk_pack.py           GPK archive pack/unpack (pure Python)
   granny_types.py       Dynamic Granny struct offset resolver
   Start_gui.bat         Windows launcher
@@ -170,7 +276,7 @@ tests/
 docs/
   file_formats.md       Binary format reference (GPK, SDB, GR2, PKG)
   texture_pipeline.md   Texture pipeline (material chains, PKG format, DDS export)
-  architecture.md       Implementation decisions and write API details
+  architecture.md       Implementation decisions, write API details, H2M integration
 ```
 
 ## Technical Details
@@ -203,7 +309,25 @@ docs/
 9. Serialize each entry back to `.gr2` via the Granny DLL write API
 10. LZ4-compress all entries into output `.gpk`
 
-### How Texture Install Works
+### How `cg3h build` Works
+
+1. Read `mod.json` descriptor (type, character, asset list)
+2. Auto-detect game directory from Steam paths
+3. For **texture_replace**: build standalone `.pkg` from scratch with custom PNG textures (BC7/BC3 compressed with mipmaps)
+4. For **mesh_add**: bundle GLB (new geometry only) + `cg3h_builder.exe` for on-device GPK building
+5. Generate H2M Lua companion (`main.lua`) with `rom.game.LoadPackages` calls and deferred GPK build logic
+6. Generate Thunderstore `manifest.json`
+7. If `--package`: create Thunderstore-ready ZIP with all artifacts
+
+### How Standalone .pkg Builder Works
+
+Creates `.pkg` files from scratch rather than modifying game packages:
+1. Compress custom PNG to BC7/BC3/BC1 DDS with mipmaps via `etcpak`
+2. Wrap each texture in a 0xAD (Texture2D) chunk with correct XNB headers
+3. Write `.pkg` file with proper chunk table and offsets
+4. H2M loads the standalone `.pkg` at runtime via `rom.game.LoadPackages`
+
+### How Texture Install Works (Legacy)
 
 1. Read `manifest.json` from the export folder
 2. Detect edited textures via `png_hash` comparison (GLB embedded textures) or file modification (standalone PNG/DDS)
@@ -230,5 +354,5 @@ docs/
 - [`docs/file_formats.md`](docs/file_formats.md) — GPK / SDB / GR2 / PKG binary layouts
 - [`docs/texture_pipeline.md`](docs/texture_pipeline.md) — Texture pipeline (material chains, PKG format, DDS export/import)
 - [`docs/rendering_pipeline.md`](docs/rendering_pipeline.md) — Engine pipeline (40-byte stride, index normalization)
-- [`docs/architecture.md`](docs/architecture.md) — Implementation decisions and write API details
+- [`docs/architecture.md`](docs/architecture.md) — Implementation decisions, write API details, H2M integration
 - [`CHANGELOG.md`](CHANGELOG.md) — Release history
