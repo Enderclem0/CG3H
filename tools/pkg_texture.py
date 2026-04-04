@@ -821,18 +821,10 @@ def build_standalone_pkg(textures, output_path, output_manifest_path=None):
         f.write(pkg)
     print(f"  Built: {output_path} ({len(pkg):,} bytes, {len(textures)} texture(s))")
 
-    # Build .pkg_manifest (minimal — just needs to exist for H2M)
-    if output_manifest_path is None:
-        output_manifest_path = output_path + '_manifest'
-
-    # Minimal manifest: header + empty
-    # The game's manifest format is complex, but H2M just checks file existence
-    # Write a minimal valid manifest
-    manifest = bytearray()
-    manifest.extend(struct.pack('<I', _swap32(0x20000007)))  # same header
-    with open(output_manifest_path, 'wb') as f:
-        f.write(manifest)
-    print(f"  Manifest: {output_manifest_path}")
+    # No .pkg_manifest needed for H2M standalone packages.
+    # The manifest is only used by the game's atlas system (2D sprites),
+    # not for 3D model textures. H2M validates the manifest content
+    # and requires mod GUID in asset paths — skip it entirely.
 
     return True
 
