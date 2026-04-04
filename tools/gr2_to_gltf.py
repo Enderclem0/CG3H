@@ -1886,8 +1886,9 @@ def main():
         'gpk': f"{args.name}.gpk",
         'sdb': f"{args.name}.sdb",
         'mesh_entries': mesh_keys,
-        'meshes': [{'name': mn, 'entry': gi['entry'], 'gr2_index': gi['gr2_index']}
-                   for mn, gi in zip(mesh_names, exported_gr2_indices)],
+        'meshes': [{'name': mn, 'entry': gi['entry'], 'gr2_index': gi['gr2_index'],
+                    'vertex_count': len(md[0]), 'index_count': len(md[5])}
+                   for mn, gi, md in zip(mesh_names, exported_gr2_indices, mesh_data_list)],
     }
     if args.textures and 'manifest_textures' in dir():
         manifest['textures'] = manifest_textures

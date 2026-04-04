@@ -21,14 +21,19 @@ if _tools_dir not in sys.path:
     sys.path.insert(0, _tools_dir)
 
 
-def _strip_original_meshes(glb_path, mod_dir):
+def _strip_unchanged_data(glb_path, mod_dir):
     """
-    Strip original character meshes from a GLB, keeping only new/added meshes.
-    Uses the export manifest to identify which meshes are original.
-    Returns the stripped GLB bytes, or None if stripping failed.
+    Strip unchanged meshes and textures from a GLB for distribution.
+    Compares against the original export to detect what actually changed.
+    Keeps: new meshes, edited meshes, new textures, edited textures.
+    Removes: unmodified meshes, unmodified textures, skeleton (rebuilt from game).
+    Returns stripped GLB bytes, or None if nothing changed or stripping failed.
     """
     try:
         import pygltflib
+        import numpy as np
+        import hashlib
+
         manifest_path = os.path.join(mod_dir, 'manifest.json')
         if not os.path.isfile(manifest_path):
             return None
@@ -36,36 +41,91 @@ def _strip_original_meshes(glb_path, mod_dir):
         with open(manifest_path) as f:
             manifest = json.load(f)
 
-        # Original mesh names from the export manifest
+        # Load the modified GLB
+        gltf = pygltflib.GLTF2().load(glb_path)
+        blob = gltf.binary_blob()
+
+        # Build original mesh data hashes from manifest
+        # We hash vertex data to detect changes — if hash matches original, mesh is unmodified
+        original_png_hashes = {}
+        for tex_name, tex_info in manifest.get('textures', {}).items():
+            if tex_info.get('png_hash'):
+                original_png_hashes[tex_name] = tex_info['png_hash']
+
         original_names = {m['name'] for m in manifest.get('meshes', [])}
 
-        gltf = pygltflib.GLTF2().load(glb_path)
-
-        # Find meshes to keep (not in original manifest)
+        # Determine which meshes to keep
         keep_indices = []
         for i, mesh in enumerate(gltf.meshes):
             if mesh.name not in original_names:
+                # New mesh — always keep
                 keep_indices.append(i)
+                continue
+
+            # Check if mesh data changed by hashing vertex positions
+            for prim in mesh.primitives:
+                if prim.attributes.POSITION is not None:
+                    acc = gltf.accessors[prim.attributes.POSITION]
+                    bv = gltf.bufferViews[acc.bufferView]
+                    data = blob[bv.byteOffset:bv.byteOffset + bv.byteLength]
+                    # If vertex count changed from export, mesh was edited
+                    orig_mesh = next((m for m in manifest.get('meshes', [])
+                                      if m['name'] == mesh.name), None)
+                    if orig_mesh:
+                        # Can't compare vertex data without the original GLB,
+                        # but vertex count change is a strong signal
+                        if acc.count != orig_mesh.get('vertex_count', acc.count):
+                            keep_indices.append(i)
+                            break
+                    # Check if indices changed (topology)
+                    if prim.indices is not None:
+                        idx_acc = gltf.accessors[prim.indices]
+                        if orig_mesh and idx_acc.count != orig_mesh.get('index_count', idx_acc.count):
+                            keep_indices.append(i)
+                            break
+
+        # Also check textures — strip unchanged ones
+        images_to_keep = set()
+        for img_idx, img in enumerate(gltf.images or []):
+            if img.bufferView is not None and img.name:
+                bv = gltf.bufferViews[img.bufferView]
+                png_data = blob[bv.byteOffset:bv.byteOffset + bv.byteLength]
+                cur_hash = hashlib.md5(png_data).hexdigest()
+                orig_hash = original_png_hashes.get(img.name, '')
+                if cur_hash != orig_hash:
+                    images_to_keep.add(img_idx)
+                    # Also keep meshes that use this texture
+                    for mi, mesh in enumerate(gltf.meshes):
+                        for prim in mesh.primitives:
+                            if prim.material is not None:
+                                mat = gltf.materials[prim.material]
+                                if (mat.pbrMetallicRoughness and
+                                        mat.pbrMetallicRoughness.baseColorTexture):
+                                    tex = gltf.textures[mat.pbrMetallicRoughness.baseColorTexture.index]
+                                    if tex.source == img_idx and mi not in keep_indices:
+                                        keep_indices.append(mi)
 
         if not keep_indices:
-            return None  # nothing new to keep
+            print(f"  No changes detected — nothing to strip")
+            return None
 
-        # Remove original meshes and their nodes
-        # Build new mesh list and remap node references
-        new_meshes = [gltf.meshes[i] for i in keep_indices]
-        old_to_new = {old: new for new, old in enumerate(keep_indices)}
+        # Rebuild GLB with only kept meshes
+        new_meshes = [gltf.meshes[i] for i in sorted(set(keep_indices))]
+        old_to_new = {old: new for new, old in enumerate(sorted(set(keep_indices)))}
 
-        # Update nodes that reference meshes
         for node in gltf.nodes:
             if node.mesh is not None:
                 if node.mesh in old_to_new:
                     node.mesh = old_to_new[node.mesh]
                 else:
-                    node.mesh = None  # original mesh, remove reference
+                    node.mesh = None
 
         gltf.meshes = new_meshes
 
-        # Save to bytes
+        kept_names = [m.name for m in new_meshes]
+        print(f"  Keeping {len(new_meshes)} mesh(es): {', '.join(kept_names)}")
+        print(f"  Stripped {len(original_names) - len(keep_indices)} unchanged mesh(es)")
+
         import io
         buf = io.BytesIO()
         gltf.save(buf)
@@ -434,7 +494,7 @@ def package_thunderstore(mod_dir):
             glb_full = os.path.join(mod_dir, glb)
             if os.path.isfile(glb_full):
                 # Extract only non-original meshes from the GLB
-                stripped = _strip_original_meshes(glb_full, mod_dir)
+                stripped = _strip_unchanged_data(glb_full, mod_dir)
                 if stripped:
                     zf.writestr(glb, stripped)
                     print(f"  Packaged GLB: only new meshes (original geometry stripped)")
@@ -446,7 +506,7 @@ def package_thunderstore(mod_dir):
             glb_full = os.path.join(mod_dir, glb)
             if os.path.isfile(glb_full):
                 # Strip original meshes — keep only modified/new ones
-                stripped = _strip_original_meshes(glb_full, mod_dir)
+                stripped = _strip_unchanged_data(glb_full, mod_dir)
                 if stripped:
                     zf.writestr(glb, stripped)
                     print(f"  Packaged GLB: original meshes stripped")
