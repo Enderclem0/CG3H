@@ -39,6 +39,8 @@ packed = lz4.block.compress(data, store_size=False)
 | Pattern | Content |
 |---|---|
 | `<Name>_Mesh` | Skinned character mesh (GR2) |
+| `<Name>Battle_Mesh` | Battle-mode mesh variant (multi-entry GPK) |
+| `<Name>Hub_Mesh` | Hub-mode mesh variant (multi-entry GPK) |
 | `<Name>_Anim_*` | Animation clips (GR2) |
 
 ---
@@ -133,7 +135,9 @@ Each `**` field is a pointer to an array of pointers (dereference twice to reach
 | +0x30 | 4 | BoneBindingCount |
 | +0x34 | 8 | BoneBindings* |
 
-Multiple meshes may share the same `Name` — these are split parts of the same mesh, all rendered together by the engine. During export, duplicate names get `_1`, `_2`, `_3` suffixes. The importer strips both these and legacy `_LOD` suffixes when matching back to GR2 meshes.
+Multiple meshes may share the same `Name` — these are split parts of the same mesh, all rendered together by the engine. During export, duplicate names get `_2`, `_3` suffixes. The importer strips both these and legacy `_LOD` suffixes when matching back to GR2 meshes.
+
+Some characters have multiple mesh entries in a single GPK (e.g. `HecateBattle_Mesh` + `HecateHub_Mesh`). Each entry is a separate GR2 blob within the archive. The exporter processes all entries by default; the `--mesh-entry` flag selects specific entries.
 
 ---
 
@@ -246,3 +250,9 @@ Within each decompressed chunk:
 ### 3D Model Texture Locations
 
 All character 3D model textures are stored as Texture2D (0xAD) or Texture3D (0xAA) entries across various `.pkg` files (not only `Fx.pkg`). Texture names use a `GR2\` or `Models\` path prefix. A texture index (`_texture_index.json`) can be built by scanning all `.pkg` files once for fast batch lookups.
+
+Textures are often duplicated across biome packages (BiomeF, BiomeHub, BiomeIHouse, etc.). Replacing a texture requires updating ALL `.pkg` files that contain it.
+
+### Checksum Validation
+
+The game stores XXH64 checksums for `.pkg` files in `Content/Packages/1080p/checksums.txt`. Each line contains a filename and its hash. After modifying any `.pkg`, the corresponding checksum must be recalculated and updated, or the game will reject the file.

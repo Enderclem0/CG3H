@@ -243,6 +243,27 @@ texture (marker 0xDD) or a texture name reference.
 
 ---
 
+## Lua GrannyTexture Overrides
+
+Some characters have their texture overridden at runtime via Lua scripts in
+the game's `Scripts/` directory. 48 entities use this mechanism. The exporter
+parses these overrides and uses the Lua-specified texture name instead of the
+GR2 material chain value when they conflict.
+
+Example (Lua):
+```lua
+SetThingProperty({ Name = "Hecate", Property = "GrannyTexture", Value = "HecateEM_Color" })
+```
+
+## Variant Textures
+
+Some characters have alternate textures for different game modes (e.g.
+`HecateEM_Color` for Extreme Measures). These are exported as standalone
+files alongside the primary texture but are NOT embedded in the GLB. They
+are marked with `"variant": true` in the export manifest.
+
+---
+
 ## Texture Modding Workflow
 
 ### Multi-Texture Support
@@ -257,6 +278,8 @@ The exporter walks this chain per mesh to find each mesh's texture filename.
 Multiple textures are embedded in the GLB, each with its own glTF material,
 and each mesh is assigned its correct material.
 
+Example: Athena's body and weapons get different textures automatically.
+
 Three fallback levels for texture name resolution:
 1. **Material chain** (most reliable) — walks the GR2 struct pointers
 2. **fi->Textures** — reads the file_info texture array
@@ -264,64 +287,106 @@ Three fallback levels for texture name resolution:
 
 ### Export
 
-The exporter produces two outputs:
+The exporter produces a per-character directory:
 ```
-Melinoe.glb                              — meshes + skeleton + per-mesh embedded PNG textures
-Melinoe_textures/
-  MelinoeTransform_Color.dds             — original BC7 + mipmaps (named per texture)
-  Melinoe_Glow.dds                       — additional textures if present
+Athena/
+  Athena.glb                             — meshes + skeleton + per-mesh embedded PNG textures
+  Athena_Color.dds                       — body texture (BC7 + mipmaps)
+  AthenaWeapons_Color.dds                — weapon texture (separate)
+  Athena_Color.png                       — standalone PNG (base mip, for Photoshop/GIMP editing)
+  AthenaWeapons_Color.png                — standalone PNG
+  manifest.json                          — metadata (see Export Manifest section)
 ```
 
 DDS files are saved with their actual texture names from the material chain.
 The PNG in each GLB material is decoded from BC7 (mip 0 only) for Blender preview.
+Standalone PNGs are also saved for editors that cannot open GLB files.
 The DDS files are exact copies with all mipmaps preserved for lossless editing.
 
-### Import: Two Paths
+### Export Manifest
 
-#### Path 1: DDS Editing (pixel-perfect, recommended)
+Each export directory contains a `manifest.json` tracking:
+- `character` — character name
+- `meshes` — list of mesh entries with GR2 index and entry name mapping
+- `textures` — per-texture metadata:
+  - `pkg` — source `.pkg` file
+  - `pkgs` — all `.pkg` files containing this texture (for multi-pkg replacement)
+  - `format` — DDS format code (BC7, BC3, BC1, etc.)
+  - `width`, `height` — pixel dimensions
+  - `mip_count` — number of mip levels
+  - `png_hash` — hash of the exported PNG (for change detection)
+  - `variant` — true if this is an alternate texture (not embedded in GLB)
 
-For modders who want maximum quality:
+### Import: Three Paths
 
-1. Edit the `.dds` file in Photoshop, Paint.NET, or GIMP (with DDS plugin)
-2. These tools show all mip levels and regenerate them on save
-3. Save as BC7 DDS with mipmaps
-4. Import: the tool reads the DDS directly and writes it to the .pkg
-5. **Zero quality loss** — the DDS data goes in as-is
+#### Path 1: Blender Editing
 
-#### Path 2: PNG Editing (via Blender)
+For modders who edit the texture in Blender:
 
-For modders who edit the texture in Blender or as a PNG:
+1. The texture is embedded as PNG in the GLB (mip 0 = base resolution)
+2. Edit in Blender's texture paint mode
+3. Export GLB — the edited texture is embedded
+4. On install, the tool detects the change via `png_hash` comparison
+5. Extracts the PNG from the GLB, compresses to BC7/BC3/BC1 DDS with mipmaps via `etcpak`
+6. Replaces the texture in all `.pkg` files containing it
 
-1. The texture is embedded as PNG in the GLB (mip 0 = base 512x512)
-2. Edit in Blender's texture paint or export the PNG and edit externally
-3. On reimport, the tool must:
-   a. Regenerate mipmaps from the edited base (Pillow `Image.resize`)
-   b. Recompress each mip to BC7 (requires external encoder)
-   c. Pack all mip levels into the .pkg
+#### Path 2: PNG Editing (Photoshop, GIMP, etc.)
 
-**BC7 encoding options:**
-- `texconv.exe` (Microsoft DirectXTex, free) — best quality, CLI
-- `compressonator` (AMD, free) — CLI, also good
-- Fallback: write as **uncompressed RGBA** (format 0x0E) — 4x larger but no
-  encoder needed, game supports it natively
+For modders who prefer standalone image editors:
 
-#### Path 3: No Texture Change
+1. Edit the standalone `.png` file from the export directory
+2. On install, the tool detects the modification via manifest hash comparison
+3. Compresses to DDS with mipmaps via `etcpak`
+4. Replaces the texture in all `.pkg` files
 
-If the texture wasn't modified (same pixels as original):
+#### Path 3: DDS Editing (pixel-perfect, advanced)
+
+For modders who want maximum control:
+
+1. Edit the `.dds` file in Paint.NET, Photoshop, or GIMP (with DDS plugin)
+2. On install, the tool uses the DDS as-is
+3. Auto-truncates extra mip levels if needed (paint.net compatibility — some editors add more mips than the original)
+4. **Zero quality loss** — the DDS data goes in unchanged
+
+#### No Change Detection
+
+If no texture was modified (hashes match originals):
 - Skip texture replacement entirely
-- Keep the original .pkg data untouched
+- Keep the original `.pkg` data untouched
 
 ---
 
 ## Texture Replacement (PKG Modification)
 
-To replace a character's 3D model texture:
-1. Look up the texture's `.pkg` file via the texture index (or scan all `.pkg` files)
+### Single Texture
+
+1. Look up the texture's `.pkg` file via the texture index (or `manifest.json`)
 2. Open the `.pkg`, decompress LZ4 chunks
 3. Scan for the target Tex2D/Texture3D entry by name
 4. Replace the pixel data (all mip levels, same format + dimensions)
 5. LZ4-recompress the modified chunk
 6. Write back to the `.pkg`
+
+### Multi-PKG Replacement
+
+Many textures are duplicated across biome packages (BiomeF, BiomeHub,
+BiomeIHouse, etc.). The manifest's `pkgs` list tracks ALL `.pkg` files
+containing each texture. The installer replaces the texture in every listed
+package so the mod applies regardless of which biome loads first.
+
+### Checksum Validation
+
+The game validates `checksums.txt` (XXH64 hashes) at startup. After every
+`.pkg` replacement, the tool recalculates the hash and updates the
+corresponding line in `checksums.txt`. The original `checksums.txt` is
+backed up and restored on mod uninstall.
+
+### DDS Compression
+
+PNG-to-DDS compression uses `etcpak` (BC7 encoder). Mipmaps are generated
+from the base level via Pillow `Image.resize` and each level is compressed
+independently. The output format matches the original texture's format code
+(BC7, BC3, or BC1).
 
 Keeping the same format, dimensions, and mip count avoids changing any sizes
 or offsets in the PKG structure.

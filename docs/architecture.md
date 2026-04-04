@@ -13,12 +13,17 @@ symbols (`GrannyFileInfoType`, `GrannyMeshType`, etc.). No hardcoded offsets exc
 | GPK format (Format B, no `uncompressed_size`) | Done |
 | `granny_types.py` — dynamic offset resolver | Done |
 | `gr2_to_gltf.py` — exporter (skinned + rigid + textures + animations) | Done |
-| `gltf_to_gr2.py` — importer (golden path) | Done |
+| `gltf_to_gr2.py` — importer (golden path, multi-entry GPK) | Done |
 | `gpk_pack.py` — GPK pack/unpack | Done |
-| `pkg_texture.py` — PKG texture extractor/replacer + index builder | Done |
-| `converter_gui.py` — GUI with Export/Import/Install + parallel batch | Done |
+| `pkg_texture.py` — PKG texture extractor/replacer/compressor + index builder | Done |
+| `converter_gui.py` — GUI with Export/Install + parallel batch + mod registry | Done |
+| Texture import pipeline (PNG/DDS -> BC7 DDS -> PKG replacement) | Done |
+| Multi-PKG replacement + XXH64 checksum validation | Done |
+| Export manifest (`manifest.json`) with per-mesh entry mapping | Done |
+| Lua GrannyTexture override parsing | Done |
 | End-to-end DLL verification | Done |
 | In-game testing | Done (bounding box culling issue — see README) |
+| Test suite (25 unit tests) | Done |
 
 ## Key Design Decisions
 
@@ -88,9 +93,17 @@ character. Animation extraction within each character uses `multiprocessing.Pool
 
 ### Duplicate mesh naming
 GR2 files often contain multiple meshes with the same name (split parts of one
-mesh, not LODs). The exporter appends `_1`, `_2`, `_3` suffixes to disambiguate.
+mesh, not LODs). The exporter appends `_2`, `_3` suffixes to disambiguate.
 The importer strips both these and legacy `_LOD` suffixes when matching GLB
 meshes back to GR2 meshes.
+
+### Multi-entry GPK support
+Characters with multiple mesh entries (e.g. Hecate has `HecateBattle_Mesh` +
+`HecateHub_Mesh`) export ALL entries by default. The `--mesh-entry` flag filters
+to specific entries; `--list-entries` inspects what is available. The importer
+routes GLB meshes to the correct GR2 entry via the manifest's exact mesh-to-entry
+mapping. Each entry is patched and serialized separately, then packed into a
+single output GPK.
 
 ### Animation export sanitization
 Several channel-level fixes prevent corrupt animation data from producing
@@ -100,11 +113,47 @@ broken glTF output:
 - **Rotation channels**: Normalize quaternions to unit length. Non-unit quaternions
   cause mesh stretching in Blender and other viewers.
 - **Translation channels**: Skip NaN/Inf and extreme values (>1000).
+- **Gap-fill partial channels**: If a bone has any animated channel, emit all three
+  (position + rotation + scale) with rest pose constants. Prevents Blender from
+  producing bogus scale on partially-animated bones.
+- **_static suffix stripping**: Some animation skeletons use a `_static` suffix on
+  bone names; stripped for track-to-bone matching.
+- **bone_index field**: Preserved in track data for correct bone targeting.
+
+### Texture import pipeline
+Three edit paths are supported (Blender, PNG, DDS). Change detection uses
+`png_hash` from the export manifest. PNG-to-DDS compression uses `etcpak`
+(BC7/BC3/BC1 with mipmaps). DDS files from external editors are auto-truncated
+if they have more mip levels than the original (paint.net compatibility).
+
+### Multi-PKG texture replacement
+Textures are often duplicated across biome packages (BiomeF, BiomeHub,
+BiomeIHouse, etc.). The manifest tracks ALL `.pkg` files containing each
+texture. The installer replaces the texture in every listed package.
+
+### XXH64 checksum validation
+The game checks `checksums.txt` at startup. After every `.pkg` replacement,
+the tool recalculates the XXH64 hash and updates the corresponding line.
+The original `checksums.txt` is backed up and restored on mod uninstall.
+
+### Lua GrannyTexture overrides
+48 entities override their GR2 texture at runtime via Lua scripts in the
+game's `Scripts/` directory. The exporter parses these overrides and uses
+the Lua-specified texture when it differs from the material chain value.
+
+### Mod registry
+The GUI maintains `_mods.json` tracking all changes per character (mesh GPK +
+texture PKGs + checksums). One-click uninstall restores ALL files at once.
+Multi-mod safe: uninstalling one mod re-applies remaining mods' textures.
+
+### GLB texture extraction
+The installer can extract edited textures from a GLB file by comparing the
+embedded PNG hash against the manifest's original hash. This enables the
+Blender editing path without requiring manual PNG export.
 
 ## Future Work
 
 | Feature | Approach |
 |---|---|
-| Texture import (PNG/DDS to PKG) | Replace pixel data in .pkg, regenerate mipmaps if needed |
 | Bone changes | Build new bone array + update every mesh's `BoneBindings` |
 | String-stripped output | Fix sec[3] descriptor patching (zeroing f0/f1 isn't sufficient) |
