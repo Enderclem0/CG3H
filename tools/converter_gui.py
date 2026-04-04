@@ -278,82 +278,59 @@ class App:
         tab = ttk.Frame(self._nb, padding=8)
         self._nb.add(tab, text="  Install / Restore  ")
 
-        top = ttk.LabelFrame(tab, text="Install modded .gpk into game", padding=12)
+        top = ttk.LabelFrame(tab, text="Install mod from export folder", padding=12)
         top.pack(fill=tk.X)
 
         ttk.Label(top, text=(
-            "Select a _mod.gpk file to install. The original will be backed up\n"
-            "automatically before replacement. You can restore originals below.\n"
-            "Tip: use Steam > Properties > Verify Integrity of Game Files to\n"
-            "restore all originals if backups are lost."
+            "Point to a character's export folder (with manifest.json).\n"
+            "The tool will import the edited GLB as a .gpk and install\n"
+            "modified textures (DDS or PNG) in one step."
         ), foreground="#555").pack(anchor=tk.W, pady=(0, 8))
 
-        # GPK file picker
+        # Export folder picker
         row = ttk.Frame(top)
-        row.pack(fill=tk.X, pady=(0, 6))
-        ttk.Label(row, text="Mod .gpk file:", width=14, anchor=tk.W).pack(side=tk.LEFT)
-        self.inst_gpk = tk.StringVar()
-        ttk.Entry(row, textvariable=self.inst_gpk, width=42).pack(
-            side=tk.LEFT, padx=6, fill=tk.X, expand=True
-        )
-        ttk.Button(row, text="Browse\u2026", command=self._browse_mod_gpk).pack(side=tk.LEFT)
+        row.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(row, text="Export folder:", width=14, anchor=tk.W).pack(side=tk.LEFT)
+        self.inst_export_dir = tk.StringVar()
+        ttk.Entry(row, textvariable=self.inst_export_dir, width=42).pack(
+            side=tk.LEFT, padx=6, fill=tk.X, expand=True)
+        ttk.Button(row, text="Browse\u2026",
+                   command=self._browse_install_dir).pack(side=tk.LEFT)
 
-        # Character override
-        row2 = ttk.Frame(top)
-        row2.pack(fill=tk.X, pady=(0, 6))
-        ttk.Label(row2, text="Target character:", width=14, anchor=tk.W).pack(side=tk.LEFT)
-        self.inst_character = tk.StringVar()
-        ttk.Entry(row2, textvariable=self.inst_character, width=24).pack(
-            side=tk.LEFT, padx=6
-        )
-        ttk.Label(row2, text="(auto-detected from filename if blank)",
-                  foreground="#888").pack(side=tk.LEFT)
+        self._inst_info = ttk.Label(top, text="", foreground="#555")
+        self._inst_info.pack(anchor=tk.W, pady=(2, 4))
+
+        # Options
+        opt_frame = ttk.Frame(top)
+        opt_frame.pack(fill=tk.X, pady=(0, 4))
+        self.inst_mesh = tk.BooleanVar(value=True)
+        self.inst_textures = tk.BooleanVar(value=True)
+        self.inst_topology = tk.BooleanVar(value=False)
+        ttk.Checkbutton(opt_frame, text="Install mesh (.gpk)",
+                        variable=self.inst_mesh).pack(anchor=tk.W)
+        ttk.Checkbutton(opt_frame, text="Install textures (DDS/PNG)",
+                        variable=self.inst_textures).pack(anchor=tk.W)
+        ttk.Checkbutton(opt_frame, text="Allow topology change (vertex count mismatch)",
+                        variable=self.inst_topology).pack(anchor=tk.W)
 
         btn_row = ttk.Frame(top)
         btn_row.pack(fill=tk.X, pady=(4, 0))
-        ttk.Button(btn_row, text="Install mod", command=self._install_mod).pack(side=tk.LEFT)
+        ttk.Button(btn_row, text="Install mod",
+                   command=self._install_from_folder).pack(side=tk.LEFT)
         self._inst_status = ttk.Label(btn_row, text="", foreground="#070")
         self._inst_status.pack(side=tk.LEFT, padx=12)
 
-        # ── Texture replacement section ──
+        self._inst_log = self._make_log(top)
+
+        # ── Installed mods section ──
         ttk.Separator(tab, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=12)
 
-        tex_box = ttk.LabelFrame(tab, text="Install modified textures", padding=12)
-        tex_box.pack(fill=tk.X)
-
-        ttk.Label(tex_box, text=(
-            "Replace textures using an export directory (with manifest.json).\n"
-            "Edit the DDS files in the export folder, then install them here."
-        ), foreground="#555").pack(anchor=tk.W, pady=(0, 8))
-
-        tex_row1 = ttk.Frame(tex_box)
-        tex_row1.pack(fill=tk.X, pady=(0, 4))
-        ttk.Label(tex_row1, text="Export folder:", width=14, anchor=tk.W).pack(side=tk.LEFT)
-        self.tex_export_dir = tk.StringVar()
-        ttk.Entry(tex_row1, textvariable=self.tex_export_dir, width=42).pack(
-            side=tk.LEFT, padx=6, fill=tk.X, expand=True)
-        ttk.Button(tex_row1, text="Browse\u2026",
-                   command=self._browse_tex_dir).pack(side=tk.LEFT)
-
-        self._tex_info = ttk.Label(tex_box, text="", foreground="#555")
-        self._tex_info.pack(anchor=tk.W, pady=(2, 4))
-
-        tex_btn_row = ttk.Frame(tex_box)
-        tex_btn_row.pack(fill=tk.X, pady=(4, 0))
-        ttk.Button(tex_btn_row, text="Install textures",
-                   command=self._replace_texture).pack(side=tk.LEFT)
-        self._tex_status = ttk.Label(tex_btn_row, text="", foreground="#070")
-        self._tex_status.pack(side=tk.LEFT, padx=12)
-
-        # ── Restore section ──
-        ttk.Separator(tab, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=12)
-
-        bot = ttk.LabelFrame(tab, text="Restore originals from backup", padding=12)
+        bot = ttk.LabelFrame(tab, text="Installed mods", padding=12)
         bot.pack(fill=tk.BOTH, expand=True)
 
         ttk.Label(bot, text=(
-            "Backed-up originals are stored in Content/GR2/_Optimized/_backups/.\n"
-            "Select one or more to restore."
+            "Each installed mod tracks all changes (mesh + textures).\n"
+            "Uninstall restores all original files at once."
         ), foreground="#555").pack(anchor=tk.W, pady=(0, 6))
 
         list_frame = ttk.Frame(bot)
@@ -369,8 +346,8 @@ class App:
 
         rbtns = ttk.Frame(bot)
         rbtns.pack(fill=tk.X, pady=(6, 0))
-        ttk.Button(rbtns, text="Refresh list", command=self._refresh_backups).pack(side=tk.LEFT)
-        ttk.Button(rbtns, text="Restore selected", command=self._restore_selected).pack(
+        ttk.Button(rbtns, text="Refresh", command=self._refresh_backups).pack(side=tk.LEFT)
+        ttk.Button(rbtns, text="Uninstall selected", command=self._restore_selected).pack(
             side=tk.LEFT, padx=8)
         self._restore_status = ttk.Label(rbtns, text="", foreground="#070")
         self._restore_status.pack(side=tk.LEFT, padx=8)
@@ -533,130 +510,47 @@ class App:
                     break
             self.inst_character.set(base)
 
-    def _browse_tex_dir(self):
+    def _browse_install_dir(self):
         p = filedialog.askdirectory(title="Select character export folder (with manifest.json)")
         if p:
-            self.tex_export_dir.set(p)
-            # Show manifest info
-            manifest_path = os.path.join(p, 'manifest.json')
-            if os.path.isfile(manifest_path):
-                import json
-                with open(manifest_path) as f:
-                    m = json.load(f)
-                textures = m.get('textures', {})
-                if textures:
-                    names = ', '.join(textures.keys())
-                    self._tex_info.config(
-                        text=f"{m.get('character', '?')}: {len(textures)} texture(s) - {names}",
-                        foreground="#555")
-                else:
-                    self._tex_info.config(text="No textures in manifest", foreground="#a00")
-            else:
-                self._tex_info.config(text="No manifest.json found", foreground="#a00")
+            self.inst_export_dir.set(p)
+            self._scan_install_dir(p)
 
-    def _replace_texture(self):
-        export_dir = self.tex_export_dir.get().strip()
-        if not export_dir or not os.path.isdir(export_dir):
-            messagebox.showwarning("No folder", "Select an export folder first.")
-            return
-
-        manifest_path = os.path.join(export_dir, 'manifest.json')
+    def _scan_install_dir(self, p):
+        """Read manifest and show summary of what can be installed."""
+        manifest_path = os.path.join(p, 'manifest.json')
         if not os.path.isfile(manifest_path):
-            messagebox.showerror("No manifest",
-                                 f"manifest.json not found in:\n{export_dir}")
+            self._inst_info.config(text="No manifest.json found", foreground="#a00")
             return
-
         import json
         with open(manifest_path) as f:
-            manifest = json.load(f)
+            m = json.load(f)
+        parts = []
+        character = m.get('character', '?')
+        # Check for GLB
+        glb = m.get('glb', '')
+        glb_path = os.path.join(p, glb)
+        if glb and os.path.isfile(glb_path):
+            meshes = m.get('meshes', [])
+            parts.append(f"mesh ({len(meshes)} parts)")
+        # Check for textures
+        textures = m.get('textures', {})
+        tex_ready = 0
+        for tn, ti in textures.items():
+            dds = os.path.join(p, ti.get('dds_file', f'{tn}.dds'))
+            png = os.path.join(p, f'{tn}.png')
+            if os.path.isfile(dds) or os.path.isfile(png):
+                tex_ready += 1
+        if tex_ready:
+            parts.append(f"{tex_ready} texture(s)")
+        # Check for animations
+        anims = m.get('animations', {})
+        if anims.get('count', 0):
+            parts.append(f"{anims['count']} animations")
+        summary = ', '.join(parts) if parts else 'nothing found'
+        self._inst_info.config(text=f"{character}: {summary}", foreground="#555")
 
-        textures = manifest.get('textures', {})
-        if not textures:
-            messagebox.showinfo("Nothing to install", "No textures in manifest.")
-            return
-
-        game = self.game_path.get()
-        pkg_dir = os.path.join(game, "Content", "Packages", "1080p")
-        backup_dir = os.path.join(pkg_dir, "_backups")
-        os.makedirs(backup_dir, exist_ok=True)
-
-        from pkg_texture import replace_texture, png_to_dds
-
-        ok_count = 0
-        fail_count = 0
-        errors = []
-        for tex_name, tex_info in textures.items():
-            dds_file = tex_info.get('dds_file', f"{tex_name}.dds")
-            dds_path = os.path.join(export_dir, dds_file)
-            png_path = os.path.join(export_dir, f"{tex_name}.png")
-
-            # PNG path: if a .png exists (edited in Blender/Photoshop), compress it to DDS
-            if os.path.isfile(png_path):
-                if not os.path.isfile(dds_path) or \
-                        os.path.getmtime(png_path) > os.path.getmtime(dds_path):
-                    self._tex_status.config(
-                        text=f"Compressing {tex_name}.png -> DDS...", foreground="#555")
-                    self.root.update()
-                    try:
-                        dds_bytes = png_to_dds(
-                            png_path,
-                            tex_info.get('format', 0x1C),
-                            tex_info.get('width', 512),
-                            tex_info.get('height', 512),
-                            tex_info.get('mip_count', 6),
-                        )
-                        with open(dds_path, 'wb') as f:
-                            f.write(dds_bytes)
-                        print(f"  Compressed {tex_name}.png -> {dds_file} "
-                              f"({len(dds_bytes):,} bytes)")
-                    except Exception as e:
-                        errors.append(f"{tex_name}: PNG compression failed: {e}")
-                        fail_count += 1
-                        continue
-
-            if not os.path.isfile(dds_path):
-                errors.append(f"{tex_name}: no DDS or PNG file found")
-                fail_count += 1
-                continue
-
-            pkg_name = tex_info.get('pkg', '')
-            pkg_path = os.path.join(pkg_dir, pkg_name)
-            if not os.path.isfile(pkg_path):
-                errors.append(f"{tex_name}: {pkg_name} not found")
-                fail_count += 1
-                continue
-
-            # Backup the .pkg if not already backed up
-            backup_path = os.path.join(backup_dir, pkg_name)
-            if not os.path.isfile(backup_path):
-                self._tex_status.config(text=f"Backing up {pkg_name}...", foreground="#555")
-                self.root.update()
-                shutil.copy2(pkg_path, backup_path)
-
-            self._tex_status.config(text=f"Replacing {tex_name}...", foreground="#555")
-            self.root.update()
-
-            try:
-                entry_name = tex_info.get('pkg_entry_name', tex_name)
-                if replace_texture(pkg_path, entry_name, dds_path, pkg_path):
-                    ok_count += 1
-                else:
-                    errors.append(f"{tex_name}: not found in {pkg_name}")
-                    fail_count += 1
-            except Exception as e:
-                errors.append(f"{tex_name}: {e}")
-                fail_count += 1
-
-        if fail_count == 0:
-            self._tex_status.config(text=f"{ok_count} texture(s) installed!", foreground="#070")
-            messagebox.showinfo("Textures installed",
-                                f"Replaced {ok_count} texture(s).\n"
-                                "Launch the game to see your changes.")
-        else:
-            self._tex_status.config(text=f"{ok_count} ok, {fail_count} failed", foreground="#a00")
-            detail = "\n".join(errors[:10])
-            messagebox.showwarning("Partial install",
-                                   f"{ok_count} replaced, {fail_count} failed.\n\n{detail}")
+    # _replace_texture removed — integrated into _install_from_folder
 
     # ── Export logic ──────────────────────────────────────────────────────────
 
@@ -1005,114 +899,323 @@ class App:
         if self._nb.index("current") == 2:
             self._refresh_backups()
 
-    def _install_mod(self):
-        gpk_file = self.inst_gpk.get().strip()
-        if not gpk_file or not os.path.isfile(gpk_file):
-            messagebox.showwarning("No file", "Select a .gpk file to install.")
+    def _install_from_folder(self):
+        export_dir = self.inst_export_dir.get().strip()
+        if not export_dir or not os.path.isdir(export_dir):
+            messagebox.showwarning("No folder", "Select an export folder first.")
             return
 
-        character = self.inst_character.get().strip()
+        manifest_path = os.path.join(export_dir, 'manifest.json')
+        if not os.path.isfile(manifest_path):
+            messagebox.showerror("No manifest", f"manifest.json not found in:\n{export_dir}")
+            return
+
+        import json
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+
+        character = manifest.get('character', '')
         if not character:
-            base = os.path.splitext(os.path.basename(gpk_file))[0]
-            for suffix in ("_mod", "_patched", "_modded"):
-                if base.endswith(suffix):
-                    base = base[:-len(suffix)]
-                    break
-            character = base
-
-        gpk_dir = self._gpk_dir()
-        target = os.path.join(gpk_dir, f"{character}.gpk")
-
-        if not os.path.isfile(target):
-            messagebox.showerror(
-                "Original not found",
-                f"No original .gpk found for '{character}':\n{target}\n\n"
-                "Check the character name.",
-            )
+            messagebox.showerror("Bad manifest", "No 'character' field in manifest.")
             return
 
-        # Backup original
-        backup_dir = self._backup_dir()
-        os.makedirs(backup_dir, exist_ok=True)
-        backup_path = os.path.join(backup_dir, f"{character}.gpk")
-        if not os.path.isfile(backup_path):
-            shutil.copy2(target, backup_path)
-            msg_backup = f"Backed up original to:\n  {backup_path}\n\n"
+        self._log_clear(self._inst_log)
+        self._inst_status.config(text=f"Installing {character}...", foreground="#555")
+
+        threading.Thread(
+            target=self._install_worker,
+            args=(export_dir, manifest, character),
+            daemon=True,
+        ).start()
+
+    def _install_worker(self, export_dir, manifest, character):
+        game = self.game_path.get()
+        gpk_dir = self._gpk_dir()
+        pkg_dir = os.path.join(game, "Content", "Packages", "1080p")
+        dll = self._dll_path()
+        results = []
+        errors = []
+        modified_files = []  # for mod registry
+
+        # ── Step 1: Import mesh (GLB → GPK) ──
+        if self.inst_mesh.get():
+            glb = manifest.get('glb', '')
+            glb_path = os.path.join(export_dir, glb)
+            if glb and os.path.isfile(glb_path):
+                self._ui(lambda: self._inst_status.config(
+                    text=f"Importing {character} mesh...", foreground="#555"))
+
+                gpk_out = os.path.join(export_dir, f"{character}_mod.gpk")
+                gpk_orig = os.path.join(gpk_dir, f"{character}.gpk")
+                sdb_orig = os.path.join(gpk_dir, f"{character}.sdb")
+                if not os.path.isfile(gpk_orig):
+                    errors.append(f"Original {character}.gpk not found")
+                elif not os.path.isfile(sdb_orig):
+                    errors.append(f"Original {character}.sdb not found")
+                else:
+                    cmd = [
+                        sys.executable, IMPORTER, glb_path,
+                        "--gpk", gpk_orig,
+                        "--sdb", sdb_orig,
+                        "--dll", dll,
+                        "--output-gpk", gpk_out,
+                    ]
+                    if self.inst_topology.get():
+                        cmd.append("--allow-topology-change")
+
+                    try:
+                        proc = subprocess.Popen(
+                            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, bufsize=1, encoding='utf-8', errors='replace',
+                        )
+                        output = proc.communicate()[0]
+                        self._log_write_ui(self._inst_log, output)
+                        if proc.returncode == 0:
+                            # Install the GPK
+                            target = os.path.join(gpk_dir, f"{character}.gpk")
+                            backup_dir = self._backup_dir()
+                            os.makedirs(backup_dir, exist_ok=True)
+                            backup_path = os.path.join(backup_dir, f"{character}.gpk")
+                            if not os.path.isfile(backup_path):
+                                shutil.copy2(target, backup_path)
+                            shutil.copy2(gpk_out, target)
+                            modified_files.append({
+                                'type': 'gpk', 'backup': backup_path, 'target': target,
+                            })
+                            results.append(f"Mesh installed ({character}.gpk)")
+                        else:
+                            errors.append(f"Mesh import failed (exit code {proc.returncode})")
+                    except Exception as e:
+                        errors.append(f"Mesh import error: {e}")
+            else:
+                self._log_write_ui(self._inst_log,
+                                   f"  No GLB found ({glb}), skipping mesh\n")
+
+        # ── Step 2: Install textures ──
+        if self.inst_textures.get():
+            textures = manifest.get('textures', {})
+            if textures:
+                self._ui(lambda: self._inst_status.config(
+                    text=f"Installing {character} textures...", foreground="#555"))
+
+                from pkg_texture import replace_texture, png_to_dds
+                backup_dir = os.path.join(pkg_dir, "_backups")
+                os.makedirs(backup_dir, exist_ok=True)
+
+                # Backup checksums.txt (once)
+                checksums_src = os.path.join(pkg_dir, "checksums.txt")
+                checksums_bak = os.path.join(backup_dir, "checksums.txt")
+                if os.path.isfile(checksums_src) and not os.path.isfile(checksums_bak):
+                    shutil.copy2(checksums_src, checksums_bak)
+
+                for tex_name, tex_info in textures.items():
+                    dds_file = tex_info.get('dds_file', f"{tex_name}.dds")
+                    dds_path = os.path.join(export_dir, dds_file)
+                    png_path = os.path.join(export_dir, f"{tex_name}.png")
+
+                    # PNG path: compress if newer than DDS
+                    if os.path.isfile(png_path):
+                        if not os.path.isfile(dds_path) or \
+                                os.path.getmtime(png_path) > os.path.getmtime(dds_path):
+                            self._log_write_ui(
+                                self._inst_log,
+                                f"  Compressing {tex_name}.png -> DDS...\n")
+                            try:
+                                dds_bytes = png_to_dds(
+                                    png_path,
+                                    tex_info.get('format', 0x1C),
+                                    tex_info.get('width', 512),
+                                    tex_info.get('height', 512),
+                                    tex_info.get('mip_count', 6),
+                                )
+                                with open(dds_path, 'wb') as f:
+                                    f.write(dds_bytes)
+                            except Exception as e:
+                                errors.append(f"{tex_name} PNG compress: {e}")
+                                continue
+
+                    if not os.path.isfile(dds_path):
+                        continue
+
+                    pkg_name = tex_info.get('pkg', '')
+                    pkg_path = os.path.join(pkg_dir, pkg_name)
+                    if not os.path.isfile(pkg_path):
+                        errors.append(f"{tex_name}: {pkg_name} not found")
+                        continue
+
+                    # Backup pkg
+                    backup_path = os.path.join(backup_dir, pkg_name)
+                    if not os.path.isfile(backup_path):
+                        shutil.copy2(pkg_path, backup_path)
+
+                    try:
+                        entry_name = tex_info.get('pkg_entry_name', tex_name)
+                        if replace_texture(pkg_path, entry_name, dds_path, pkg_path):
+                            modified_files.append({
+                                'type': 'pkg', 'backup': backup_path, 'target': pkg_path,
+                                'texture': tex_name, 'entry_name': entry_name,
+                                'dds_path': dds_path,
+                            })
+                            results.append(f"Texture: {tex_name} -> {pkg_name}")
+                        else:
+                            errors.append(f"{tex_name}: not found in {pkg_name}")
+                    except Exception as e:
+                        errors.append(f"{tex_name}: {e}")
+
+        # ── Register mod and summarize ──
+        if modified_files:
+            self._register_mod(character, modified_files)
+        self._ui(self._refresh_backups)
+        if errors:
+            self._ui(lambda: self._inst_status.config(
+                text=f"{len(results)} ok, {len(errors)} failed", foreground="#a00"))
+            detail = "\n".join(results + [""] + errors)
+            self._log_write_ui(self._inst_log, f"\n{detail}\n")
+            self._ui(lambda: messagebox.showwarning(
+                "Install complete with errors",
+                f"{len(results)} succeeded, {len(errors)} failed.\n\n"
+                + "\n".join(errors[:5])))
+        elif results:
+            self._ui(lambda: self._inst_status.config(
+                text=f"Installed! ({len(results)} items)", foreground="#070"))
+            self._log_write_ui(self._inst_log,
+                               "\n".join(["", "Installed:"] + results + [""]))
+            self._ui(lambda: messagebox.showinfo(
+                "Mod installed",
+                f"Installed {len(results)} item(s) for {character}.\n\n"
+                + "\n".join(results) +
+                "\n\nLaunch the game to see your changes."))
         else:
-            msg_backup = "Backup already exists (not overwritten).\n\n"
-
-        # Install
-        shutil.copy2(gpk_file, target)
-
-        self._inst_status.config(text=f"Installed {character}.gpk")
-        self._status.set(f"Installed mod for {character}")
-        self._refresh_backups()
-
-        messagebox.showinfo(
-            "Mod installed",
-            f"{msg_backup}"
-            f"Installed:\n  {gpk_file}\n\u2192\n  {target}\n\n"
-            "Launch the game to see your changes.",
-        )
+            self._ui(lambda: self._inst_status.config(
+                text="Nothing to install", foreground="#555"))
 
     def _pkg_backup_dir(self):
         return os.path.join(self.game_path.get(), "Content", "Packages", "1080p", "_backups")
 
+    def _mods_registry_path(self):
+        return os.path.join(self._backup_dir(), "_mods.json")
+
+    def _load_mods_registry(self):
+        import json
+        p = self._mods_registry_path()
+        if os.path.isfile(p):
+            with open(p) as f:
+                return json.load(f)
+        return {}
+
+    def _save_mods_registry(self, registry):
+        import json
+        os.makedirs(os.path.dirname(self._mods_registry_path()), exist_ok=True)
+        with open(self._mods_registry_path(), 'w') as f:
+            json.dump(registry, f, indent=2)
+
+    def _register_mod(self, character, modified_files):
+        """Record an installed mod. modified_files: list of {type, src_backup, dst_game}"""
+        registry = self._load_mods_registry()
+        registry[character] = {
+            'installed': datetime.now().strftime("%Y-%m-%d %H:%M"),
+            'files': modified_files,
+        }
+        self._save_mods_registry(registry)
+
+    def _unregister_mod(self, character):
+        registry = self._load_mods_registry()
+        registry.pop(character, None)
+        self._save_mods_registry(registry)
+
     def _refresh_backups(self):
         self._restore_lb.delete(0, tk.END)
-        # GR2 model backups
-        backup_dir = self._backup_dir()
-        if os.path.isdir(backup_dir):
-            for f in sorted(os.listdir(backup_dir)):
-                if f.endswith(".gpk"):
-                    name = os.path.splitext(f)[0]
-                    ts = datetime.fromtimestamp(
-                        os.path.getmtime(os.path.join(backup_dir, f))
-                    ).strftime("%Y-%m-%d %H:%M")
-                    self._restore_lb.insert(tk.END, f"{name}  (model, backed up {ts})")
-        # PKG texture backups
-        pkg_backup = self._pkg_backup_dir()
-        if os.path.isdir(pkg_backup):
-            for f in sorted(os.listdir(pkg_backup)):
-                if f.endswith(".pkg"):
-                    name = os.path.splitext(f)[0]
-                    ts = datetime.fromtimestamp(
-                        os.path.getmtime(os.path.join(pkg_backup, f))
-                    ).strftime("%Y-%m-%d %H:%M")
-                    self._restore_lb.insert(tk.END, f"{name}  (texture, backed up {ts})")
+        registry = self._load_mods_registry()
+        for character, info in sorted(registry.items()):
+            ts = info.get('installed', '?')
+            files = info.get('files', [])
+            parts = []
+            if any(f['type'] == 'gpk' for f in files):
+                parts.append('mesh')
+            tex_count = sum(1 for f in files if f['type'] == 'pkg')
+            if tex_count:
+                parts.append(f'{tex_count} texture(s)')
+            desc = ' + '.join(parts) if parts else 'unknown'
+            self._restore_lb.insert(tk.END, f"{character}  ({desc}, installed {ts})")
 
     def _restore_selected(self):
         sel = self._restore_lb.curselection()
         if not sel:
-            messagebox.showwarning("Nothing selected", "Select backup(s) to restore.")
+            messagebox.showwarning("Nothing selected", "Select mod(s) to uninstall.")
             return
 
-        backup_dir = self._backup_dir()
-        gpk_dir = self._gpk_dir()
-        pkg_backup = self._pkg_backup_dir()
-        pkg_dir = os.path.join(self.game_path.get(), "Content", "Packages", "1080p")
+        registry = self._load_mods_registry()
         restored = []
+        characters_to_remove = []
 
         for idx in sel:
             text = self._restore_lb.get(idx)
-            name = text.split("  (")[0].strip()
-            if "texture" in text:
-                src = os.path.join(pkg_backup, f"{name}.pkg")
-                dst = os.path.join(pkg_dir, f"{name}.pkg")
-            else:
-                src = os.path.join(backup_dir, f"{name}.gpk")
-                dst = os.path.join(gpk_dir, f"{name}.gpk")
-            if os.path.isfile(src):
-                shutil.copy2(src, dst)
-                restored.append(name)
+            characters_to_remove.append(text.split("  (")[0].strip())
+
+        # Collect all files to restore and which mods remain
+        remaining_mods = {k: v for k, v in registry.items()
+                         if k not in characters_to_remove}
+        restored_targets = set()
+
+        pkg_restored = False
+        for character in characters_to_remove:
+            info = registry.get(character)
+            if not info:
+                continue
+            for f in info.get('files', []):
+                src = f.get('backup')
+                dst = f.get('target')
+                if src and dst and os.path.isfile(src):
+                    shutil.copy2(src, dst)
+                    restored_targets.add(dst)
+                    if f.get('type') == 'pkg':
+                        pkg_restored = True
+            restored.append(character)
+
+        # Restore checksums.txt if any .pkg was restored
+        if pkg_restored:
+            pkg_backup_dir = self._pkg_backup_dir()
+            pkg_dir = os.path.join(self.game_path.get(), "Content", "Packages", "1080p")
+            checksums_bak = os.path.join(pkg_backup_dir, "checksums.txt")
+            checksums_dst = os.path.join(pkg_dir, "checksums.txt")
+            if os.path.isfile(checksums_bak):
+                shutil.copy2(checksums_bak, checksums_dst)
+
+        # Re-apply remaining mods that touch any restored file.
+        # This prevents uninstalling mod A from breaking mod B when
+        # both modify the same .pkg file.
+        if remaining_mods and restored_targets:
+            from pkg_texture import replace_texture
+            reapplied = []
+            for mod_char, mod_info in remaining_mods.items():
+                for f in mod_info.get('files', []):
+                    if f.get('target') in restored_targets and f['type'] == 'pkg':
+                        dds_path = f.get('dds_path', '')
+                        entry_name = f.get('entry_name', '')
+                        pkg_path = f.get('target', '')
+                        if dds_path and entry_name and os.path.isfile(dds_path):
+                            try:
+                                replace_texture(pkg_path, entry_name, dds_path, pkg_path)
+                                reapplied.append(f"{mod_char}/{f.get('texture', '?')}")
+                            except Exception:
+                                pass
+            if reapplied:
+                self._log_write_ui(self._inst_log,
+                                   f"\nRe-applied {len(reapplied)} texture(s) from other mods:\n"
+                                   + "\n".join(f"  {r}" for r in reapplied) + "\n")
+
+        for character in characters_to_remove:
+            self._unregister_mod(character)
 
         if restored:
-            self._restore_status.config(text=f"Restored {len(restored)} file(s)")
-            self._status.set(f"Restored: {', '.join(restored)}")
+            self._restore_status.config(text=f"Uninstalled {len(restored)} mod(s)")
+            self._status.set(f"Uninstalled: {', '.join(restored)}")
+            self._refresh_backups()
             messagebox.showinfo(
-                "Restore complete",
-                f"Restored {len(restored)} original(s):\n" +
-                "\n".join(f"  {n}" for n in restored),
+                "Mods uninstalled",
+                f"Restored originals for {len(restored)} mod(s):\n" +
+                "\n".join(f"  {n}" for n in restored) +
+                "\n\nRestart the game to apply.",
             )
 
     # ── Thread-safe UI helpers ────────────────────────────────────────────────

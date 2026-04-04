@@ -434,6 +434,53 @@ def png_to_dds(png_path, fmt_code, width, height, mip_count):
     return header + pixel_data
 
 
+def _update_pkg_checksum(pkg_path):
+    """Recompute XXH64 hash for a .pkg file and update checksums.txt."""
+    try:
+        import xxhash
+    except ImportError:
+        print("  WARNING: xxhash not installed, cannot update checksums.txt. "
+              "Run: pip install xxhash")
+        return
+
+    pkg_dir = os.path.dirname(pkg_path)
+    pkg_name = os.path.basename(pkg_path)
+    checksums_path = os.path.join(pkg_dir, 'checksums.txt')
+
+    if not os.path.isfile(checksums_path):
+        print(f"  WARNING: checksums.txt not found in {pkg_dir}")
+        return
+
+    # Compute new hash
+    h = xxhash.xxh64()
+    with open(pkg_path, 'rb') as f:
+        while True:
+            chunk = f.read(65536)
+            if not chunk:
+                break
+            h.update(chunk)
+    new_hash = h.hexdigest()
+
+    # Read and update checksums.txt
+    with open(checksums_path, 'r') as f:
+        lines = f.readlines()
+
+    updated = False
+    for i, line in enumerate(lines):
+        parts = line.strip().split('  ', 1)
+        if len(parts) == 2 and parts[1] == pkg_name:
+            lines[i] = f"{new_hash}  {pkg_name}\n"
+            updated = True
+            # Don't break — there might be duplicates
+
+    if updated:
+        with open(checksums_path, 'w') as f:
+            f.writelines(lines)
+        print(f"  Updated checksums.txt: {pkg_name} -> {new_hash}")
+    else:
+        print(f"  WARNING: {pkg_name} not found in checksums.txt")
+
+
 def replace_texture(pkg_path, texture_name, new_dds_path, output_path):
     """
     Replace a texture in a .pkg file with data from a DDS file.
@@ -443,14 +490,16 @@ def replace_texture(pkg_path, texture_name, new_dds_path, output_path):
     with open(new_dds_path, 'rb') as f:
         dds_raw = f.read()
 
-    # Parse DDS header to get pixel data offset
+    # Parse DDS header to get pixel data offset and mip info
     if dds_raw[:4] != b'DDS ':
         raise ValueError(f"Not a DDS file: {new_dds_path}")
     dds_header_size = 128
-    # Check for DX10 extended header
     pf_fourcc = dds_raw[84:88]
     if pf_fourcc == b'DX10':
         dds_header_size += 20
+    dds_w = struct.unpack_from('<I', dds_raw, 16)[0]
+    dds_h = struct.unpack_from('<I', dds_raw, 12)[0]
+    dds_mips = struct.unpack_from('<I', dds_raw, 28)[0]
     new_pixels = dds_raw[dds_header_size:]
 
     # Read the pkg
@@ -514,11 +563,22 @@ def replace_texture(pkg_path, texture_name, new_dds_path, output_path):
                     print(f"  Found: {name} ({orig_w}x{orig_h} fmt=0x{orig_fmt:X} "
                           f"{orig_pix_sz:,} bytes) in chunk {ci}")
 
-                    # Validate new texture
-                    if len(new_pixels) != orig_pix_sz:
-                        print(f"  ERROR: DDS pixel data size mismatch: "
+                    # Validate dimensions
+                    if dds_w != orig_w or dds_h != orig_h:
+                        print(f"  ERROR: DDS dimensions mismatch: "
+                              f"new={dds_w}x{dds_h} vs original={orig_w}x{orig_h}")
+                        return False
+
+                    # Auto-truncate if DDS has extra mip levels
+                    if len(new_pixels) > orig_pix_sz:
+                        orig_mips = _compute_mip_count(orig_w, orig_h, orig_fmt, orig_pix_sz)
+                        print(f"  DDS has {dds_mips} mips, game expects {orig_mips} "
+                              f"— truncating {len(new_pixels):,} -> {orig_pix_sz:,} bytes")
+                        new_pixels = new_pixels[:orig_pix_sz]
+                    elif len(new_pixels) < orig_pix_sz:
+                        print(f"  ERROR: DDS pixel data too small: "
                               f"new={len(new_pixels):,} vs original={orig_pix_sz:,}")
-                        print(f"  The DDS must have the same dimensions, format, and mip count")
+                        print(f"  DDS needs at least {_compute_mip_count(orig_w, orig_h, orig_fmt, orig_pix_sz)} mip levels")
                         return False
 
                     # Replace pixel data in the decompressed chunk
@@ -548,6 +608,9 @@ def replace_texture(pkg_path, texture_name, new_dds_path, output_path):
                     with open(output_path, 'wb') as f:
                         f.write(output)
                     print(f"  Written: {output_path} ({len(output):,} bytes)")
+
+                    # Update XXH64 checksum in checksums.txt
+                    _update_pkg_checksum(output_path)
                     return True
 
                 doff = data_start + total_sz
