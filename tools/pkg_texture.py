@@ -389,6 +389,51 @@ def build_dds_header(width, height, fmt_code, pixel_size):
     return bytes(header)
 
 
+def png_to_dds(png_path, fmt_code, width, height, mip_count):
+    """
+    Compress a PNG image to DDS with BCn compression and mipmaps.
+    Uses etcpak for BC7/BC3/BC1 encoding.
+    Returns DDS file bytes (header + all mip levels).
+    """
+    from PIL import Image
+    try:
+        import etcpak
+    except ImportError:
+        raise ImportError("etcpak not installed. Run: pip install etcpak")
+
+    img = Image.open(png_path).convert('RGBA')
+    if img.size != (width, height):
+        print(f"  Resizing {img.size} -> ({width}, {height})")
+        img = img.resize((width, height), Image.LANCZOS)
+
+    # Generate mip chain
+    pixel_data = b''
+    w, h = width, height
+    for mip in range(mip_count):
+        if w < 4 or h < 4:
+            break
+        mip_img = img.resize((w, h), Image.LANCZOS) if (w, h) != img.size else img
+        rgba = mip_img.tobytes()
+
+        if fmt_code == 0x1C:  # BC7
+            compressed = etcpak.compress_bc7(rgba, w, h)
+        elif fmt_code == 0x06:  # BC3/DXT5
+            compressed = etcpak.compress_bc3(rgba, w, h)
+        elif fmt_code == 0x04:  # BC1/DXT1
+            compressed = etcpak.compress_bc1(rgba, w, h)
+        elif fmt_code in (0x00, 0x0E):  # Uncompressed RGBA
+            compressed = rgba
+        else:
+            raise ValueError(f"Unsupported format 0x{fmt_code:X} for PNG compression")
+
+        pixel_data += compressed
+        w //= 2
+        h //= 2
+
+    header = build_dds_header(width, height, fmt_code, len(pixel_data))
+    return header + pixel_data
+
+
 def replace_texture(pkg_path, texture_name, new_dds_path, output_path):
     """
     Replace a texture in a .pkg file with data from a DDS file.

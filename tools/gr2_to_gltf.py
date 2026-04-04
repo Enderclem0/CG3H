@@ -12,6 +12,8 @@ Expects:
     - ../Content/GR2/_Optimized/<name>.gpk and .sdb
 """
 import struct, ctypes, argparse, os, sys
+if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 import numpy as np
 import lz4.block
 import pygltflib
@@ -537,9 +539,10 @@ def _fixup_quaternion_signs(values):
 def _postprocess_track(track):
     """
     Apply LSLib-style post-processing to an animation track:
-    1. Quaternion sign fixup (prevents slerp long-path jitter)
-    2. Merge adjacent keyframes within 4ms
-    3. Remove trivial keyframes that lie on the interpolation path
+    1. Drop constant single-key curves (no-ops that confuse Blender)
+    2. Quaternion sign fixup (prevents slerp long-path jitter)
+    3. Merge adjacent keyframes within 4ms
+    4. Remove trivial keyframes that lie on the interpolation path
     """
     # Quaternion sign fixup on orientation curves
     if track['orient'] is not None:
@@ -646,7 +649,8 @@ def _process_single_anim(dll, str_db, entry_name, gr2_bytes):
 
         if orient is None and pos is None and scale is None:
             continue
-        track = {'name': t_name, 'orient': orient, 'pos': pos, 'scale': scale}
+        track = {'name': t_name, 'orient': orient, 'pos': pos, 'scale': scale,
+                 'bone_index': ti}
         _postprocess_track(track)
         if track['orient'] is None and track['pos'] is None and track['scale'] is None:
             continue
@@ -936,11 +940,13 @@ def build_gltf(character_name, mesh_data_list, mesh_names, bones, animations=Non
 
     # ── Animations ──
     if animations:
-        # Build bone name -> node index mapping for animation channel targeting
+        # Build bone name -> node index mapping for animation channel targeting.
+        # Granny uses case-insensitive exact name matching by default.
+        # Some characters have animation tracks with '_static' suffix that the
+        # mesh skeleton lacks — we strip it as a workaround (see project_static_suffix.md).
         bone_name_to_node = {}
         for i, bone in enumerate(bones):
             bone_name_to_node[bone['name']] = bone_node_indices[i]
-            # Also map short name (after last colon)
             short = bone['name'].split(':')[-1]
             if short not in bone_name_to_node:
                 bone_name_to_node[short] = bone_node_indices[i]
@@ -948,7 +954,6 @@ def build_gltf(character_name, mesh_data_list, mesh_names, bones, animations=Non
         total_anims = len(animations)
         print(f"  Building {total_anims} animation(s) into glTF...", flush=True)
         for anim_idx, anim_data in enumerate(animations):
-            # Compute content hash from all keyframe data for diff-on-import
             import hashlib
             h = hashlib.md5()
             for t in anim_data['tracks']:
@@ -972,8 +977,32 @@ def build_gltf(character_name, mesh_data_list, mesh_names, bones, animations=Non
                 if node_idx is None:
                     short = track['name'].split(':')[-1]
                     node_idx = bone_name_to_node.get(short)
+                # Strip _static suffix (some animation skeletons use it)
+                if node_idx is None:
+                    stripped = track['name'].removesuffix('_static').removesuffix('_Static')
+                    node_idx = bone_name_to_node.get(stripped)
+                    if node_idx is None:
+                        node_idx = bone_name_to_node.get(stripped.split(':')[-1])
                 if node_idx is None:
                     continue
+
+                # Gap-fill: if a bone has ANY channel, emit ALL three (pos+rot+scale).
+                # Blender misinterprets partial channels (e.g. position-only causes
+                # bogus scale values). Fill missing channels with rest pose constants.
+                bone_idx = bone_node_indices.index(node_idx) if node_idx in bone_node_indices else None
+                has_any = track['pos'] is not None or track['orient'] is not None or track['scale'] is not None
+                if bone_idx is not None and has_any:
+                    if track['pos'] is None:
+                        tx, ty, tz = bones[bone_idx]['translation']
+                        track['pos'] = (np.array([0.0], dtype=np.float32),
+                                        np.array([[tx, ty, tz]], dtype=np.float32), 0)
+                    if track['orient'] is None:
+                        rx, ry, rz, rw = bones[bone_idx]['rotation']
+                        track['orient'] = (np.array([0.0], dtype=np.float32),
+                                           np.array([[rx, ry, rz, rw]], dtype=np.float32), 0)
+                    if track['scale'] is None:
+                        track['scale'] = (np.array([0.0], dtype=np.float32),
+                                          np.array([[1.0, 1.0, 1.0]], dtype=np.float32), 0)
 
                 # Translation channel
                 if track['pos'] is not None:
@@ -1050,6 +1079,38 @@ def build_gltf(character_name, mesh_data_list, mesh_names, bones, animations=Non
     return gltf
 
 # ─────────────────────────── Texture extraction ─────────────────────────────
+
+def _load_granny_texture_overrides(scripts_dir):
+    """
+    Parse Lua scripts for GrannyTexture overrides.
+    The game's entity data can replace a GR2's texture reference at runtime.
+    Returns dict {character_name_lower: [texture_base_names]}.
+    """
+    import re
+    overrides = {}  # character_lower -> [tex_base_name, ...]
+    if not os.path.isdir(scripts_dir):
+        return overrides
+    for root, dirs, files in os.walk(scripts_dir):
+        for f in files:
+            if not f.endswith('.lua'):
+                continue
+            try:
+                data = open(os.path.join(root, f), 'r', errors='replace').read()
+            except Exception:
+                continue
+            for m in re.finditer(r'GrannyTexture\s*=\s*"([^"]+)"', data):
+                tex_path = m.group(1)
+                tex_name = tex_path.replace('\\', '/').split('/')[-1]
+                # Derive character from filename: EnemyData_EarthElemental.lua -> earthelemental
+                char = f.replace('.lua', '')
+                for prefix in ('EnemyData_', 'NPCData_', 'NPCData'):
+                    if char.startswith(prefix):
+                        char = char[len(prefix):]
+                        break
+                char = char.lower()
+                overrides.setdefault(char, []).append(tex_name)
+    return overrides
+
 
 def _read_gr2_texture_names(fi):
     """
@@ -1328,16 +1389,10 @@ def _extract_all_textures(pkg_dir, texture_names):
     pkg_targets = {}  # pkg_path → set of lowercase names to find
     if tex_index:
         for lc_name in list(remaining.keys()):
-            matched = False
-            for key, info in tex_index.items():
-                if key == lc_name or key.startswith(lc_name) or lc_name.startswith(key):
-                    pkg_path = os.path.join(pkg_dir, info['pkg'])
-                    pkg_targets.setdefault(pkg_path, set()).add(lc_name)
-                    matched = True
-                    break
-            if not matched:
-                # Not in index — will need full scan for this name
-                pass
+            if lc_name in tex_index:
+                pkg_path = os.path.join(pkg_dir, tex_index[lc_name]['pkg'])
+                pkg_targets.setdefault(pkg_path, set()).add(lc_name)
+            # not found in index → will fall through to full scan
 
     # For any names not found in index, scan all .pkg files
     indexed_names = set()
@@ -1369,10 +1424,9 @@ def _extract_all_textures(pkg_dir, texture_names):
 
             matched_key = None
             for sn in search_names:
-                if fn_base == sn or fn_base.startswith(sn):
-                    if sn in remaining:
-                        matched_key = sn
-                        break
+                if sn in remaining and fn_base == sn:
+                    matched_key = sn
+                    break
 
             if matched_key:
                 ci = t['chunk_idx']
@@ -1385,8 +1439,19 @@ def _extract_all_textures(pkg_dir, texture_names):
                 png_bytes = _decode_texture_to_png(pixel_data, t['width'], t['height'], t['format'])
                 if png_bytes:
                     orig_name = remaining.pop(matched_key)
-                    results[orig_name] = (png_bytes, dds_bytes)
                     pkg_name = os.path.basename(pkg_path)
+                    results[orig_name] = {
+                        'png': png_bytes,
+                        'dds': dds_bytes,
+                        'pkg': pkg_name,
+                        'pkg_entry_name': t['name'],
+                        'format': t['format'],
+                        'format_name': t.get('format_name', ''),
+                        'width': t['width'],
+                        'height': t['height'],
+                        'pixel_size': t['pixel_size'],
+                        'mip_count': t.get('mip_count', 1),
+                    }
                     src = "atlas" if t.get('atlas') else "tex2d"
                     print(f"  Found: {t['name']} ({t['width']}x{t['height']} "
                           f"fmt=0x{t['format']:X} {src}) in {pkg_name}")
@@ -1571,6 +1636,9 @@ def main():
     gpk_path = os.path.join(args.gpk_dir, f"{args.name}.gpk")
     sdb_path = os.path.join(args.gpk_dir, f"{args.name}.sdb")
     out_path = args.output or f"{args.name}.glb"
+    out_dir = os.path.dirname(out_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
 
     print(f"[1/5] Extracting GPK: {gpk_path}")
     entries = extract_all_from_gpk(gpk_path)
@@ -1654,6 +1722,18 @@ def main():
                     if gr2_i in mesh_tex_map:
                         local_mesh_tex[local_i] = mesh_tex_map[gr2_i]
 
+                # Check Lua GrannyTexture overrides (game can replace texture at runtime)
+                scripts_dir = os.path.join(os.path.dirname(os.path.dirname(args.gpk_dir)),
+                                           "Scripts")
+                lua_overrides = _load_granny_texture_overrides(scripts_dir)
+                char_lower = args.name.lower()
+                if char_lower in lua_overrides:
+                    lua_tex = lua_overrides[char_lower]
+                    print(f"  Lua GrannyTexture overrides: {lua_tex}")
+                    for lt in lua_tex:
+                        if lt not in unique_tex_names:
+                            unique_tex_names.append(lt)
+
                 # Also check fi->Textures as a fallback source
                 if not unique_tex_names:
                     unique_tex_names = _read_gr2_texture_names(fi)
@@ -1672,9 +1752,9 @@ def main():
 
                 if extracted:
                     texture_map = {}
-                    dds_dir = os.path.splitext(out_path)[0] + "_textures"
-                    os.makedirs(dds_dir, exist_ok=True)
-                    for tex_name, (png_bytes, dds_bytes) in extracted.items():
+                    out_dir = os.path.dirname(out_path)
+                    manifest_textures = {}
+                    for tex_name, tex_info in extracted.items():
                         # Find which local meshes use this texture
                         indices_for_tex = [li for li, tn in local_mesh_tex.items()
                                            if tn == tex_name]
@@ -1682,14 +1762,32 @@ def main():
                         if not indices_for_tex:
                             indices_for_tex = [i for i, mn in enumerate(mesh_names)
                                                if 'Outline' not in mn and 'Shadow' not in mn]
-                        texture_map[tex_name] = (png_bytes, indices_for_tex)
-                        dds_path = os.path.join(dds_dir, f"{tex_name}.dds")
-                        with open(dds_path, 'wb') as f:
-                            f.write(dds_bytes)
+                        texture_map[tex_name] = (tex_info['png'], indices_for_tex)
+                        # Save DDS + PNG alongside GLB
+                        dds_filename = f"{tex_name}.dds"
+                        with open(os.path.join(out_dir, dds_filename), 'wb') as f:
+                            f.write(tex_info['dds'])
+                        png_filename = f"{tex_name}.png"
+                        with open(os.path.join(out_dir, png_filename), 'wb') as f:
+                            f.write(tex_info['png'])
+                        # Build manifest entry
+                        manifest_textures[tex_name] = {
+                            'dds_file': dds_filename,
+                            'pkg': tex_info['pkg'],
+                            'pkg_entry_name': tex_info['pkg_entry_name'],
+                            'format': tex_info['format'],
+                            'format_name': tex_info['format_name'],
+                            'width': tex_info['width'],
+                            'height': tex_info['height'],
+                            'pixel_size': tex_info['pixel_size'],
+                            'mip_count': tex_info['mip_count'],
+                            'mesh_names': [mesh_names[i] for i in indices_for_tex],
+                        }
                     n_tex = len(texture_map)
                     n_meshes = sum(len(v[1]) for v in texture_map.values())
                     print(f"  {n_tex} texture(s) embedded, assigned to {n_meshes} mesh(es)")
                 else:
+                    manifest_textures = {}
                     print(f"  No textures found for {args.name}")
             except Exception as e:
                 import traceback
@@ -1706,8 +1804,30 @@ def main():
     print(f"  Saving GLB file...", flush=True)
     gltf.save(out_path)
     anim_msg = f", {len(anim_data)} animations" if anim_data else ""
-    tex_msg = ", textured" if texture_png else ""
+    tex_msg = ", textured" if (texture_map or texture_png) else ""
     print(f"\nDone!  {len(mesh_data_list)} meshes, {len(bones)} bones{anim_msg}{tex_msg} -> {out_path}")
+
+    # Write manifest for reimport
+    import json
+    manifest = {
+        'character': args.name,
+        'glb': os.path.basename(out_path),
+        'gpk': f"{args.name}.gpk",
+        'sdb': f"{args.name}.sdb",
+        'meshes': [{'name': mn, 'gr2_index': gi}
+                   for mn, gi in zip(mesh_names, exported_gr2_indices)],
+    }
+    if args.textures and 'manifest_textures' in dir():
+        manifest['textures'] = manifest_textures
+    if anim_data:
+        manifest['animations'] = {
+            'count': len(anim_data),
+            'names': [a['name'] for a in anim_data],
+        }
+    manifest_path = os.path.join(os.path.dirname(out_path), 'manifest.json')
+    with open(manifest_path, 'w') as f:
+        json.dump(manifest, f, indent=2)
+    print(f"  Manifest: {manifest_path}")
 
     dll.GrannyFreeFile(gr2_file)
     dll.GrannyFreeFile(sdb_file)

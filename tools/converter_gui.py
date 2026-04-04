@@ -318,35 +318,29 @@ class App:
         # ── Texture replacement section ──
         ttk.Separator(tab, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=12)
 
-        tex_box = ttk.LabelFrame(tab, text="Replace texture in Fx.pkg", padding=12)
+        tex_box = ttk.LabelFrame(tab, text="Install modified textures", padding=12)
         tex_box.pack(fill=tk.X)
 
         ttk.Label(tex_box, text=(
-            "Replace a 3D model texture. The DDS must have the same format,\n"
-            "dimensions, and mipmap count as the original."
+            "Replace textures using an export directory (with manifest.json).\n"
+            "Edit the DDS files in the export folder, then install them here."
         ), foreground="#555").pack(anchor=tk.W, pady=(0, 8))
 
         tex_row1 = ttk.Frame(tex_box)
         tex_row1.pack(fill=tk.X, pady=(0, 4))
-        ttk.Label(tex_row1, text="DDS file:", width=14, anchor=tk.W).pack(side=tk.LEFT)
-        self.tex_dds = tk.StringVar()
-        ttk.Entry(tex_row1, textvariable=self.tex_dds, width=42).pack(
+        ttk.Label(tex_row1, text="Export folder:", width=14, anchor=tk.W).pack(side=tk.LEFT)
+        self.tex_export_dir = tk.StringVar()
+        ttk.Entry(tex_row1, textvariable=self.tex_export_dir, width=42).pack(
             side=tk.LEFT, padx=6, fill=tk.X, expand=True)
         ttk.Button(tex_row1, text="Browse\u2026",
-                   command=self._browse_tex_dds).pack(side=tk.LEFT)
+                   command=self._browse_tex_dir).pack(side=tk.LEFT)
 
-        tex_row2 = ttk.Frame(tex_box)
-        tex_row2.pack(fill=tk.X, pady=(0, 4))
-        ttk.Label(tex_row2, text="Texture name:", width=14, anchor=tk.W).pack(side=tk.LEFT)
-        self.tex_name = tk.StringVar()
-        ttk.Entry(tex_row2, textvariable=self.tex_name, width=28).pack(
-            side=tk.LEFT, padx=6)
-        ttk.Label(tex_row2, text="e.g. MelinoeTransform_Color",
-                  foreground="#888").pack(side=tk.LEFT)
+        self._tex_info = ttk.Label(tex_box, text="", foreground="#555")
+        self._tex_info.pack(anchor=tk.W, pady=(2, 4))
 
         tex_btn_row = ttk.Frame(tex_box)
         tex_btn_row.pack(fill=tk.X, pady=(4, 0))
-        ttk.Button(tex_btn_row, text="Replace texture",
+        ttk.Button(tex_btn_row, text="Install textures",
                    command=self._replace_texture).pack(side=tk.LEFT)
         self._tex_status = ttk.Label(tex_btn_row, text="", foreground="#070")
         self._tex_status.pack(side=tk.LEFT, padx=12)
@@ -539,57 +533,130 @@ class App:
                     break
             self.inst_character.set(base)
 
-    def _browse_tex_dds(self):
-        p = filedialog.askopenfilename(
-            title="Select modified .dds file",
-            filetypes=[("DDS Textures", "*.dds"), ("All files", "*.*")],
-        )
+    def _browse_tex_dir(self):
+        p = filedialog.askdirectory(title="Select character export folder (with manifest.json)")
         if p:
-            self.tex_dds.set(p)
+            self.tex_export_dir.set(p)
+            # Show manifest info
+            manifest_path = os.path.join(p, 'manifest.json')
+            if os.path.isfile(manifest_path):
+                import json
+                with open(manifest_path) as f:
+                    m = json.load(f)
+                textures = m.get('textures', {})
+                if textures:
+                    names = ', '.join(textures.keys())
+                    self._tex_info.config(
+                        text=f"{m.get('character', '?')}: {len(textures)} texture(s) - {names}",
+                        foreground="#555")
+                else:
+                    self._tex_info.config(text="No textures in manifest", foreground="#a00")
+            else:
+                self._tex_info.config(text="No manifest.json found", foreground="#a00")
 
     def _replace_texture(self):
-        dds_path = self.tex_dds.get().strip()
-        tex_name = self.tex_name.get().strip()
-        if not dds_path or not os.path.isfile(dds_path):
-            messagebox.showwarning("No DDS file", "Select a .dds file first.")
+        export_dir = self.tex_export_dir.get().strip()
+        if not export_dir or not os.path.isdir(export_dir):
+            messagebox.showwarning("No folder", "Select an export folder first.")
             return
-        if not tex_name:
-            messagebox.showwarning("No texture name", "Enter the texture name to replace.")
+
+        manifest_path = os.path.join(export_dir, 'manifest.json')
+        if not os.path.isfile(manifest_path):
+            messagebox.showerror("No manifest",
+                                 f"manifest.json not found in:\n{export_dir}")
+            return
+
+        import json
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+
+        textures = manifest.get('textures', {})
+        if not textures:
+            messagebox.showinfo("Nothing to install", "No textures in manifest.")
             return
 
         game = self.game_path.get()
-        fx_pkg = os.path.join(game, "Content", "Packages", "1080p", "Fx.pkg")
-        if not os.path.isfile(fx_pkg):
-            messagebox.showerror("Fx.pkg not found", f"Not found:\n{fx_pkg}")
-            return
-
-        # Backup Fx.pkg
-        backup_dir = os.path.join(game, "Content", "Packages", "1080p", "_backups")
+        pkg_dir = os.path.join(game, "Content", "Packages", "1080p")
+        backup_dir = os.path.join(pkg_dir, "_backups")
         os.makedirs(backup_dir, exist_ok=True)
-        backup_path = os.path.join(backup_dir, "Fx.pkg")
-        if not os.path.isfile(backup_path):
-            self._tex_status.config(text="Backing up Fx.pkg...", foreground="#555")
+
+        from pkg_texture import replace_texture, png_to_dds
+
+        ok_count = 0
+        fail_count = 0
+        errors = []
+        for tex_name, tex_info in textures.items():
+            dds_file = tex_info.get('dds_file', f"{tex_name}.dds")
+            dds_path = os.path.join(export_dir, dds_file)
+            png_path = os.path.join(export_dir, f"{tex_name}.png")
+
+            # PNG path: if a .png exists (edited in Blender/Photoshop), compress it to DDS
+            if os.path.isfile(png_path):
+                if not os.path.isfile(dds_path) or \
+                        os.path.getmtime(png_path) > os.path.getmtime(dds_path):
+                    self._tex_status.config(
+                        text=f"Compressing {tex_name}.png -> DDS...", foreground="#555")
+                    self.root.update()
+                    try:
+                        dds_bytes = png_to_dds(
+                            png_path,
+                            tex_info.get('format', 0x1C),
+                            tex_info.get('width', 512),
+                            tex_info.get('height', 512),
+                            tex_info.get('mip_count', 6),
+                        )
+                        with open(dds_path, 'wb') as f:
+                            f.write(dds_bytes)
+                        print(f"  Compressed {tex_name}.png -> {dds_file} "
+                              f"({len(dds_bytes):,} bytes)")
+                    except Exception as e:
+                        errors.append(f"{tex_name}: PNG compression failed: {e}")
+                        fail_count += 1
+                        continue
+
+            if not os.path.isfile(dds_path):
+                errors.append(f"{tex_name}: no DDS or PNG file found")
+                fail_count += 1
+                continue
+
+            pkg_name = tex_info.get('pkg', '')
+            pkg_path = os.path.join(pkg_dir, pkg_name)
+            if not os.path.isfile(pkg_path):
+                errors.append(f"{tex_name}: {pkg_name} not found")
+                fail_count += 1
+                continue
+
+            # Backup the .pkg if not already backed up
+            backup_path = os.path.join(backup_dir, pkg_name)
+            if not os.path.isfile(backup_path):
+                self._tex_status.config(text=f"Backing up {pkg_name}...", foreground="#555")
+                self.root.update()
+                shutil.copy2(pkg_path, backup_path)
+
+            self._tex_status.config(text=f"Replacing {tex_name}...", foreground="#555")
             self.root.update()
-            shutil.copy2(fx_pkg, backup_path)
 
-        self._tex_status.config(text="Replacing texture...", foreground="#555")
-        self.root.update()
+            try:
+                entry_name = tex_info.get('pkg_entry_name', tex_name)
+                if replace_texture(pkg_path, entry_name, dds_path, pkg_path):
+                    ok_count += 1
+                else:
+                    errors.append(f"{tex_name}: not found in {pkg_name}")
+                    fail_count += 1
+            except Exception as e:
+                errors.append(f"{tex_name}: {e}")
+                fail_count += 1
 
-        try:
-            from pkg_texture import replace_texture
-            ok = replace_texture(fx_pkg, tex_name, dds_path, fx_pkg)
-            if ok:
-                self._tex_status.config(text="Texture replaced!", foreground="#070")
-                messagebox.showinfo("Texture replaced",
-                                    f"Replaced '{tex_name}' in Fx.pkg.\n"
-                                    "Launch the game to see your changes.")
-            else:
-                self._tex_status.config(text="Failed", foreground="#a00")
-                messagebox.showwarning("Replace failed",
-                                       f"Could not find texture '{tex_name}' in Fx.pkg.")
-        except Exception as e:
-            self._tex_status.config(text="Error", foreground="#a00")
-            messagebox.showerror("Error", str(e))
+        if fail_count == 0:
+            self._tex_status.config(text=f"{ok_count} texture(s) installed!", foreground="#070")
+            messagebox.showinfo("Textures installed",
+                                f"Replaced {ok_count} texture(s).\n"
+                                "Launch the game to see your changes.")
+        else:
+            self._tex_status.config(text=f"{ok_count} ok, {fail_count} failed", foreground="#a00")
+            detail = "\n".join(errors[:10])
+            messagebox.showwarning("Partial install",
+                                   f"{ok_count} replaced, {fail_count} failed.\n\n{detail}")
 
     # ── Export logic ──────────────────────────────────────────────────────────
 
@@ -660,11 +727,14 @@ class App:
 
         # Build command list for all exports
         def _build_cmd(name):
+            # Each character gets its own subdirectory
+            char_dir = os.path.join(out_dir, name)
+            os.makedirs(char_dir, exist_ok=True)
             cmd = [
                 sys.executable, EXPORTER, name,
                 "--gpk-dir", gpk_dir,
                 "--dll",     dll,
-                "-o",        os.path.join(out_dir, f"{name}.glb"),
+                "-o",        os.path.join(char_dir, f"{name}.glb"),
             ]
             if self.exp_animations.get():
                 cmd.append("--animations")
@@ -691,6 +761,7 @@ class App:
                     proc = subprocess.Popen(
                         _build_cmd(name), stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT, text=True, bufsize=1,
+                        encoding='utf-8', errors='replace',
                     )
                     for line in proc.stdout:
                         self._log_write_ui(self._exp_log, line)
@@ -734,6 +805,7 @@ class App:
                 proc = subprocess.Popen(
                     _build_cmd(name), stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT, text=True, bufsize=1,
+                    encoding='utf-8', errors='replace',
                 )
                 active[name] = proc
                 q = _queue.Queue()
@@ -894,7 +966,7 @@ class App:
         try:
             proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1,
+                text=True, bufsize=1, encoding='utf-8', errors='replace',
             )
             for line in proc.stdout:
                 self._log_write_ui(self._imp_log, line)
