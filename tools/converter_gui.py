@@ -1064,10 +1064,43 @@ class App:
                                                 'backup': os.path.join(pkg_dir, "_backups", target_pkg),
                                                 'target': os.path.join(pkg_dir, target_pkg),
                                                 'texture': tex_name,
+                                                'entry_name': f"GR2\\{tex_name}",
+                                                'custom': True,
                                             })
                                             results.append(f"Custom texture: {tex_name} added to {target_pkg}")
+
+                                            # Save PNG to export dir for future reinstalls
+                                            png_out = os.path.join(export_dir, f"{tex_name}.png")
+                                            if not os.path.isfile(png_out):
+                                                with open(png_out, 'wb') as pf:
+                                                    pf.write(png_data)
+
+                                            # Merge into manifest for complete tracking
+                                            import hashlib as _hl2
+                                            manifest.setdefault('textures', {})[tex_name] = {
+                                                'dds_file': f"{tex_name}.dds",
+                                                'pkg': target_pkg,
+                                                'pkgs': [target_pkg],
+                                                'pkg_entry_name': f"GR2\\{tex_name}",
+                                                'format': 28,
+                                                'format_name': 'BC7',
+                                                'width': min(tex_w, 512),
+                                                'height': min(tex_h, 512),
+                                                'pixel_size': 349440,
+                                                'mip_count': 6,
+                                                'png_hash': _hl2.md5(png_data).hexdigest(),
+                                                'mesh_names': [tex_info.get('mesh_name', '')],
+                                                'custom': True,
+                                            }
                                         else:
                                             errors.append(f"Custom texture '{tex_name}' install failed")
+
+                                # Update manifest with custom texture info
+                                manifest_path = os.path.join(export_dir, 'manifest.json')
+                                import json as _mj
+                                with open(manifest_path, 'w') as _mf:
+                                    _mj.dump(manifest, _mf, indent=2)
+
                                 os.unlink(ct_path)
                         else:
                             errors.append(f"Mesh import failed (exit code {proc.returncode})")
@@ -1228,7 +1261,8 @@ class App:
                     if not os.path.isfile(dds_path):
                         continue
 
-                    # Replace in ALL .pkg files that contain this texture
+                    # Install texture: replace existing or add new (custom)
+                    is_custom = tex_info.get('custom', False)
                     entry_name = tex_info.get('pkg_entry_name', tex_name)
                     pkg_list = tex_info.get('pkgs', [tex_info.get('pkg', '')])
                     replaced_in = []
@@ -1242,7 +1276,14 @@ class App:
                             shutil.copy2(pkg_path, backup_path)
 
                         try:
-                            if replace_texture(pkg_path, entry_name, dds_path, pkg_path):
+                            # Try replace first (works for existing textures and re-installs
+                            # where the custom entry was already added)
+                            ok = replace_texture(pkg_path, entry_name, dds_path, pkg_path)
+                            if not ok and is_custom:
+                                # Entry not found — add it (first install of custom texture)
+                                from pkg_texture import add_texture_entry
+                                ok = add_texture_entry(pkg_path, entry_name, dds_path, pkg_path)
+                            if ok:
                                 modified_files.append({
                                     'type': 'pkg', 'backup': backup_path, 'target': pkg_path,
                                     'texture': tex_name, 'entry_name': entry_name,
