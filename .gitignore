@@ -8,15 +8,25 @@ tools/debug/
 
 # Build / output
 out/
+build/
 *.glb
 *.gltf
 *.gpk
 *.gr2
+*.dds
 
 # Ghidra project internals
 GhidraHades2.rep/
 Hades2.gpr
 Hades2.rep/
+*.lock
+*.lock~
+
+# External data (not ours)
+index.json
+
+# Texture index (generated)
+_texture_index.json
 
 # Windows
 *.lnk
