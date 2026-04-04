@@ -508,15 +508,23 @@ def find_replacement_targets(pkg_dir, width, height, fmt, count=5):
 
 
 def install_custom_texture(pkg_dir, texture_name, png_path_or_bytes, width, height,
-                           fmt=0x1C, mip_count=6, target_pkg=None):
+                           fmt=0x1C, mip_count=6, target_pkg=None,
+                           max_size=512):
     """
     Install a custom texture by adding a NEW entry to a .pkg file.
     texture_name: base name for the entry (e.g. 'MyCustomTexture')
     png_path_or_bytes: path to PNG file or raw PNG bytes
     target_pkg: specific .pkg to add to (default: Fx.pkg)
+    max_size: max texture dimension (default 512 to match game standard)
     Returns the texture base name on success, or None on failure.
     """
     import tempfile
+
+    # Clamp dimensions to game standard
+    if width > max_size or height > max_size:
+        print(f"  Resizing {width}x{height} -> {max_size}x{max_size}")
+        width = min(width, max_size)
+        height = min(height, max_size)
 
     # Compress PNG to DDS
     if isinstance(png_path_or_bytes, bytes):

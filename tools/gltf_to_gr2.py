@@ -1597,39 +1597,48 @@ def patch_vertex_data(
                 except Exception:
                     pass
 
+            # Find outline/shadow templates for correct material inheritance
+            _outline_tmpl = next((gm for gm in gr2_mesh_list if 'Outline' in gm['name']), None)
+            _shadow_tmpl = next((gm for gm in gr2_mesh_list if 'ShadowMesh' in gm['name']), None)
+
             for glb_m in glb_group:
+                # Pick the right template based on mesh type
+                mesh_name = glb_m['name']
+                if 'Outline' in mesh_name and _outline_tmpl:
+                    use_template = _outline_tmpl
+                elif ('ShadowMesh' in mesh_name or 'Shadow' in mesh_name) and _shadow_tmpl:
+                    use_template = _shadow_tmpl
+                else:
+                    use_template = template
+
                 # Check if this mesh needs a custom material
                 custom_mat_ptr = None
                 glb_tex = glb_m.get('texture_name')
-                if glb_tex and glb_tex not in existing_tex_names:
-                    # New texture — check if it already exists in game .pkg files
-                    # If so, just reference it. If not, it needs custom installation.
+                is_shader_mesh = 'Outline' in mesh_name or 'Shadow' in mesh_name
+                if glb_tex and glb_tex not in existing_tex_names and not is_shader_mesh:
                     from pkg_texture import load_texture_index
                     tex_index = load_texture_index(
                         os.path.join(os.path.dirname(os.path.dirname(
                             os.path.abspath(gpk_path))), "Packages", "1080p"))
                     glb_tex_lower = glb_tex.lower()
                     if tex_index and glb_tex_lower in tex_index:
-                        # Texture exists in game — reference it directly
                         tex_filename = f"D:/mod/{glb_tex}.png"
-                        print(f"  Reusing existing game texture '{glb_tex}' for '{glb_m['name']}'")
+                        print(f"  Reusing existing game texture '{glb_tex}' for '{mesh_name}'")
                     else:
-                        # Truly custom texture — needs .pkg installation later
                         tex_filename = f"D:/mod/{glb_tex}.png"
-                        # Record for later installation
                         if not hasattr(convert, '_custom_textures'):
                             convert._custom_textures = {}
                         convert._custom_textures[glb_tex] = {
                             'glb_image_index': glb_m.get('texture_image_index'),
-                            'mesh_name': glb_m['name'],
+                            'mesh_name': mesh_name,
                         }
-                        print(f"  NEW custom texture '{glb_tex}' for '{glb_m['name']}' "
+                        print(f"  NEW custom texture '{glb_tex}' for '{mesh_name}' "
                               f"(needs .pkg installation)")
                     custom_mat_ptr = _create_granny_material_chain(
-                        dll, glb_m['name'].split(':')[-1], tex_filename)
-                    existing_tex_names.add(glb_tex)  # don't create duplicates
+                        dll, mesh_name.split(':')[-1], tex_filename)
+                    existing_tex_names.add(glb_tex)
 
-                new_mesh_ptr = _create_new_mesh(dll, fi, glb_m, skel_bones, template,
+                new_mesh_ptr = _create_new_mesh(dll, fi, glb_m, skel_bones, use_template,
                                                 material_ptr=custom_mat_ptr)
                 if new_mesh_ptr is not None:
                     # Expand fi->Meshes array
@@ -1907,12 +1916,34 @@ def convert(
         if template is None:
             template = gr2_mesh_list[0] if gr2_mesh_list else None
 
+        # Also find outline and shadow templates for correct material inheritance
+        outline_template = None
+        shadow_template = None
+        for _gm in gr2_mesh_list:
+            if 'Outline' in _gm['name'] and outline_template is None:
+                outline_template = _gm
+            if 'ShadowMesh' in _gm['name'] and shadow_template is None:
+                shadow_template = _gm
+
         if template:
             skel_bones = template.get('bb_names', [])
             for glb_m in remaining_glb:
+                # Pick the right template based on mesh type
+                mesh_name = glb_m['name']
+                if 'Outline' in mesh_name and outline_template:
+                    use_template = outline_template
+                elif 'ShadowMesh' in mesh_name and shadow_template:
+                    use_template = shadow_template
+                elif 'Shadow' in mesh_name and shadow_template:
+                    use_template = shadow_template
+                else:
+                    use_template = template
+
                 custom_mat_ptr = None
                 glb_tex = glb_m.get('texture_name')
-                if glb_tex and glb_tex not in existing_tex_names:
+                # Outline/shadow meshes don't need custom materials
+                is_shader_mesh = 'Outline' in mesh_name or 'Shadow' in mesh_name
+                if glb_tex and glb_tex not in existing_tex_names and not is_shader_mesh:
                     tex_filename = f"D:/mod/{glb_tex}.png"
                     from pkg_texture import load_texture_index
                     tex_index = load_texture_index(
@@ -1932,7 +1963,7 @@ def convert(
                         dll, glb_m['name'].split(':')[-1], tex_filename)
                     existing_tex_names.add(glb_tex)
 
-                new_mesh_ptr = _create_new_mesh(dll, fi, glb_m, skel_bones, template,
+                new_mesh_ptr = _create_new_mesh(dll, fi, glb_m, skel_bones, use_template,
                                                 material_ptr=custom_mat_ptr)
                 if new_mesh_ptr is not None:
                     _meshes_off = _t('granny_file_info', 'Meshes')
