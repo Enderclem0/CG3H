@@ -1602,12 +1602,32 @@ def patch_vertex_data(
                 custom_mat_ptr = None
                 glb_tex = glb_m.get('texture_name')
                 if glb_tex and glb_tex not in existing_tex_names:
-                    # New texture — create a new material chain
-                    # Use a synthetic path; the basename is what matters for the game's hash lookup
-                    tex_filename = f"D:/mod/{glb_tex}.png"
+                    # New texture — check if it already exists in game .pkg files
+                    # If so, just reference it. If not, it needs custom installation.
+                    from pkg_texture import load_texture_index
+                    tex_index = load_texture_index(
+                        os.path.join(os.path.dirname(os.path.dirname(
+                            os.path.abspath(gpk_path))), "Packages", "1080p"))
+                    glb_tex_lower = glb_tex.lower()
+                    if tex_index and glb_tex_lower in tex_index:
+                        # Texture exists in game — reference it directly
+                        tex_filename = f"D:/mod/{glb_tex}.png"
+                        print(f"  Reusing existing game texture '{glb_tex}' for '{glb_m['name']}'")
+                    else:
+                        # Truly custom texture — needs .pkg installation later
+                        tex_filename = f"D:/mod/{glb_tex}.png"
+                        # Record for later installation
+                        if not hasattr(convert, '_custom_textures'):
+                            convert._custom_textures = {}
+                        convert._custom_textures[glb_tex] = {
+                            'glb_image_index': glb_m.get('texture_image_index'),
+                            'mesh_name': glb_m['name'],
+                        }
+                        print(f"  NEW custom texture '{glb_tex}' for '{glb_m['name']}' "
+                              f"(needs .pkg installation)")
                     custom_mat_ptr = _create_granny_material_chain(
                         dll, glb_m['name'].split(':')[-1], tex_filename)
-                    print(f"  Custom material for '{glb_m['name']}': texture={glb_tex}")
+                    existing_tex_names.add(glb_tex)  # don't create duplicates
 
                 new_mesh_ptr = _create_new_mesh(dll, fi, glb_m, skel_bones, template,
                                                 material_ptr=custom_mat_ptr)
@@ -1855,11 +1875,135 @@ def convert(
     if total_patched == 0:
         raise RuntimeError("No meshes were patched — nothing to write")
 
-    # Warn about unmatched GLB meshes
-    if remaining_glb:
-        print(f"\n  WARNING: {len(remaining_glb)} GLB mesh(es) did not match any entry:")
-        for m in remaining_glb[:5]:
+    # Unmatched GLB meshes = new meshes added in Blender
+    # Add them to the first mesh entry
+    if remaining_glb and mesh_entry_names:
+        first_entry = mesh_entry_names[0]
+        print(f"\n  Adding {len(remaining_glb)} new mesh(es) to '{first_entry}':")
+        for m in remaining_glb:
             print(f"    {m['name']}")
+
+        gr2_bytes = gpk_entries[first_entry]
+        gr2_file, sdb_file, fi, sdb_dict, sdb_crc, _keep = load_gr2(dll, gr2_bytes, sdb_bytes)
+        gr2_mesh_list = get_gr2_meshes(fi)
+
+        # Collect existing textures for custom material detection
+        existing_tex_names = set()
+        for _gm in gr2_mesh_list:
+            try:
+                from gr2_to_gltf import _resolve_mesh_texture
+                tex = _resolve_mesh_texture(_gm['mesh_ptr'])
+                if tex:
+                    existing_tex_names.add(tex)
+            except Exception:
+                pass
+
+        # Find template
+        template = None
+        for _gm in gr2_mesh_list:
+            if 'Outline' not in _gm['name'] and 'Shadow' not in _gm['name']:
+                template = _gm
+                break
+        if template is None:
+            template = gr2_mesh_list[0] if gr2_mesh_list else None
+
+        if template:
+            skel_bones = template.get('bb_names', [])
+            for glb_m in remaining_glb:
+                custom_mat_ptr = None
+                glb_tex = glb_m.get('texture_name')
+                if glb_tex and glb_tex not in existing_tex_names:
+                    tex_filename = f"D:/mod/{glb_tex}.png"
+                    from pkg_texture import load_texture_index
+                    tex_index = load_texture_index(
+                        os.path.join(os.path.dirname(os.path.dirname(
+                            os.path.abspath(gpk_path))), "Packages", "1080p"))
+                    if not (tex_index and glb_tex.lower() in tex_index):
+                        if not hasattr(convert, '_custom_textures'):
+                            convert._custom_textures = {}
+                        convert._custom_textures[glb_tex] = {
+                            'glb_image_index': glb_m.get('texture_image_index'),
+                            'mesh_name': glb_m['name'],
+                        }
+                        print(f"  NEW custom texture '{glb_tex}' (needs .pkg installation)")
+                    else:
+                        print(f"  Reusing existing game texture '{glb_tex}'")
+                    custom_mat_ptr = _create_granny_material_chain(
+                        dll, glb_m['name'].split(':')[-1], tex_filename)
+                    existing_tex_names.add(glb_tex)
+
+                new_mesh_ptr = _create_new_mesh(dll, fi, glb_m, skel_bones, template,
+                                                material_ptr=custom_mat_ptr)
+                if new_mesh_ptr is not None:
+                    _meshes_off = _t('granny_file_info', 'Meshes')
+                    old_count = ri(fi, _meshes_off)
+                    old_arr = rq(fi, _meshes_off + 4)
+                    new_count = old_count + 1
+                    new_arr = (ctypes.c_uint8 * (new_count * 8))()
+                    if _valid_ptr(old_arr):
+                        ctypes.memmove(new_arr, old_arr, old_count * 8)
+                    struct.pack_into('<Q', new_arr, old_count * 8, new_mesh_ptr)
+                    _keepalive.append(new_arr)
+                    struct.pack_into('<i', (ctypes.c_uint8 * 4).from_address(fi + _meshes_off), 0, new_count)
+                    struct.pack_into('<Q', (ctypes.c_uint8 * 8).from_address(fi + _meshes_off + 4), 0, ctypes.addressof(new_arr))
+
+                    model_count = ri(fi, 0x60)
+                    if model_count > 0:
+                        model0 = rq(rq(fi, 0x64), 0)
+                        mb_off = 0x54
+                        old_mb_count = ri(model0, mb_off)
+                        old_mb_ptr = rq(model0, mb_off + 4)
+                        new_mb_count = old_mb_count + 1
+                        new_mb_arr = (ctypes.c_uint8 * (new_mb_count * 8))()
+                        if _valid_ptr(old_mb_ptr):
+                            ctypes.memmove(new_mb_arr, old_mb_ptr, old_mb_count * 8)
+                        struct.pack_into('<Q', new_mb_arr, old_mb_count * 8, new_mesh_ptr)
+                        _keepalive.append(new_mb_arr)
+                        struct.pack_into('<i', (ctypes.c_uint8 * 4).from_address(model0 + mb_off), 0, new_mb_count)
+                        struct.pack_into('<Q', (ctypes.c_uint8 * 8).from_address(model0 + mb_off + 4), 0, ctypes.addressof(new_mb_arr))
+
+                    if custom_mat_ptr is not None:
+                        try:
+                            mats_off = _t('granny_file_info', 'Materials')
+                            old_mc = ri(fi, mats_off)
+                            old_ma = rq(fi, mats_off + 4)
+                            new_mc = old_mc + 1
+                            new_ma = (ctypes.c_uint8 * (new_mc * 8))()
+                            if _valid_ptr(old_ma):
+                                ctypes.memmove(new_ma, old_ma, old_mc * 8)
+                            struct.pack_into('<Q', new_ma, old_mc * 8, custom_mat_ptr)
+                            _keepalive.append(new_ma)
+                            struct.pack_into('<i', (ctypes.c_uint8 * 4).from_address(fi + mats_off), 0, new_mc)
+                            struct.pack_into('<Q', (ctypes.c_uint8 * 8).from_address(fi + mats_off + 4), 0, ctypes.addressof(new_ma))
+                        except KeyError:
+                            pass
+                        try:
+                            texs_off = _t('granny_file_info', 'Textures')
+                            maps_ptr = rq(custom_mat_ptr, 0x0C)
+                            inner_mat = rq(maps_ptr, 0x08)
+                            tex_ptr = rq(inner_mat, 0x14)
+                            old_tc = ri(fi, texs_off)
+                            old_ta = rq(fi, texs_off + 4)
+                            new_tc = old_tc + 1
+                            new_ta = (ctypes.c_uint8 * (new_tc * 8))()
+                            if _valid_ptr(old_ta):
+                                ctypes.memmove(new_ta, old_ta, old_tc * 8)
+                            struct.pack_into('<Q', new_ta, old_tc * 8, tex_ptr)
+                            _keepalive.append(new_ta)
+                            struct.pack_into('<i', (ctypes.c_uint8 * 4).from_address(fi + texs_off), 0, new_tc)
+                            struct.pack_into('<Q', (ctypes.c_uint8 * 8).from_address(fi + texs_off + 4), 0, ctypes.addressof(new_ta))
+                        except KeyError:
+                            pass
+
+                    total_patched += 1
+
+            # Re-serialize this entry with the new meshes
+            new_gr2 = build_gr2_bytes(dll, fi, gr2_bytes, sdb_dict, sdb_crc)
+            gpk_entries[first_entry] = new_gr2
+            _keepalive.clear()
+
+        dll.GrannyFreeFile(gr2_file)
+        dll.GrannyFreeFile(sdb_file)
 
     # Patch animation entries if requested
     n_anim_patched = 0
@@ -1870,6 +2014,18 @@ def convert(
         print(f"  {n_anim_patched} animation(s) patched")
 
     pack_gpk(gpk_entries, output_gpk)
+
+    # Write custom texture requirements for the GUI installer
+    custom_textures = getattr(convert, '_custom_textures', {})
+    if custom_textures:
+        import json
+        ct_path = output_gpk.replace('.gpk', '_custom_textures.json')
+        with open(ct_path, 'w') as f:
+            json.dump(custom_textures, f, indent=2)
+        print(f"  Custom textures needed: {list(custom_textures.keys())}")
+        print(f"  Written: {ct_path}")
+        convert._custom_textures = {}  # reset for next call
+
     anim_msg = f", {n_anim_patched} animation(s)" if n_anim_patched else ""
     print(f"\nDone!  {total_patched} mesh(es){anim_msg} patched -> {output_gpk!r}")
 

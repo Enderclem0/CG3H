@@ -997,6 +997,78 @@ class App:
                                 'type': 'gpk', 'backup': backup_path, 'target': target,
                             })
                             results.append(f"Mesh installed ({character}.gpk)")
+
+                            # Check for custom textures that need .pkg installation
+                            ct_path = gpk_out.replace('.gpk', '_custom_textures.json')
+                            if os.path.isfile(ct_path):
+                                import json as _json
+                                with open(ct_path) as _cf:
+                                    custom_textures = _json.load(_cf)
+                                if custom_textures:
+                                    self._log_write_ui(self._inst_log,
+                                        f"  Installing {len(custom_textures)} custom texture(s)...\n")
+                                    from pkg_texture import install_custom_texture
+                                    glb_textures = {}
+                                    try:
+                                        from gltf_to_gr2 import extract_glb_textures
+                                        glb_textures = extract_glb_textures(glb_path)
+                                    except Exception:
+                                        pass
+
+                                    for tex_name, tex_info in custom_textures.items():
+                                        png_data = glb_textures.get(tex_name)
+                                        if not png_data:
+                                            png_file = os.path.join(export_dir, f"{tex_name}.png")
+                                            if os.path.isfile(png_file):
+                                                png_data = open(png_file, 'rb').read()
+                                        if not png_data:
+                                            errors.append(f"Custom texture '{tex_name}': no PNG found")
+                                            continue
+
+                                        # Get dimensions from PNG
+                                        try:
+                                            from PIL import Image
+                                            import io
+                                            img = Image.open(io.BytesIO(png_data))
+                                            tex_w, tex_h = img.size
+                                        except Exception:
+                                            tex_w, tex_h = 512, 512
+
+                                        # Pick target .pkg from manifest (same as character's textures)
+                                        target_pkg = None
+                                        manifest_textures = manifest.get('textures', {})
+                                        for ti in manifest_textures.values():
+                                            if not ti.get('variant'):
+                                                target_pkg = ti.get('pkg')
+                                                if target_pkg:
+                                                    break
+                                        if not target_pkg:
+                                            target_pkg = 'Fx.pkg'
+
+                                        self._log_write_ui(self._inst_log,
+                                            f"  Adding '{tex_name}' ({tex_w}x{tex_h}) to {target_pkg}...\n")
+
+                                        # Backup target pkg
+                                        pkg_bak = os.path.join(pkg_dir, "_backups", target_pkg)
+                                        pkg_full = os.path.join(pkg_dir, target_pkg)
+                                        if not os.path.isfile(pkg_bak) and os.path.isfile(pkg_full):
+                                            os.makedirs(os.path.join(pkg_dir, "_backups"), exist_ok=True)
+                                            shutil.copy2(pkg_full, pkg_bak)
+
+                                        result = install_custom_texture(
+                                            pkg_dir, tex_name, png_data, tex_w, tex_h,
+                                            target_pkg=target_pkg)
+                                        if result:
+                                            modified_files.append({
+                                                'type': 'pkg',
+                                                'backup': os.path.join(pkg_dir, "_backups", target_pkg),
+                                                'target': os.path.join(pkg_dir, target_pkg),
+                                                'texture': tex_name,
+                                            })
+                                            results.append(f"Custom texture: {tex_name} added to {target_pkg}")
+                                        else:
+                                            errors.append(f"Custom texture '{tex_name}' install failed")
+                                os.unlink(ct_path)
                         else:
                             errors.append(f"Mesh import failed (exit code {proc.returncode})")
                     except Exception as e:

@@ -481,6 +481,226 @@ def _update_pkg_checksum(pkg_path):
         print(f"  WARNING: {pkg_name} not found in checksums.txt")
 
 
+def find_replacement_targets(pkg_dir, width, height, fmt, count=5):
+    """
+    Find existing texture entries that can be replaced with a custom texture.
+    Prefers exact dimension match, then same pixel_size.
+    Returns list of (base_name, info_dict) sorted by best match first.
+    """
+    index = load_texture_index(pkg_dir)
+    if not index:
+        return []
+
+    exact = []
+    compatible = []
+    for key, info in index.items():
+        if info['format'] != fmt:
+            continue
+        if info['width'] == width and info['height'] == height:
+            exact.append((key, info))
+        elif info['pixel_size'] >= width * height:  # roughly enough space
+            compatible.append((key, info))
+
+    # Prefer exact dimension matches, sorted by name (deterministic)
+    exact.sort(key=lambda x: x[0])
+    compatible.sort(key=lambda x: x[1]['pixel_size'])
+    return (exact + compatible)[:count]
+
+
+def install_custom_texture(pkg_dir, texture_name, png_path_or_bytes, width, height,
+                           fmt=0x1C, mip_count=6, target_pkg=None):
+    """
+    Install a custom texture by adding a NEW entry to a .pkg file.
+    texture_name: base name for the entry (e.g. 'MyCustomTexture')
+    png_path_or_bytes: path to PNG file or raw PNG bytes
+    target_pkg: specific .pkg to add to (default: Fx.pkg)
+    Returns the texture base name on success, or None on failure.
+    """
+    import tempfile
+
+    # Compress PNG to DDS
+    if isinstance(png_path_or_bytes, bytes):
+        tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+        tmp.write(png_path_or_bytes)
+        tmp.close()
+        png_path = tmp.name
+        cleanup = True
+    else:
+        png_path = png_path_or_bytes
+        cleanup = False
+
+    try:
+        dds_bytes = png_to_dds(png_path, fmt, width, height, mip_count)
+    finally:
+        if cleanup:
+            os.unlink(png_path)
+
+    # Write temp DDS
+    dds_tmp = tempfile.NamedTemporaryFile(suffix='.dds', delete=False)
+    dds_tmp.write(dds_bytes)
+    dds_tmp.close()
+
+    try:
+        # Add to target .pkg (default: Fx.pkg — always loaded)
+        if target_pkg is None:
+            target_pkg = 'Fx.pkg'
+        pkg_path = os.path.join(pkg_dir, target_pkg)
+        if not os.path.isfile(pkg_path):
+            print(f"  ERROR: {target_pkg} not found")
+            return None
+
+        entry_name = f"GR2\\{texture_name}"
+        if add_texture_entry(pkg_path, entry_name, dds_tmp.name, pkg_path):
+            print(f"  Added custom texture '{texture_name}' to {target_pkg}")
+            return texture_name
+        else:
+            print(f"  ERROR: Failed to add texture to {target_pkg}")
+            return None
+    finally:
+        os.unlink(dds_tmp.name)
+
+
+def add_texture_entry(pkg_path, entry_name, dds_path, output_path=None):
+    """
+    Add a NEW texture entry to a .pkg file.
+    Inserts before the chunk terminator (0xBE/0xFF).
+    entry_name: full path like 'GR2\\MyCustomTexture'
+    Returns True on success.
+    """
+    if output_path is None:
+        output_path = pkg_path
+
+    # Read DDS
+    with open(dds_path, 'rb') as f:
+        dds_raw = f.read()
+    if dds_raw[:4] != b'DDS ':
+        raise ValueError(f"Not a DDS file: {dds_path}")
+    dds_header_size = 128
+    if dds_raw[84:88] == b'DX10':
+        dds_header_size += 20
+    dds_w = struct.unpack_from('<I', dds_raw, 16)[0]
+    dds_h = struct.unpack_from('<I', dds_raw, 12)[0]
+    dds_mips = struct.unpack_from('<I', dds_raw, 28)[0]
+    pixel_data = dds_raw[dds_header_size:]
+
+    # Detect format from DDS
+    fourcc = dds_raw[84:88]
+    if fourcc == b'DX10':
+        dxgi = struct.unpack_from('<I', dds_raw, 128)[0]
+        if dxgi == 98:
+            fmt = 0x1C  # BC7
+        else:
+            fmt = dxgi
+    elif fourcc == b'DXT5':
+        fmt = 0x06
+    elif fourcc == b'DXT1':
+        fmt = 0x04
+    else:
+        fmt = 0x1C  # default BC7
+
+    # Build the new entry bytes (no XNB wrapper for Tex2D entries... wait, they need XNB)
+    # Entry format: tag(1) + CSString(name) + BE_size(4) + XNB(10) + tex_header(20) + pixels
+
+    # CSString: 7-bit length + raw bytes
+    name_bytes = entry_name.encode('utf-8')
+    if len(name_bytes) < 128:
+        cs_string = bytes([len(name_bytes)]) + name_bytes
+    else:
+        # 7-bit encoding for longer strings
+        n = len(name_bytes)
+        cs = bytearray()
+        while n >= 128:
+            cs.append((n & 0x7F) | 0x80)
+            n >>= 7
+        cs.append(n)
+        cs_string = bytes(cs) + name_bytes
+
+    # XNB header (10 bytes)
+    xnb_content_size = 20 + len(pixel_data)  # tex header + pixels
+    xnb_total = 10 + xnb_content_size
+    xnb_header = b'XNBw\x06\x00' + struct.pack('<I', xnb_total)
+
+    # Texture header (20 bytes): fmt, w, h, depth=1, pixel_size
+    tex_header = struct.pack('<IIIII', fmt, dds_w, dds_h, 1, len(pixel_data))
+
+    # Total data size (for the BE size field)
+    total_data = len(xnb_header) + len(tex_header) + len(pixel_data)
+
+    # Build complete entry
+    entry = bytearray()
+    entry.append(0xAD)  # Tex2D tag
+    entry.extend(cs_string)
+    entry.extend(struct.pack('<I', _swap32(total_data)))  # big-endian size
+    entry.extend(xnb_header)
+    entry.extend(tex_header)
+    entry.extend(pixel_data)
+
+    # Read and decompress the .pkg
+    with open(pkg_path, 'rb') as f:
+        raw = bytearray(f.read())
+
+    header_raw = struct.unpack_from('<I', raw, 0)[0]
+    header = _swap32(header_raw)
+    compressed = (header & 0x20000000) != 0
+
+    # Find the LAST chunk and insert before its terminator
+    chunks = []
+    off = 4
+    while off < len(raw):
+        flag_off = off
+        flag = raw[off]; off += 1
+        if flag == 0:
+            break
+        comp_size = _swap32(struct.unpack_from('<I', raw, off)[0])
+        size_off = off
+        off += 4
+        data_off = off
+        decomp = lz4.block.decompress(raw[data_off:data_off + comp_size],
+                                       uncompressed_size=0x2020020)
+        chunks.append((bytearray(decomp), flag_off, size_off, data_off, comp_size))
+        off += comp_size
+
+    if not chunks:
+        print("  ERROR: No chunks in .pkg")
+        return False
+
+    # Use the last chunk — insert before terminator
+    chunk, flag_off, size_off, data_off, orig_comp_size = chunks[-1]
+
+    # Find the terminator (0xBE or 0xFF) — scan from end
+    insert_pos = len(chunk)
+    for i in range(len(chunk) - 1, -1, -1):
+        if chunk[i] in (0xBE, 0xFF):
+            insert_pos = i
+            break
+
+    # Insert the new entry before the terminator
+    chunk[insert_pos:insert_pos] = entry
+    print(f"  Inserted {len(entry):,} byte entry at chunk offset {insert_pos:,}")
+
+    # Recompress
+    new_comp = lz4.block.compress(bytes(chunk), store_size=False)
+    new_comp_size = len(new_comp)
+    print(f"  Recompressed: {orig_comp_size:,} -> {new_comp_size:,} bytes")
+
+    # Rebuild the pkg
+    new_size_be = _swap32(new_comp_size)
+    output = bytearray()
+    output += raw[:flag_off]
+    output += bytes([raw[flag_off]])
+    output += struct.pack('<I', new_size_be)
+    output += new_comp
+    after_off = data_off + orig_comp_size
+    output += raw[after_off:]
+
+    with open(output_path, 'wb') as f:
+        f.write(output)
+    print(f"  Written: {output_path} ({len(output):,} bytes)")
+
+    _update_pkg_checksum(output_path)
+    return True
+
+
 def replace_texture(pkg_path, texture_name, new_dds_path, output_path):
     """
     Replace a texture in a .pkg file with data from a DDS file.
