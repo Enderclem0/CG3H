@@ -355,8 +355,12 @@ class App:
         rbtns = ttk.Frame(bot)
         rbtns.pack(fill=tk.X, pady=(6, 0))
         ttk.Button(rbtns, text="Refresh", command=self._refresh_backups).pack(side=tk.LEFT)
-        ttk.Button(rbtns, text="Uninstall selected", command=self._restore_selected).pack(
+        ttk.Button(rbtns, text="Disable selected", command=self._restore_selected).pack(
             side=tk.LEFT, padx=8)
+        ttk.Button(rbtns, text="Re-enable selected", command=self._reenable_selected).pack(
+            side=tk.LEFT, padx=4)
+        ttk.Button(rbtns, text="Delete selected", command=self._delete_mod).pack(
+            side=tk.LEFT, padx=4)
         self._restore_status = ttk.Label(rbtns, text="", foreground="#070")
         self._restore_status.pack(side=tk.LEFT, padx=8)
 
@@ -1300,7 +1304,7 @@ class App:
 
         # ── Register mod and summarize ──
         if modified_files:
-            self._register_mod(character, modified_files)
+            self._register_mod(character, modified_files, export_dir=export_dir)
         self._ui(self._refresh_backups)
         if errors:
             self._ui(lambda: self._inst_status.config(
@@ -1345,16 +1349,27 @@ class App:
         with open(self._mods_registry_path(), 'w') as f:
             json.dump(registry, f, indent=2)
 
-    def _register_mod(self, character, modified_files):
-        """Record an installed mod. modified_files: list of {type, src_backup, dst_game}"""
+    def _register_mod(self, character, modified_files, export_dir=None):
+        """Record an installed mod."""
         registry = self._load_mods_registry()
         registry[character] = {
             'installed': datetime.now().strftime("%Y-%m-%d %H:%M"),
+            'enabled': True,
+            'export_dir': export_dir or '',
             'files': modified_files,
         }
         self._save_mods_registry(registry)
 
+    def _disable_mod(self, character):
+        """Mark a mod as disabled (keep record for re-enable)."""
+        registry = self._load_mods_registry()
+        if character in registry:
+            registry[character]['enabled'] = False
+            registry[character]['disabled_at'] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        self._save_mods_registry(registry)
+
     def _unregister_mod(self, character):
+        """Fully remove a mod from the registry."""
         registry = self._load_mods_registry()
         registry.pop(character, None)
         self._save_mods_registry(registry)
@@ -1372,7 +1387,9 @@ class App:
             if tex_count:
                 parts.append(f'{tex_count} texture(s)')
             desc = ' + '.join(parts) if parts else 'unknown'
-            self._restore_lb.insert(tk.END, f"{character}  ({desc}, installed {ts})")
+            enabled = info.get('enabled', True)
+            status = "ACTIVE" if enabled else "disabled"
+            self._restore_lb.insert(tk.END, f"{character}  [{status}]  ({desc}, {ts})")
 
     def _restore_selected(self):
         sel = self._restore_lb.curselection()
@@ -1441,18 +1458,87 @@ class App:
                                    + "\n".join(f"  {r}" for r in reapplied) + "\n")
 
         for character in characters_to_remove:
-            self._unregister_mod(character)
+            self._disable_mod(character)
 
         if restored:
-            self._restore_status.config(text=f"Uninstalled {len(restored)} mod(s)")
-            self._status.set(f"Uninstalled: {', '.join(restored)}")
+            self._restore_status.config(text=f"Disabled {len(restored)} mod(s)")
+            self._status.set(f"Disabled: {', '.join(restored)}")
             self._refresh_backups()
             messagebox.showinfo(
-                "Mods uninstalled",
-                f"Restored originals for {len(restored)} mod(s):\n" +
+                "Mods disabled",
+                f"Disabled {len(restored)} mod(s) (originals restored):\n" +
                 "\n".join(f"  {n}" for n in restored) +
-                "\n\nRestart the game to apply.",
+                "\n\nRe-enable from the mod list to reinstall.",
             )
+
+    def _reenable_selected(self):
+        """Re-enable disabled mods by reinstalling from their export directories."""
+        sel = self._restore_lb.curselection()
+        if not sel:
+            messagebox.showwarning("Nothing selected", "Select disabled mod(s) to re-enable.")
+            return
+
+        registry = self._load_mods_registry()
+        to_enable = []
+        for idx in sel:
+            text = self._restore_lb.get(idx)
+            character = text.split("  [")[0].strip()
+            info = registry.get(character)
+            if info and not info.get('enabled', True):
+                export_dir = info.get('export_dir', '')
+                if export_dir and os.path.isdir(export_dir):
+                    to_enable.append((character, export_dir))
+                else:
+                    messagebox.showwarning("Missing export",
+                        f"Export folder for '{character}' not found:\n{export_dir}\n\n"
+                        "Use Install tab to reinstall manually.")
+
+        if not to_enable:
+            return
+
+        # Reinstall each by setting the export dir and running install
+        for character, export_dir in to_enable:
+            self.inst_export_dir.set(export_dir)
+            self._unregister_mod(character)  # remove disabled entry
+
+        # Trigger install for the last one (user can do others manually)
+        if to_enable:
+            char, edir = to_enable[0]
+            self.inst_export_dir.set(edir)
+            self._scan_install_dir(edir)
+            messagebox.showinfo("Re-enable",
+                f"Export folder set to '{char}'.\n"
+                f"Click 'Install mod' to re-enable.")
+
+    def _delete_mod(self):
+        """Permanently remove a mod from the registry."""
+        sel = self._restore_lb.curselection()
+        if not sel:
+            messagebox.showwarning("Nothing selected", "Select mod(s) to delete.")
+            return
+
+        registry = self._load_mods_registry()
+        to_delete = []
+        for idx in sel:
+            text = self._restore_lb.get(idx)
+            character = text.split("  [")[0].strip()
+            to_delete.append(character)
+
+        if not to_delete:
+            return
+
+        confirm = messagebox.askyesno("Delete mods",
+            f"Permanently remove {len(to_delete)} mod(s) from registry?\n\n"
+            + "\n".join(f"  {c}" for c in to_delete) +
+            "\n\nThis does NOT delete the export folders.")
+        if not confirm:
+            return
+
+        for character in to_delete:
+            self._unregister_mod(character)
+
+        self._refresh_backups()
+        self._restore_status.config(text=f"Deleted {len(to_delete)} mod(s)")
 
     # ── Thread-safe UI helpers ────────────────────────────────────────────────
 
