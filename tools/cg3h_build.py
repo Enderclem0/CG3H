@@ -234,12 +234,28 @@ def package_thunderstore(mod_dir):
         else:
             zf.writestr('README.md', f'# {name}\n\n{meta.get("description", "")}\n')
 
-        # Build output
+        # Build output — exclude .gpk files (contain original game data)
         for root, dirs, files in os.walk(build_dir):
             for f in files:
+                if f.endswith('.gpk'):
+                    continue  # CC content — must be built on user's machine
                 full = os.path.join(root, f)
                 arc = os.path.relpath(full, build_dir)
                 zf.write(full, arc)
+
+        # Include source assets for user-side GPK build
+        zf.writestr('mod.json', json.dumps(mod, indent=2))
+        assets_cfg = mod.get('assets', {})
+        glb = assets_cfg.get('glb', '')
+        if glb:
+            glb_full = os.path.join(mod_dir, glb)
+            if os.path.isfile(glb_full):
+                zf.write(glb_full, glb)
+
+        # Include export manifest if present (for mesh routing)
+        manifest = os.path.join(mod_dir, 'manifest.json')
+        if os.path.isfile(manifest):
+            zf.write(manifest, 'manifest.json')
 
     print(f"\n  Thunderstore package: {zip_path}.zip")
     return True
