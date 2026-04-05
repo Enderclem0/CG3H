@@ -15,19 +15,21 @@ symbols (`GrannyFileInfoType`, `GrannyMeshType`, etc.). No hardcoded offsets exc
 | `gr2_to_gltf.py` — exporter (skinned + rigid + textures + animations) | Done |
 | `gltf_to_gr2.py` — importer (golden path, multi-entry GPK) | Done |
 | `gpk_pack.py` — GPK pack/unpack | Done |
-| `pkg_texture.py` — PKG texture extractor/replacer/compressor + standalone .pkg builder | Done |
-| `converter_gui.py` — GUI with Export/Install + parallel batch + mod registry | Done |
+| `pkg_texture.py` — PKG texture extractor/replacer + standalone .pkg builder | Done |
+| `converter_gui.py` — CG3H Mod Builder GUI (Create/Build/Mods tabs) | Done |
 | `cg3h_build.py` — H2M mod builder (mod.json -> Thunderstore ZIP) | Done |
+| `mod_merger.py` — multi-mod merger with conflict detection | Done |
+| `cg3h_builder_entry.py` — PyInstaller entry point for cg3h_builder.exe | Done |
 | Standalone .pkg builder (custom textures from scratch) | Done |
 | H2M Lua companion generation | Done |
 | PyInstaller exe (`cg3h_builder.exe`, 29MB standalone) | Done |
-| Texture import pipeline (PNG/DDS -> BC7 DDS -> PKG replacement) | Done |
-| Multi-PKG replacement + XXH64 checksum validation | Done |
+| Texture import pipeline (PNG/DDS -> BC7 DDS -> standalone .pkg) | Done |
 | Export manifest (`manifest.json`) with per-mesh entry mapping | Done |
 | Lua GrannyTexture override parsing | Done |
 | End-to-end DLL verification | Done |
-| In-game testing | Done (bounding box culling issue — see README) |
-| Test suite (25 unit tests) | Done |
+| In-game testing | Done |
+| Test suite (25 unit + 15 integration = 40 tests) | Done |
+| GitHub Actions release pipeline | Done |
 
 ## Key Design Decisions
 
@@ -77,6 +79,12 @@ Textures are resolved per mesh by walking the GR2 material chain:
 Each mesh gets its own glTF material with the correct embedded PNG texture.
 Three fallback levels: material chain, fi->Textures, name-based guessing.
 
+### New material creation (mesh_add)
+New meshes added in Blender can have custom textures. The importer creates new
+`granny_material`, `granny_material_map`, and `granny_texture` structs in DLL memory,
+wires them into the material chain, and expands `fi->Materials` and `fi->Textures`.
+The game resolves custom textures via the `FromFileName` hash lookup (`"GR2/" + basename`).
+
 ### Texture index for batch export
 `pkg_texture.py` builds a `_texture_index.json` by scanning all `.pkg` files once.
 Each subsequent export reads the small JSON instead of rescanning hundreds of MB.
@@ -124,45 +132,14 @@ broken glTF output:
   bone names; stripped for track-to-bone matching.
 - **bone_index field**: Preserved in track data for correct bone targeting.
 
-### Texture import pipeline
-Three edit paths are supported (Blender, PNG, DDS). Change detection uses
-`png_hash` from the export manifest. PNG-to-DDS compression uses `etcpak`
-(BC7/BC3/BC1 with mipmaps). DDS files from external editors are auto-truncated
-if they have more mip levels than the original (paint.net compatibility).
-
-### Multi-PKG texture replacement
-Textures are often duplicated across biome packages (BiomeF, BiomeHub,
-BiomeIHouse, etc.). The manifest tracks ALL `.pkg` files containing each
-texture. The installer replaces the texture in every listed package.
-
-### XXH64 checksum validation
-The game checks `checksums.txt` at startup. After every `.pkg` replacement,
-the tool recalculates the XXH64 hash and updates the corresponding line.
-The original `checksums.txt` is backed up and restored on mod uninstall.
-
-### Lua GrannyTexture overrides
-48 entities override their GR2 texture at runtime via Lua scripts in the
-game's `Scripts/` directory. The exporter parses these overrides and uses
-the Lua-specified texture when it differs from the material chain value.
-
-### Mod registry
-The GUI maintains `_mods.json` tracking all changes per character (mesh GPK +
-texture PKGs + checksums). One-click uninstall restores ALL files at once.
-Multi-mod safe: uninstalling one mod re-applies remaining mods' textures.
-
-### GLB texture extraction
-The installer can extract edited textures from a GLB file by comparing the
-embedded PNG hash against the manifest's original hash. This enables the
-Blender editing path without requiring manual PNG export.
-
-## Hell2Modding (H2M) Integration (v3.0)
+## H2M Integration
 
 ### Design Philosophy
 
-v3.0 shifts CG3H from a "modify game files" tool to a "build mod packages" tool.
-H2M provides the runtime layer: it loads standalone `.pkg` files and runs Lua
-companions without touching the game's original assets. This eliminates DLL
-injection, checksum management, backup/restore, and direct file modification.
+CG3H is a mod builder that produces H2M-compatible packages. H2M provides the runtime
+layer: it loads standalone `.pkg` files and runs Lua companions without touching the
+game's original assets. This eliminates DLL injection, checksum management,
+backup/restore, and direct file modification.
 
 ### `cg3h build` Pipeline
 
@@ -175,83 +152,64 @@ H2M-compatible folder structure (optionally packaged as a Thunderstore ZIP):
    from scratch (not a modified game package)
 4. **mesh_add**: bundle GLB containing only new geometry (no copyrighted meshes),
    include `cg3h_builder.exe` for on-device GPK building
-5. Generate `main.lua` (H2M Lua companion)
-6. Generate Thunderstore `manifest.json`
-7. `--package` flag: ZIP everything for upload
+5. **animation_patch**: bundle GLB with modified animation curves
+6. Generate `main.lua` (H2M Lua companion)
+7. Generate Thunderstore `manifest.json`
+8. `--package` flag: ZIP everything for upload
 
-### Standalone .pkg Builder
+### Operation-based system
+
+Mods infer their operations from the assets present. A single mod can perform
+multiple operations (e.g. mesh_add + texture_replace). `_infer_operations`
+examines what assets the mod ships and determines what build steps to run.
+
+### Multi-mod merger (`mod_merger.py`)
+
+When multiple mods target the same character:
+1. Scans installed mods, groups by character
+2. Sequential merge: each mod applied to previous output
+3. Merged PKG combines all custom textures
+4. `cg3h_mod_priority.json` controls merge order (higher index = applied later = wins)
+
+### Conflict detection
+
+Per-operation analysis:
+- Same texture replaced by multiple mods = conflict
+- Multiple mesh_replace for same character = conflict
+- mesh_add + mesh_add = compatible (merged)
+- Different animation filters = compatible
+
+### Smart data stripping
+
+Thunderstore ZIPs only contain changed data:
+- Meshes: compared by vertex/index count against manifest
+- Textures: compared by PNG hash against manifest
+- Animations: compared by content hash
+- Unchanged assets stripped from distribution
+
+### Standalone .pkg builder
 
 Creates `.pkg` files from scratch rather than patching game packages:
-
 - Each custom texture is compressed to BC7/BC3/BC1 DDS with full mipchain
 - Wrapped in 0xAD (Texture2D) chunks with correct XNB headers
 - Written as a new `.pkg` with proper chunk table and offsets
 - H2M's `rom.game.LoadPackages` loads the standalone `.pkg` at runtime
-- Game resolves textures by name (same `FromFileName` hash lookup)
+- No `.pkg_manifest` needed for H2M loading
 
-This means texture mods never touch any game file. The standalone `.pkg` is
-side-loaded by H2M and the game's texture resolver picks it up transparently.
+### H2M Lua companion
 
-### H2M Lua Companion
+Auto-generated `main.lua` included in every mod package:
+- `rom.game.LoadPackages` for custom .pkg loading
+- `rom.on_import.post` for deferred initialization
+- Auto-build GPK on first launch if missing (runs `cg3h_builder.exe`)
 
-Auto-generated `main.lua` that CG3H includes in every mod package:
-
-```lua
--- Load standalone texture package
-rom.game.LoadPackages({"path/to/custom.pkg"})
-
--- For mesh mods: auto-build GPK on first launch
-rom.on_import.post(function()
-    if not file_exists("path/to/Character_mod.gpk") then
-        os.execute("cg3h_builder.exe")
-    end
-end)
-```
-
-- `rom.game.LoadPackages` — H2M API for loading additional `.pkg` files
-- `rom.on_import.post` — deferred hook, runs after game import phase
-- `cg3h_builder.exe` — PyInstaller-bundled builder (29MB), runs the
-  `gltf_to_gr2.py` pipeline without requiring Python on the end user's machine
-
-### mod.json Specification
-
-Four mod types, each with different distribution and copyright properties:
-
-| Type | What it does | Assets distributed | CC-free |
-|---|---|---|---|
-| `texture_replace` | Custom PNG -> standalone .pkg | PNG textures only | Yes |
-| `mesh_add` | Append new meshes to character | GLB with new geometry only | Yes |
-| `mesh_replace` | Swap character meshes | GLB with replacement geometry | Needs v3.1 diff |
-| `mesh_patch` | Edit vertices in-place | GLB with modified geometry | Needs v3.1 diff |
-
-`texture_replace` and `mesh_add` are fully CC-free: no copyrighted game content
-is included in the distribution. `mesh_replace` and `mesh_patch` currently require
-distributing modified versions of original meshes; a v3.1 diff format will allow
-distributing only the delta.
-
-### PyInstaller Standalone Builder
+### PyInstaller standalone builder
 
 `cg3h_builder.exe` is a PyInstaller-frozen version of the mesh build pipeline:
-
 - Bundles Python + numpy + pygltflib + lz4 + ctypes Granny DLL loader
 - 29MB single-file executable
-- Included in Thunderstore ZIP for mesh mods only (texture mods don't need it)
-- The Lua companion auto-runs it on first launch when the built GPK is missing
+- Included in Thunderstore ZIP for mesh mods only
 - Uses the end user's local `granny2_x64.dll` (auto-detected from Steam path)
-
-### What's No Longer Needed
-
-The H2M integration removes several v2.x requirements:
-
-| v2.x Requirement | Why it's gone |
-|---|---|
-| DLL injection | H2M handles runtime asset loading natively |
-| `checksums.txt` patching | Standalone `.pkg` files bypass checksum validation |
-| `_backups/` directory | No game files are modified |
-| Mod registry (`_mods.json`) | H2M manages mod lifecycle; uninstall = remove mod folder |
-
-The v2.x legacy workflow (GUI Install tab, direct file modification) still works
-for users who prefer it, but is no longer the recommended path.
 
 ## Future Work
 

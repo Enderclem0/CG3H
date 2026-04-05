@@ -20,9 +20,9 @@ Each `.gpk` is paired with a `.sdb` of the same base name.
 
 Repeated file_count times:
   [name_len  : uint8]       Length of filename
-  [name      : uint8 × N]  UTF-8, no null terminator
+  [name      : uint8 x N]  UTF-8, no null terminator
   [comp_size : uint32 LE]  Byte length of compressed data
-  [lz4_data  : uint8 × C] Raw LZ4 block (no frame header)
+  [lz4_data  : uint8 x C] Raw LZ4 block (no frame header)
 ```
 
 ### Compression
@@ -42,6 +42,12 @@ packed = lz4.block.compress(data, store_size=False)
 | `<Name>Battle_Mesh` | Battle-mode mesh variant (multi-entry GPK) |
 | `<Name>Hub_Mesh` | Hub-mode mesh variant (multi-entry GPK) |
 | `<Name>_Anim_*` | Animation clips (GR2) |
+
+### Multi-Entry GPKs
+
+Some characters have multiple mesh entries in a single GPK (e.g. Hecate has
+`HecateBattle_Mesh` + `HecateHub_Mesh`). Each entry is a separate GR2 blob.
+The exporter processes all entries by default; `--mesh-entry` selects specific ones.
 
 ---
 
@@ -63,7 +69,7 @@ Granny3D proprietary binary format. The Hades II build uses Granny v2.12.0.14; `
 
 All offsets confirmed on Granny 2.12.0.14 / Hades II. All structs are **packed** (no alignment padding).
 
-### `granny_file_info`  —  root object returned by `GrannyGetFileInfo(file_ptr)`
+### `granny_file_info` — root object returned by `GrannyGetFileInfo(file_ptr)`
 
 | Offset | Size | Field |
 |--------|------|-------|
@@ -103,17 +109,17 @@ Each `**` field is a pointer to an array of pointers (dereference twice to reach
 
 ---
 
-### `granny_bone`  —  stride = **164 bytes**
+### `granny_bone` — stride = **164 bytes**
 
 | Offset | Size | Field |
 |--------|------|-------|
 | +0x00 | 8 | Name* |
-| +0x08 | 4 | ParentIndex  (−1 = root) |
-| +0x0C | 4 | Transform.Flags  (0x1=HasPos · 0x2=HasRot · 0x4=HasScale) |
-| +0x10 | 12 | Transform.Position  float32×3 |
-| +0x1C | 16 | Transform.Orientation  float32×4 (XYZW quaternion) |
-| +0x2C | 36 | Transform.ScaleShear  float32×9 (3×3 row-major) |
-| +0x50 | 64 | InverseWorld4x4  float32×16 |
+| +0x08 | 4 | ParentIndex  (-1 = root) |
+| +0x0C | 4 | Transform.Flags  (0x1=HasPos, 0x2=HasRot, 0x4=HasScale) |
+| +0x10 | 12 | Transform.Position  float32x3 |
+| +0x1C | 16 | Transform.Orientation  float32x4 (XYZW quaternion) |
+| +0x2C | 36 | Transform.ScaleShear  float32x9 (3x3 row-major) |
+| +0x50 | 64 | InverseWorld4x4  float32x16 |
 | +0x90 | 4 | LODError |
 | +0x94 | 16 | ExtendedData (2 pointers) |
 
@@ -135,23 +141,21 @@ Each `**` field is a pointer to an array of pointers (dereference twice to reach
 | +0x30 | 4 | BoneBindingCount |
 | +0x34 | 8 | BoneBindings* |
 
-Multiple meshes may share the same `Name` — these are split parts of the same mesh, all rendered together by the engine. During export, duplicate names get `_2`, `_3` suffixes. The importer strips both these and legacy `_LOD` suffixes when matching back to GR2 meshes.
-
-Some characters have multiple mesh entries in a single GPK (e.g. `HecateBattle_Mesh` + `HecateHub_Mesh`). Each entry is a separate GR2 blob within the archive. The exporter processes all entries by default; the `--mesh-entry` flag selects specific entries.
+Multiple meshes may share the same `Name` — these are split parts of the same mesh, all rendered together. During export, duplicate names get `_2`, `_3` suffixes. The importer strips these when matching back to GR2 meshes.
 
 ---
 
-### `granny_bone_binding`  —  stride = **44 bytes**
+### `granny_bone_binding` — stride = **44 bytes**
 
 | Offset | Size | Field |
 |--------|------|-------|
 | +0x00 | 8 | BoneName* |
-| +0x08 | 12 | OBBMin  float32×3 |
-| +0x14 | 12 | OBBMax  float32×3 |
+| +0x08 | 12 | OBBMin  float32x3 |
+| +0x14 | 12 | OBBMax  float32x3 |
 | +0x20 | 4 | TriangleCount |
 | +0x24 | 8 | TriangleIndices* |
 
-`BLENDINDICES` values in the vertex buffer are local palette indices into this array. Resolve to global skeleton indices: `BoneBinding[i].BoneName → skeleton bone index`.
+`BLENDINDICES` values in the vertex buffer are local palette indices into this array. Resolve to global skeleton indices: `BoneBinding[i].BoneName -> skeleton bone index`.
 
 ---
 
@@ -165,17 +169,18 @@ Some characters have multiple mesh entries in a single GPK (e.g. `HecateBattle_M
 
 ---
 
-### Vertex Layout  —  stride = **40 bytes**
+### Vertex Layout — stride = **40 bytes**
 
-Fixed format used by all Hades II character meshes:
+Fixed format used by all Hades II character meshes. The engine ignores Granny's logical
+vertex metadata and forces this layout (see [rendering_pipeline.md](rendering_pipeline.md)).
 
 | Byte | Size | Type | Semantic |
 |------|------|------|----------|
-| +0 | 12 | float32×3 | POSITION |
-| +12 | 4 | uint8×4 | BLENDWEIGHT  (values sum to 255; normalise ÷ sum for glTF) |
-| +16 | 4 | uint8×4 | BLENDINDICES  (bone palette local indices) |
-| +20 | 12 | float32×3 | NORMAL |
-| +32 | 8 | float32×2 | TEXCOORD_0 |
+| +0 | 12 | float32x3 | POSITION |
+| +12 | 4 | uint8x4 | BLENDWEIGHT  (values sum to 255; normalize / sum for glTF) |
+| +16 | 4 | uint8x4 | BLENDINDICES  (bone palette local indices) |
+| +20 | 12 | float32x3 | NORMAL |
+| +32 | 8 | float32x2 | TEXCOORD_0 |
 
 ---
 
@@ -202,7 +207,7 @@ Textures and other assets are stored in `.pkg` files under `Content/Packages/108
 
 ```
 [header       : uint32 BE]  Version in low 16 bits, flags in high bits
-                             (header & 0x20000000) != 0 → LZ4-compressed chunks
+                             (header & 0x20000000) != 0 -> LZ4-compressed chunks
 
 Chunks (repeated until EOF):
   [flag        : uint8]      Non-zero = LZ4 compressed, 0 = uncompressed
@@ -231,7 +236,7 @@ Within each decompressed chunk:
 | 0xEE | Bink atlas | Video atlas |
 | 0xFF | End of file | Stop processing entirely |
 
-**Key finding:** Both 0xAA (Texture3D) and 0xAD (Texture2D) entries use the same format: a name string followed by a big-endian uint32 size, then XNB-wrapped texture data. The size field for 0xAA entries is big-endian (byte-swapped), which was previously misread as little-endian, causing the scanner to skip the rest of the chunk.
+**Key finding:** Both 0xAA and 0xAD use the same format: name string + big-endian uint32 size + XNB-wrapped texture data. The 0xAA size field is big-endian (byte-swapped), which was previously misread as little-endian, causing the scanner to skip the rest of the chunk.
 
 ### Texture Entry Format (0xAA and 0xAD)
 
@@ -247,12 +252,14 @@ Within each decompressed chunk:
 [bytes]            — pixel data (BCn compressed or uncompressed)
 ```
 
+Mipmaps are stored inline (sequentially after the base level) within the pixel data block.
+
 ### 3D Model Texture Locations
 
-All character 3D model textures are stored as Texture2D (0xAD) or Texture3D (0xAA) entries across various `.pkg` files (not only `Fx.pkg`). Texture names use a `GR2\` or `Models\` path prefix. A texture index (`_texture_index.json`) can be built by scanning all `.pkg` files once for fast batch lookups.
+All character 3D model textures are stored as Texture2D (0xAD) or Texture3D (0xAA) entries across various `.pkg` files. Texture names use a `GR2\` or `Models\` path prefix. A texture index (`_texture_index.json`) maps texture names to their `.pkg` locations for fast batch lookups.
 
-Textures are often duplicated across biome packages (BiomeF, BiomeHub, BiomeIHouse, etc.). Replacing a texture requires updating ALL `.pkg` files that contain it.
+Textures are often duplicated across biome packages (BiomeF, BiomeHub, BiomeIHouse, etc.). The export manifest tracks ALL `.pkg` files containing each texture.
 
 ### Checksum Validation
 
-The game stores XXH64 checksums for `.pkg` files in `Content/Packages/1080p/checksums.txt`. Each line contains a filename and its hash. After modifying any `.pkg`, the corresponding checksum must be recalculated and updated, or the game will reject the file.
+The game stores XXH64 checksums for `.pkg` files in `Content/Packages/1080p/checksums.txt`. Each line contains a filename and its hash. H2M bypasses this validation for standalone `.pkg` files loaded via `rom.game.LoadPackages`.
