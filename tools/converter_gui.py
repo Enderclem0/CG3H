@@ -130,14 +130,15 @@ class App:
         top = ttk.LabelFrame(tab, text="Create New Mod Workspace", padding=12)
         top.pack(fill=tk.X)
 
-        # Character dropdown
+        # Character dropdown (searchable — type to filter)
         row = ttk.Frame(top)
         row.pack(fill=tk.X, pady=(0, 4))
         ttk.Label(row, text="Character:", width=14, anchor=tk.W).pack(side=tk.LEFT)
         self._create_char = tk.StringVar()
         self._create_char_combo = ttk.Combobox(
-            row, textvariable=self._create_char, state="readonly", width=36)
+            row, textvariable=self._create_char, width=36)
         self._create_char_combo.pack(side=tk.LEFT, padx=6)
+        self._create_char_combo.bind('<KeyRelease>', self._filter_characters)
 
         # Mod name
         row2 = ttk.Frame(top)
@@ -989,6 +990,19 @@ class App:
         # Update Create tab character dropdown
         if hasattr(self, "_create_char_combo"):
             self._create_char_combo["values"] = self._all_names
+
+    def _filter_characters(self, event=None):
+        """Filter character dropdown as user types."""
+        typed = self._create_char.get().lower()
+        if not typed:
+            self._create_char_combo["values"] = self._all_names
+        else:
+            filtered = [n for n in self._all_names if typed in n.lower()]
+            self._create_char_combo["values"] = filtered
+            if not self._create_char_combo.winfo_ismapped():
+                return
+            # Show dropdown
+            self._create_char_combo.event_generate('<Down>')
 
     # -- Browse dialogs -------------------------------------------------------
 
