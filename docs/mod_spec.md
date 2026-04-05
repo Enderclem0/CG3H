@@ -115,6 +115,58 @@ Modify existing mesh vertices (reshape, sculpt) without changing topology or add
 
 ---
 
+### Type 5: Animation Patch
+Replace or modify specific animations on a character. Uses the v2.x animation export/import pipeline (`gr2_to_gltf.py --animations` / `gltf_to_gr2.py --patch-animations`).
+
+```json
+{
+  "type": "animation_patch",
+  "target": { "character": "Melinoe" },
+  "assets": {
+    "glb": "Melinoe_edited.glb",
+    "animations": {
+      "patch": true,
+      "filter": "NoWeapon_Base_Idle"
+    }
+  }
+}
+```
+
+**`assets.animations` fields:**
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `patch` | bool | yes | Must be `true` to enable animation patching |
+| `filter` | string | no | Regex/substring filter selecting which animations to patch. If omitted, all animations present in the GLB are patched into the GR2. |
+
+**At build time**:
+1. Load original `Melinoe.gpk` from game (NOT shipped with mod)
+2. Parse animations from the GLB
+3. Match GLB animations to GR2 animations (filtered by `filter` if set)
+4. Patch matched animation curve data in the GR2
+5. Output modified `Melinoe.gpk` to the mod's `plugins_data/`
+
+**No CC content**: Only the GLB (containing modified animation curves) is shipped. Original animation data comes from the user's game install.
+
+**Combining with mesh mods**: Animation patches can be combined with mesh operations in the same mod by using a list type:
+
+```json
+{
+  "type": ["mesh_patch", "animation_patch"],
+  "target": { "character": "Melinoe" },
+  "assets": {
+    "glb": "Melinoe_edited.glb",
+    "animations": {
+      "patch": true,
+      "filter": "NoWeapon_Base_Idle"
+    }
+  }
+}
+```
+
+**Conflict rules**: Two animation mods targeting the same character conflict if their filters overlap or if either has no filter. Mods with non-overlapping filters (e.g., `"NoWeapon_Base_Idle"` vs `"Attack_Combo1"`) are safe to coexist.
+
+---
+
 ## Folder Structure (Thunderstore Package)
 
 ```
@@ -175,7 +227,11 @@ ModAuthor-ModName/
         "height": 512,
         "custom": true
       }
-    ]
+    ],
+    "animations": {
+      "patch": false,
+      "filter": ""
+    }
   },
 
   "meshes": [
@@ -242,6 +298,10 @@ When multiple mods target the same character:
 | mesh_replace (body) | mesh_replace (body) | YES | Mutually exclusive, user picks one |
 | mesh_patch (vertices) | texture_replace | NO | Independent operations |
 | mesh_patch (vertices) | mesh_replace | YES | Replace overrides patch |
+| animation_patch (same filter) | animation_patch (same filter) | YES | Mutually exclusive, user picks one |
+| animation_patch (different filter) | animation_patch (different filter) | NO | Non-overlapping animations are independent |
+| animation_patch | mesh_replace | NO | Independent operations (mesh vs anim) |
+| animation_patch | texture_replace | NO | Independent operations |
 
 ### Conflict Rules in mod.json
 

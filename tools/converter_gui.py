@@ -424,6 +424,59 @@ class App:
                                            font=("Consolas", 9))
         self._h2m_output_label.pack(anchor=tk.W, pady=(6, 0))
 
+        # ── Quick Create & Install ──
+        ttk.Separator(tab, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=12)
+
+        quick = ttk.LabelFrame(tab, text="Quick Create & Install", padding=12)
+        quick.pack(fill=tk.X)
+
+        ttk.Label(quick, text=(
+            "One-click: pick a character export folder, generate mod.json,\n"
+            "build for H2M, and install to r2modman."
+        ), foreground="#555").pack(anchor=tk.W, pady=(0, 8))
+
+        # Export folder
+        qrow1 = ttk.Frame(quick)
+        qrow1.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(qrow1, text="Export folder:", width=14, anchor=tk.W).pack(side=tk.LEFT)
+        self._quick_export_dir = tk.StringVar()
+        ttk.Entry(qrow1, textvariable=self._quick_export_dir, width=42).pack(
+            side=tk.LEFT, padx=6, fill=tk.X, expand=True)
+        ttk.Button(qrow1, text="Browse\u2026",
+                   command=self._browse_quick_export).pack(side=tk.LEFT)
+
+        # Mod name + author
+        qrow2 = ttk.Frame(quick)
+        qrow2.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(qrow2, text="Mod name:", width=14, anchor=tk.W).pack(side=tk.LEFT)
+        self._quick_mod_name = tk.StringVar()
+        ttk.Entry(qrow2, textvariable=self._quick_mod_name, width=20).pack(
+            side=tk.LEFT, padx=6)
+        ttk.Label(qrow2, text="Author:").pack(side=tk.LEFT, padx=(8, 0))
+        self._quick_author = tk.StringVar(value="Modder")
+        ttk.Entry(qrow2, textvariable=self._quick_author, width=15).pack(
+            side=tk.LEFT, padx=6)
+
+        # Info
+        self._quick_info = ttk.Label(quick, text="", foreground="#555")
+        self._quick_info.pack(anchor=tk.W, pady=(2, 4))
+
+        # Options
+        qopt = ttk.Frame(quick)
+        qopt.pack(fill=tk.X, pady=(0, 4))
+        self._quick_install_h2m = tk.BooleanVar(value=True)
+        ttk.Checkbutton(qopt, text="Install to r2modman after build",
+                        variable=self._quick_install_h2m).pack(anchor=tk.W)
+
+        # Button
+        qbtn = ttk.Frame(quick)
+        qbtn.pack(fill=tk.X, pady=(4, 0))
+        self._quick_btn = ttk.Button(qbtn, text="Create & Install",
+                                     command=self._quick_create, state=tk.DISABLED)
+        self._quick_btn.pack(side=tk.LEFT)
+        self._quick_status = ttk.Label(qbtn, text="", foreground="#555")
+        self._quick_status.pack(side=tk.LEFT, padx=12)
+
         # Build log
         self._h2m_log = self._make_log(tab)
 
@@ -584,6 +637,163 @@ class App:
             self._h2m_status.config(text="Build failed", foreground="#a00")
             self._h2m_output_label.config(text="")
             self._status.set("Build failed -- check the log for details")
+
+    def _browse_quick_export(self):
+        p = filedialog.askdirectory(title="Select character export folder (with manifest.json)")
+        if p:
+            self._quick_export_dir.set(p)
+            # Read manifest for info
+            manifest = os.path.join(p, 'manifest.json')
+            if os.path.isfile(manifest):
+                import json
+                with open(manifest) as f:
+                    m = json.load(f)
+                char = m.get('character', '?')
+                meshes = len(m.get('meshes', []))
+                textures = len(m.get('textures', {}))
+                self._quick_info.config(
+                    text=f"{char}: {meshes} mesh(es), {textures} texture(s)",
+                    foreground="#555")
+                self._quick_mod_name.set(f"{char}Mod")
+                self._quick_btn.config(state=tk.NORMAL)
+            else:
+                self._quick_info.config(text="No manifest.json — export the character first",
+                                        foreground="#a00")
+                self._quick_btn.config(state=tk.DISABLED)
+
+    def _quick_create(self):
+        export_dir = self._quick_export_dir.get().strip()
+        mod_name = self._quick_mod_name.get().strip() or "MyMod"
+        author = self._quick_author.get().strip() or "Modder"
+
+        if not export_dir or not os.path.isdir(export_dir):
+            messagebox.showwarning("No folder", "Select an export folder first.")
+            return
+
+        self._quick_btn.config(state=tk.DISABLED)
+        self._quick_status.config(text="Creating...", foreground="#555")
+        self._log_clear(self._h2m_log)
+
+        threading.Thread(
+            target=self._quick_create_worker,
+            args=(export_dir, mod_name, author),
+            daemon=True,
+        ).start()
+
+    def _quick_create_worker(self, export_dir, mod_name, author):
+        import json
+
+        try:
+            # Read manifest
+            manifest_path = os.path.join(export_dir, 'manifest.json')
+            with open(manifest_path) as f:
+                manifest = json.load(f)
+
+            character = manifest.get('character', 'Unknown')
+            mod_id = f"{author}-{mod_name}".replace(' ', '')
+
+            # Auto-generate mod.json from the export manifest
+            textures = []
+            for tex_name, tex_info in manifest.get('textures', {}).items():
+                if tex_info.get('variant'):
+                    continue
+                tex_entry = {'name': tex_name}
+                png_path = os.path.join(export_dir, f"{tex_name}.png")
+                if os.path.isfile(png_path):
+                    tex_entry['file'] = f"{tex_name}.png"
+                    tex_entry['custom'] = tex_info.get('custom', False)
+                    tex_entry['width'] = tex_info.get('width', 512)
+                    tex_entry['height'] = tex_info.get('height', 512)
+                textures.append(tex_entry)
+
+            glb_file = manifest.get('glb', '')
+            mod_json = {
+                'format': 'cg3h-mod/1.0',
+                'metadata': {
+                    'name': mod_name,
+                    'author': author,
+                    'version': '1.0.0',
+                    'description': f'{mod_name} for {character}',
+                },
+                'type': 'mesh_add',
+                'target': {
+                    'character': character,
+                    'mesh_entries': manifest.get('mesh_entries', [f"{character}_Mesh"]),
+                },
+                'assets': {
+                    'glb': glb_file,
+                    'textures': textures,
+                },
+            }
+
+            mod_json_path = os.path.join(export_dir, 'mod.json')
+            with open(mod_json_path, 'w') as f:
+                json.dump(mod_json, f, indent=2)
+            self._log_write_ui(self._h2m_log, f"Generated mod.json for {mod_name}\n")
+
+            # Build
+            ship_dir = os.path.join(self.game_path.get(), "Ship")
+            orig_cwd = os.getcwd()
+            try:
+                if os.path.isdir(ship_dir):
+                    os.chdir(ship_dir)
+                self._log_write_ui(self._h2m_log, f"Building...\n\n")
+
+                import io, contextlib
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    cg3h_build.build_mod(export_dir)
+                self._log_write_ui(self._h2m_log, buf.getvalue())
+            finally:
+                os.chdir(orig_cwd)
+
+            # Install to r2modman if requested
+            if self._quick_install_h2m.get():
+                r2_dir = self._find_r2modman_dir()
+                if r2_dir:
+                    build_dir = os.path.join(export_dir, 'build')
+                    pd_src = os.path.join(build_dir, 'plugins_data', mod_id)
+                    pp_src = os.path.join(build_dir, 'plugins', mod_id)
+                    pd_dst = os.path.join(r2_dir, 'plugins_data', mod_id)
+                    pp_dst = os.path.join(r2_dir, 'plugins', mod_id)
+
+                    if os.path.isdir(pd_src):
+                        if os.path.isdir(pd_dst):
+                            shutil.rmtree(pd_dst)
+                        shutil.copytree(pd_src, pd_dst)
+                    if os.path.isdir(pp_src):
+                        if os.path.isdir(pp_dst):
+                            shutil.rmtree(pp_dst)
+                        shutil.copytree(pp_src, pp_dst)
+
+                    self._log_write_ui(self._h2m_log,
+                        f"\nInstalled to r2modman: {r2_dir}\n")
+                else:
+                    self._log_write_ui(self._h2m_log,
+                        "\nWARNING: r2modman ReturnOfModding directory not found\n")
+
+            self._ui(lambda: self._quick_status.config(
+                text="Done!", foreground="#070"))
+            self._ui(lambda: self._quick_btn.config(state=tk.NORMAL))
+
+        except Exception as e:
+            self._log_write_ui(self._h2m_log, f"\nError: {e}\n")
+            import traceback
+            self._log_write_ui(self._h2m_log, traceback.format_exc())
+            self._ui(lambda: self._quick_status.config(
+                text="Failed", foreground="#a00"))
+            self._ui(lambda: self._quick_btn.config(state=tk.NORMAL))
+
+    def _find_r2modman_dir(self):
+        """Find the r2modman ReturnOfModding directory."""
+        candidates = [
+            os.path.expandvars(
+                r"%APPDATA%\r2modmanPlus-local\HadesII\profiles\Default\ReturnOfModding"),
+        ]
+        for c in candidates:
+            if os.path.isdir(c):
+                return c
+        return None
 
     # ── Shared widget factories ───────────────────────────────────────────────
 

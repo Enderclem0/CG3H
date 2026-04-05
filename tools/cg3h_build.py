@@ -140,7 +140,8 @@ def _infer_operations(mod):
     """
     Infer what operations a mod performs from its assets.
     Returns a set of operations: {'adds_meshes', 'replaces_meshes', 'patches_meshes',
-                                   'replaces_textures', 'adds_textures'}
+                                   'replaces_textures', 'adds_textures',
+                                   'patches_animations'}
     """
     ops = set()
     mod_type = mod.get('type', '')
@@ -155,11 +156,13 @@ def _infer_operations(mod):
             elif t == 'mesh_replace': ops.add('replaces_meshes')
             elif t == 'mesh_patch': ops.add('patches_meshes')
             elif t == 'texture_replace': ops.add('replaces_textures')
+            elif t == 'animation_patch': ops.add('patches_animations')
     elif mod_type:
         if mod_type == 'mesh_add': ops.add('adds_meshes')
         elif mod_type == 'mesh_replace': ops.add('replaces_meshes')
         elif mod_type == 'mesh_patch': ops.add('patches_meshes')
         elif mod_type == 'texture_replace': ops.add('replaces_textures')
+        elif mod_type == 'animation_patch': ops.add('patches_animations')
 
     # Infer from assets
     if assets.get('glb'):
@@ -178,6 +181,11 @@ def _infer_operations(mod):
             ops.add('adds_textures')
         elif tex.get('replaces') or tex.get('name'):
             ops.add('replaces_textures')
+
+    # Infer animation operations from assets
+    animations = assets.get('animations', {})
+    if isinstance(animations, dict) and animations.get('patch'):
+        ops.add('patches_animations')
 
     return ops
 
@@ -257,6 +265,20 @@ def detect_conflicts(mod_dir, r2_plugins_dir):
             if (my_adds and o_replaces) or (my_replaces and o_adds):
                 print(f"WARNING: '{my_name}' and '{o_name}' both target "
                       f"'{my_character}' (add + replace may conflict)")
+
+            # Animation conflicts: two mods patching animations for same character
+            if 'patches_animations' in my_ops and 'patches_animations' in o_ops:
+                # Check filter overlap — if both have filters, they may target different anims
+                my_anim_filter = mod.get('assets', {}).get('animations', {}).get('filter', '')
+                o_anim_filter = other.get('assets', {}).get('animations', {}).get('filter', '')
+                if not my_anim_filter or not o_anim_filter or my_anim_filter == o_anim_filter:
+                    print(f"CONFLICT: '{my_name}' and '{o_name}' both patch "
+                          f"animations for '{my_character}'")
+                    safe = False
+                else:
+                    print(f"OK: '{my_name}' and '{o_name}' patch different "
+                          f"animations for '{my_character}' "
+                          f"('{my_anim_filter}' vs '{o_anim_filter}')")
 
             # mesh_add + mesh_add = OK (mergeable)
             # patches + anything = OK (vertex edits are independent)
@@ -344,8 +366,10 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
     glb_path = os.path.join(mod_dir, assets.get('glb', ''))
     mesh_entries = target.get('mesh_entries', [f"{character}_Mesh"])
 
+    has_anim_ops = 'patches_animations' in ops
     has_mesh_ops = ops & {'adds_meshes', 'replaces_meshes', 'patches_meshes'}
-    if has_mesh_ops and os.path.isfile(glb_path):
+    has_mesh_or_anim_ops = has_mesh_ops or has_anim_ops
+    if has_mesh_or_anim_ops and os.path.isfile(glb_path):
         gpk_path = os.path.join(gpk_dir, f"{character}.gpk")
         sdb_path = os.path.join(gpk_dir, f"{character}.sdb")
 
@@ -361,6 +385,12 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
         try:
             # Use manifest from export if available
             manifest_path = os.path.join(mod_dir, 'manifest.json')
+
+            # Animation patch parameters
+            anim_cfg = assets.get('animations', {})
+            patch_animations = has_anim_ops
+            anim_patch_filter = anim_cfg.get('filter') if isinstance(anim_cfg, dict) else None
+
             convert(
                 glb_path=glb_path,
                 gpk_path=gpk_path,
@@ -369,6 +399,8 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
                 output_gpk=output_gpk,
                 manifest_path=manifest_path if os.path.isfile(manifest_path) else None,
                 allow_topology_change=bool(ops & {'replaces_meshes', 'adds_meshes'}),
+                patch_animations=patch_animations,
+                anim_patch_filter=anim_patch_filter,
             )
         except Exception as e:
             print(f"ERROR: GPK build failed: {e}")
