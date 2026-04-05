@@ -6,45 +6,74 @@ All notable changes to CG3H are documented here.
 
 ## v3.0.0
 
-Hell2Modding integration, non-destructive mod distribution, and standalone packaging.
+Hell2Modding integration, non-destructive mod distribution, and complete GUI rewrite.
 
-**This is a major workflow shift.** CG3H now produces H2M-compatible mod packages. Zero game files are modified -- H2M loads standalone assets at runtime. The v2.x GUI/CLI workflow remains available as an advanced/legacy option.
+**This is a major workflow shift.** CG3H is now a mod builder that produces H2M-compatible packages. Zero game files are modified — H2M loads standalone assets at runtime.
 
 ### Added
 
-- **`cg3h build` command** (`tools/cg3h_build.py`) -- reads `mod.json` + assets, builds H2M folder structure
-  - `--package` flag creates Thunderstore-ready ZIP for upload
-  - Auto-detects game directory from Steam paths
-- **Standalone .pkg builder** -- creates `.pkg` files from scratch with custom textures; no more modifying game packages
+- **CG3H Mod Builder GUI** — complete rewrite with 3 workflow tabs:
+  - **Create**: pick character, export to mod workspace, auto-generate mod.json
+  - **Build**: build GPK + PKG for H2M, optional Thunderstore ZIP, one-click r2modman install
+  - **Mods**: see installed mods, conflicts, merge order, disable/remove/rebuild
+- **`cg3h build` command** — reads `mod.json` + assets, builds H2M folder structure
+  - `--package` flag creates Thunderstore-ready ZIP
+  - `--check-conflicts` for dry-run conflict detection
+- **Standalone .pkg builder** — creates `.pkg` from scratch with custom textures
   - H2M's `LoadPackages` API loads them at runtime
-- **mod.json specification** -- standardized mod descriptor with 4 types:
-  - `texture_replace`: custom PNG -> standalone .pkg (CC-free)
-  - `mesh_add`: append new meshes, original geometry stripped from distribution (CC-free)
-  - `mesh_replace`: swap character meshes (v3.1 diff format needed for CC-free distribution)
-  - `mesh_patch`: edit vertices in-place (v3.1 diff format needed for CC-free distribution)
-- **PyInstaller exe** (`cg3h_builder.exe`, 29MB) -- standalone builder, no Python needed for end users
+  - No `.pkg_manifest` needed for 3D textures
+- **mod.json specification** — 5 mod types:
+  - `texture_replace`: custom PNG → standalone .pkg (CC-free)
+  - `mesh_add`: append new meshes (CC-free, originals stripped)
+  - `mesh_replace`: swap character meshes
+  - `mesh_patch`: edit vertices in-place
+  - `animation_patch`: edit animations with filter support
+- **Operation-based system** — mods infer operations from assets, support multiple types
+- **Multi-mod merger** — scans mods, groups by character, builds merged GPK + PKG
+  - Sequential merge: each mod applied to previous output
+  - Merged PKG combines all custom textures
+- **Mod priority system** — `cg3h_mod_priority.json` controls merge order
+  - Auto-generated, editable via GUI or by hand
+  - Higher index = applied later = wins conflicts
+- **Conflict detection** — per-operation analysis:
+  - Same texture replaced by multiple mods = conflict
+  - Multiple mesh_replace for same character = conflict
+  - mesh_add + mesh_add = compatible (merged)
+  - Different animation filters = compatible
+- **Smart data stripping** — Thunderstore ZIPs only contain changed data:
+  - Meshes: compared by vertex/index count against manifest
+  - Textures: compared by PNG hash against manifest
+  - Animations: compared by content hash against manifest
+  - Unchanged assets stripped from distribution
+- **PyInstaller exe** (`cg3h_builder.exe`, 29MB) — no Python needed for end users
   - Included in Thunderstore ZIP for mesh mods
-  - Lua companion auto-runs it on first launch to build GPK
-- **H2M Lua companion** -- auto-generated `main.lua` that:
-  - Loads standalone `.pkg` via `rom.game.LoadPackages`
-  - Auto-builds GPK on first launch if missing (runs `cg3h_builder.exe`)
-  - Deferred loading via `rom.on_import.post`
-- **Thunderstore distribution** -- ZIP ready for upload containing:
-  - `mod.json` + GLB (new meshes only) + PNG (custom textures)
-  - Standalone `.pkg` + H2M manifest + Lua companion
+  - Lua companion auto-runs on first launch to build GPK
+- **H2M Lua companion** — auto-generated `main.lua`:
+  - `rom.game.LoadPackages` for custom .pkg loading
+  - `rom.on_import.post` for deferred initialization
+  - Auto-build GPK on first launch if missing
+- **Thunderstore packaging** — ZIP ready for upload:
+  - mod.json + stripped GLB + PNG (CC-free for mesh_add + texture_replace)
+  - Standalone .pkg + H2M manifest + Lua companion
   - `cg3h_builder.exe` for mesh mods
-  - No copyrighted content for `mesh_add` + `texture_replace` types
+  - `conflicts.json` describing what the mod touches
+- **GitHub Actions** — tag `v*` triggers automated release build
+- **Blender addon v3.0** — textures, animations, topology change, Build for H2M menu
 
 ### Changed
 
-- README restructured: H2M workflow is now the primary path; v2.x GUI/CLI is "Advanced / Legacy"
-- Texture import can now build standalone `.pkg` from scratch (not just replace entries in game packages)
+- GUI rewritten from 4 technical tabs to 3 workflow tabs (Create/Build/Mods)
+- Window title: "CG3H Mod Builder"
+- Default output directory: `Documents/CG3H_Mods/`
+- Blender addon version bumped to 3.0.0
 
-### Removed (no longer needed with H2M)
+### Removed
 
-- DLL injection is no longer required for mod loading
-- Checksum management (`checksums.txt` patching) is unnecessary -- standalone packages bypass validation
-- Backup/restore system is unnecessary -- no game files are modified
+- Legacy Import tab (merged into Build)
+- Legacy Install tab (replaced by Mods)
+- Backup/restore system (H2M mods are non-destructive)
+- Checksum management (standalone packages bypass validation)
+- Mod registry (_mods.json) — replaced by r2modman scanning
 - Direct game file modification is no longer the primary workflow
 
 ### Known Issues
