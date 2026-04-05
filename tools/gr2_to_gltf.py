@@ -1893,9 +1893,22 @@ def main():
     if args.textures and 'manifest_textures' in dir():
         manifest['textures'] = manifest_textures
     if anim_data:
+        # Store per-animation content hashes for smart stripping
+        import hashlib as _mhl
+        anim_hashes = {}
+        for a in anim_data:
+            h = _mhl.md5()
+            for t in a.get('tracks', []):
+                for key in ('orient', 'pos', 'scale'):
+                    if t[key] is not None:
+                        knots, values, _ = t[key]
+                        h.update(knots.tobytes())
+                        h.update(values.tobytes())
+            anim_hashes[a['name']] = h.hexdigest()
         manifest['animations'] = {
             'count': len(anim_data),
             'names': [a['name'] for a in anim_data],
+            'hashes': anim_hashes,
         }
     manifest_path = os.path.join(os.path.dirname(out_path), 'manifest.json')
     with open(manifest_path, 'w') as f:

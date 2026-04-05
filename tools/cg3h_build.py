@@ -105,7 +105,36 @@ def _strip_unchanged_data(glb_path, mod_dir):
                                     if tex.source == img_idx and mi not in keep_indices:
                                         keep_indices.append(mi)
 
-        if not keep_indices:
+        # Strip unchanged animations
+        original_anim_hashes = manifest.get('animations', {}).get('hashes', {})
+        keep_anims = []
+        stripped_anims = 0
+        if gltf.animations and original_anim_hashes:
+            for ai, anim in enumerate(gltf.animations):
+                orig_hash = original_anim_hashes.get(anim.name, '')
+                if not orig_hash:
+                    # New animation — keep it
+                    keep_anims.append(ai)
+                    continue
+                # Compute current hash from the GLB animation data
+                anim_hash = hashlib.md5()
+                for ch in anim.channels:
+                    sampler = anim.samplers[ch.sampler]
+                    for acc_idx in [sampler.input, sampler.output]:
+                        acc = gltf.accessors[acc_idx]
+                        bv = gltf.bufferViews[acc.bufferView]
+                        data = blob[bv.byteOffset:bv.byteOffset + bv.byteLength]
+                        anim_hash.update(data)
+                if anim_hash.hexdigest() != orig_hash:
+                    keep_anims.append(ai)
+                else:
+                    stripped_anims += 1
+        elif gltf.animations:
+            # No hashes in manifest — keep all (can't determine what changed)
+            keep_anims = list(range(len(gltf.animations)))
+
+        has_changes = bool(keep_indices) or bool(keep_anims) or bool(images_to_keep)
+        if not has_changes:
             print(f"  No changes detected — nothing to strip")
             return None
 
@@ -122,9 +151,17 @@ def _strip_unchanged_data(glb_path, mod_dir):
 
         gltf.meshes = new_meshes
 
+        # Strip unchanged animations
+        if gltf.animations and original_anim_hashes:
+            gltf.animations = [gltf.animations[i] for i in keep_anims]
+
         kept_names = [m.name for m in new_meshes]
-        print(f"  Keeping {len(new_meshes)} mesh(es): {', '.join(kept_names)}")
+        if kept_names:
+            print(f"  Keeping {len(new_meshes)} mesh(es): {', '.join(kept_names[:5])}")
         print(f"  Stripped {len(original_names) - len(keep_indices)} unchanged mesh(es)")
+        if stripped_anims:
+            print(f"  Stripped {stripped_anims} unchanged animation(s), "
+                  f"keeping {len(keep_anims)}")
 
         import io
         buf = io.BytesIO()
