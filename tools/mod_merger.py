@@ -5,9 +5,10 @@ a single GPK + PKG for H2M.
 When two mesh_add mods both target Melinoe, we can't have two Melinoe.gpk
 files. The merger:
 1. Scans installed CG3H mods (plugins_data + plugins)
-2. Groups by target character
-3. For each character with multiple mods: builds a merged GPK + merged PKG
-4. Places the merged files in a shared location H2M can find
+2. Loads mod_priority.json for merge order (generates default if missing)
+3. Groups by target character
+4. For each character with multiple mods: builds a merged GPK + merged PKG
+5. Places the merged files in a shared location H2M can find
 
 Usage:
     python mod_merger.py <r2_plugins_dir> [--game-dir DIR]
@@ -21,6 +22,60 @@ import sys
 _tools_dir = os.path.dirname(os.path.abspath(__file__))
 if _tools_dir not in sys.path:
     sys.path.insert(0, _tools_dir)
+
+
+def load_priority(r2_base_dir):
+    """
+    Load mod_priority.json — defines merge order per character.
+    Higher index = applied later = wins conflicts.
+    Returns {character: [mod_id_list_in_order]} or empty dict.
+    """
+    path = os.path.join(r2_base_dir, 'cg3h_mod_priority.json')
+    if os.path.isfile(path):
+        with open(path) as f:
+            return json.load(f)
+    return {}
+
+
+def save_priority(r2_base_dir, priority):
+    """Save mod_priority.json."""
+    path = os.path.join(r2_base_dir, 'cg3h_mod_priority.json')
+    with open(path, 'w') as f:
+        json.dump(priority, f, indent=2)
+    print(f"  Saved priority: {path}")
+
+
+def generate_default_priority(r2_base_dir, mods):
+    """
+    Generate default mod_priority.json from installed mods.
+    Default order: alphabetical by mod id.
+    Only generates for characters with multiple mods.
+    Preserves existing priority entries, appends new mods at the end.
+    """
+    existing = load_priority(r2_base_dir)
+    groups = group_by_character(mods)
+    changed = False
+
+    for character, char_mods in groups.items():
+        if len(char_mods) <= 1:
+            continue
+        mod_ids = [m['id'] for m in char_mods]
+        if character not in existing:
+            # New character — alphabetical default
+            existing[character] = sorted(mod_ids)
+            changed = True
+        else:
+            # Existing — append any new mods not yet in the list
+            for mid in mod_ids:
+                if mid not in existing[character]:
+                    existing[character].append(mid)
+                    changed = True
+            # Remove mods no longer installed
+            existing[character] = [mid for mid in existing[character] if mid in mod_ids]
+
+    if changed:
+        save_priority(r2_base_dir, existing)
+    return existing
 
 
 def scan_cg3h_mods(r2_base_dir):
@@ -310,6 +365,11 @@ def merge_all(r2_base_dir, game_dir=None):
     groups = group_by_character(mods)
     print(f"Characters: {', '.join(groups.keys())}")
 
+    # Generate/update priority file
+    priority = generate_default_priority(r2_base_dir, mods)
+    if priority:
+        print(f"Mod priority: {json.dumps(priority, indent=2)}")
+
     # Auto-detect game dir
     if game_dir is None:
         for p in [
@@ -327,6 +387,12 @@ def merge_all(r2_base_dir, game_dir=None):
     plugins_data = os.path.join(r2_base_dir, 'plugins_data')
 
     for character, char_mods in sorted(groups.items()):
+        # Sort mods by priority (higher index = applied later = wins conflicts)
+        char_priority = priority.get(character, [])
+        if char_priority:
+            mod_id_to_idx = {mid: i for i, mid in enumerate(char_priority)}
+            char_mods.sort(key=lambda m: mod_id_to_idx.get(m['id'], 999))
+
         if len(char_mods) == 1:
             print(f"\n{character}: 1 mod, no merge needed")
             continue
