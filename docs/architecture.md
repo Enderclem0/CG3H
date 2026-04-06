@@ -1,5 +1,14 @@
 # Architecture & Implementation Notes
 
+## CG3H's Dual Role
+
+CG3H operates at two stages of the mod lifecycle:
+
+- **Build-time** (mod creator): Export game models to GLB, edit in Blender, then `cg3h build` produces an H2M-compatible package (GPK + standalone PKG + Lua companion) ready for Thunderstore upload.
+- **Runtime** (end user): On the player's machine, `cg3h_builder.exe` builds the GPK from the mod's GLB + the player's local game files. When multiple mods target the same character, the **mod merger** fuses them into a single merged GPK + merged PKG per character, applied in priority order.
+
+Neither stage modifies game files. Build-time strips copyrighted content from distribution. Runtime reconstructs it locally and merges all active mods into one coherent package that H2M loads.
+
 ## Core Principle
 
 All struct offsets are discovered at runtime by walking Granny's exported type-definition
@@ -136,12 +145,12 @@ broken glTF output:
 
 ### Design Philosophy
 
-CG3H is a mod builder that produces H2M-compatible packages. H2M provides the runtime
-layer: it loads standalone `.pkg` files and runs Lua companions without touching the
-game's original assets. This eliminates DLL injection, checksum management,
-backup/restore, and direct file modification.
+CG3H produces H2M-compatible packages **and** runs on end-user machines to assemble
+the final mod artifacts. H2M provides the game-side runtime: it loads standalone `.pkg`
+files and runs Lua companions without touching game assets. This eliminates DLL
+injection, checksum management, backup/restore, and direct file modification.
 
-### `cg3h build` Pipeline
+### Build-Time: `cg3h build` Pipeline
 
 The `cg3h_build.py` script reads a `mod.json` descriptor and produces an
 H2M-compatible folder structure (optionally packaged as a Thunderstore ZIP):
@@ -210,6 +219,49 @@ Auto-generated `main.lua` included in every mod package:
 - 29MB single-file executable
 - Included in Thunderstore ZIP for mesh mods only
 - Uses the end user's local `granny2_x64.dll` (auto-detected from Steam path)
+
+### Runtime: On-Device GPK Build
+
+When a mesh mod is installed, the end user does not receive a pre-built GPK (that would
+contain copyrighted geometry). Instead, the Lua companion detects a missing GPK on first
+launch and runs `cg3h_builder.exe`, which:
+
+1. Reads the shipped GLB (custom meshes only) + the player's local `.gpk` + `.sdb`
+2. Appends new meshes / replaces meshes / patches vertices using the same import pipeline as `gltf_to_gr2.py`
+3. Writes the output GPK into the mod's `plugins_data` folder
+4. H2M picks up the GPK on the next load
+
+This runs once per mod install (or when the mod updates). The built GPK is cached locally.
+
+### Runtime: Multi-Mod Merger (`mod_merger.py`)
+
+When multiple mods target the same character, CG3H fuses them into a single package.
+Two mods cannot each ship their own `Melinoe.gpk` — the merger resolves this.
+
+**Merge flow:**
+
+1. **Scan** — walks the H2M `plugins` + `plugins_data` directories for all installed CG3H mods (identified by `mod.json` with `format: "cg3h-mod"`)
+2. **Group** — clusters mods by target character
+3. **Order** — reads `cg3h_mod_priority.json` for merge order (higher index = applied later = wins conflicts). Auto-generates a default alphabetical order if missing.
+4. **Conflict check** — per-operation analysis before merging:
+   - Multiple `mesh_replace` for the same character → hard conflict (blocked)
+   - Same texture replaced by multiple mods → hard conflict (blocked)
+   - `mesh_add` + `mesh_add` → compatible (both appended)
+   - `mesh_add` + `mesh_replace` → warning (may not interact well)
+   - Different animation filters → compatible
+5. **Sequential merge** — applies each mod in priority order to the previous output:
+   - Starts from the original `.gpk` (from the player's game install)
+   - Each mod's GLB is imported via `gltf_to_gr2.convert()` with `allow_topology_change=True`
+   - Intermediate GPKs are written and chained; only the final output is kept
+6. **PKG merge** — collects all custom textures from all mods and builds a single `CG3H-Merged-<Character>.pkg`
+7. **Lua merge** — generates a merged `main.lua` that loads the combined package
+
+**Output:** `plugins_data/CG3H-Merged-<Character>/` containing the merged GPK, merged PKG, and merged Lua companion. H2M loads this as a single mod.
+
+**Trigger points:**
+- GUI Mods tab → "Rebuild" button
+- CLI: `python mod_merger.py <r2_dir> [--game-dir DIR] [--character NAME]`
+- Lua companion auto-build on first launch (single-mod case)
 
 ## Future Work
 

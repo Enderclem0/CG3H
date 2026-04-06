@@ -225,19 +225,33 @@ When multiple mods target the same character, CG3H detects conflicts per-operati
 - Higher index = applied later = wins conflicts
 - The multi-mod merger (`mod_merger.py`) applies mods sequentially in priority order
 
-### Multi-mod merging
+### Multi-mod merging (runtime)
+
+CG3H is not just a build tool — it also runs on end-user machines to fuse multiple mods
+into one coherent package per character. Two mods cannot each ship their own `Melinoe.gpk`;
+the merger resolves this automatically.
 
 When mods are compatible, `mod_merger.py`:
-1. Scans all installed mods, groups by target character
-2. Applies each mod sequentially to the previous output
-3. Merges custom textures into a combined standalone `.pkg`
-4. Outputs a single merged GPK per character
+1. Scans all installed CG3H mods in the H2M `plugins` + `plugins_data` directories
+2. Groups mods by target character
+3. Sorts by `cg3h_mod_priority.json` (higher index = applied later = wins)
+4. Applies each mod sequentially to the original GPK from the player's game install
+5. Merges all custom textures into a single `CG3H-Merged-<Character>.pkg`
+6. Generates a merged `main.lua` that loads the combined package
+7. Outputs everything to `plugins_data/CG3H-Merged-<Character>/`
+
+The merge is triggered via the GUI Mods tab ("Rebuild"), the CLI (`python mod_merger.py`),
+or automatically by the Lua companion on first launch for single-mod cases.
+
+See [`architecture.md`](architecture.md) for the full merge flow and conflict check details.
 
 ---
 
-## Build Pipeline
+## Pipelines
 
-### For mod creators
+CG3H operates at two stages of the mod lifecycle:
+
+### Build-time (mod creator)
 
 1. **Create**: Use the GUI Create tab (or CLI `gr2_to_gltf.py`) to export a character
 2. **Edit**: Modify in Blender — meshes, textures, animations
@@ -246,12 +260,13 @@ When mods are compatible, `mod_merger.py`:
 5. **Package**: `python tools/cg3h_build.py --package` for Thunderstore ZIP
 6. **Upload**: Upload ZIP to Thunderstore
 
-### For mod consumers
+### Runtime (end user)
 
 1. Install Hell2Modding via r2modman
 2. Install CG3H mods from Thunderstore
 3. Launch the game — H2M loads the mods automatically
-4. For mesh mods: `cg3h_builder.exe` runs on first launch to build the GPK
+4. For mesh mods: `cg3h_builder.exe` runs on first launch to build the GPK from the player's local game files + the shipped GLB (no copyrighted geometry distributed)
+5. For multiple mods on the same character: the mod merger fuses them into one merged GPK + PKG
 
 ### Build internals
 
