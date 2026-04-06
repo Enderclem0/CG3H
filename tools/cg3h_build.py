@@ -670,12 +670,15 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
                 print(f"  Manifest: {len(new_tex_names)} new texture(s) registered")
 
     # ── Generate H2M manifest ──
+    dependencies = ["Hell2Modding-Hell2Modding-0.2.0"]
+    if has_mesh_ops:
+        dependencies.append("Enderclem-CG3HBuilder-3.0.0")
     h2m_manifest = {
         "name": name,
         "version_number": meta.get('version', '1.0.0'),
         "website_url": meta.get('url', ''),
         "description": meta.get('description', ''),
-        "dependencies": ["Hell2Modding-Hell2Modding-0.2.0"],
+        "dependencies": dependencies,
     }
     with open(os.path.join(plugins, 'manifest.json'), 'w') as f:
         json.dump(h2m_manifest, f, indent=2)
@@ -705,17 +708,23 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
     else:
         lua_lines.append(f'rom.log.info("[CG3H] Loaded: {name}")')
 
-    # If this is a mesh mod, add auto-build logic
+    # If this is a mesh mod, add auto-build logic using the shared CG3HBuilder plugin
     if has_mesh_ops:
         lua_lines.extend([
             f'',
-            f'-- Auto-build GPK on first launch if missing',
+            f'-- Auto-build GPK on first launch if missing (uses shared CG3HBuilder)',
             f'local gpk_path = rom.path.combine(_PLUGIN.plugins_data_mod_folder_path, "{character}.gpk")',
-            f'local builder_path = rom.path.combine(_PLUGIN.plugins_data_mod_folder_path, "cg3h_builder.exe")',
-            f'if not rom.path.exists(gpk_path) and rom.path.exists(builder_path) then',
-            f'    rom.log.info("[CG3H] Building GPK for {name}...")',
-            f'    os.execute(builder_path .. " " .. _PLUGIN.plugins_data_mod_folder_path)',
-            f'    rom.log.info("[CG3H] GPK build complete")',
+            f'if not rom.path.exists(gpk_path) then',
+            f'    -- Find cg3h_builder.exe from CG3HBuilder plugin',
+            f'    local builder_base = _PLUGIN.plugins_data_mod_folder_path:gsub("[^/\\\\]+[/\\\\]?$", "") .. "CG3HBuilder"',
+            f'    local builder_path = rom.path.combine(builder_base, "cg3h_builder.exe")',
+            f'    if rom.path.exists(builder_path) then',
+            f'        rom.log.info("[CG3H] Building GPK for {name}...")',
+            f'        os.execute(builder_path .. " " .. _PLUGIN.plugins_data_mod_folder_path)',
+            f'        rom.log.info("[CG3H] GPK build complete")',
+            f'    else',
+            f'        rom.log.info("[CG3H] WARNING: cg3h_builder.exe not found — install CG3HBuilder plugin")',
+            f'    end',
             f'end',
         ])
 
@@ -811,18 +820,8 @@ def package_thunderstore(mod_dir):
         if os.path.isfile(manifest_file):
             zf.write(manifest_file, 'manifest.json')
 
-        # Include builder exe for mesh mods (auto-build GPK on user's machine)
-        pkg_ops = _infer_operations(mod)
-        if pkg_ops & {'adds_meshes', 'replaces_meshes', 'patches_meshes'}:
-            exe_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                    'dist', 'cg3h_builder.exe')
-            if os.path.isfile(exe_path):
-                zf.write(exe_path,
-                         f'plugins_data/{mod_id}/cg3h_builder.exe')
-                print(f"  Included cg3h_builder.exe (29MB)")
-            else:
-                print(f"  WARNING: cg3h_builder.exe not found at {exe_path}")
-                print(f"  Run: pyinstaller --onefile tools/cg3h_builder_entry.py")
+        # Mesh mods use the shared CG3HBuilder Thunderstore plugin (no bundled exe)
+        # The dependency is declared in manifest.json
 
     print(f"\n  Thunderstore package: {zip_path}.zip")
     return True

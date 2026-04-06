@@ -28,6 +28,32 @@ jobs:
         run: |
           pyinstaller --onefile --name cg3h_builder --collect-all etcpak --collect-all archspec --hidden-import numpy --hidden-import lz4.block --hidden-import pygltflib --hidden-import PIL cg3h_builder_entry.py
 
+      - name: Create Thunderstore package
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          $manifest = Get-Content .github/thunderstore/manifest.json | ConvertFrom-Json
+          $manifest.version_number = $version
+          $manifest | ConvertTo-Json | Set-Content thunderstore/manifest.json
+
+          New-Item -ItemType Directory -Force -Path thunderstore/plugins/CG3HBuilder
+          New-Item -ItemType Directory -Force -Path thunderstore/plugins_data/CG3HBuilder
+
+          Copy-Item tools/dist/cg3h_builder.exe thunderstore/plugins_data/CG3HBuilder/
+          Copy-Item .github/thunderstore/README.md thunderstore/
+
+          # Minimal main.lua — just log that the builder is available
+          @"
+          rom.log.info("[CG3H] CG3H Builder ready")
+          "@ | Set-Content thunderstore/plugins/CG3HBuilder/main.lua
+
+          # Plugin manifest
+          @"
+          {"name":"CG3HBuilder","version_number":"$version","website_url":"https://github.com/Enderclem0/CG3H","description":"CG3H Runtime Builder","dependencies":["Hell2Modding-Hell2Modding-0.2.0"]}
+          "@ | Set-Content thunderstore/plugins/CG3HBuilder/manifest.json
+
+          Compress-Archive -Path thunderstore/* -DestinationPath "Enderclem-CG3HBuilder-$version.zip"
+        shell: pwsh
+
       - name: Create tools ZIP for Python users
         run: |
           Compress-Archive -Path tools/* -DestinationPath tools.zip
@@ -40,6 +66,7 @@ jobs:
           path: |
             tools/dist/cg3h_builder.exe
             tools.zip
+            Enderclem-CG3HBuilder-*.zip
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -47,3 +74,4 @@ jobs:
           files: |
             tools/dist/cg3h_builder.exe
             tools.zip
+            Enderclem-CG3HBuilder-*.zip
