@@ -19,6 +19,14 @@ import os
 import shutil
 import sys
 
+STEAM_PATHS = [
+    "C:/Program Files (x86)/Steam/steamapps/common/Hades II",
+    "C:/Program Files/Steam/steamapps/common/Hades II",
+    "D:/Steam/steamapps/common/Hades II",
+    "D:/SteamLibrary/steamapps/common/Hades II",
+    "E:/SteamLibrary/steamapps/common/Hades II",
+]
+
 _tools_dir = os.path.dirname(os.path.abspath(__file__))
 if _tools_dir not in sys.path:
     sys.path.insert(0, _tools_dir)
@@ -372,10 +380,7 @@ def merge_all(r2_base_dir, game_dir=None):
 
     # Auto-detect game dir
     if game_dir is None:
-        for p in [
-            "C:/Program Files (x86)/Steam/steamapps/common/Hades II",
-            "D:/Steam/steamapps/common/Hades II",
-        ]:
+        for p in STEAM_PATHS:
             if os.path.isdir(p):
                 game_dir = p
                 break
@@ -418,7 +423,7 @@ def main():
         if args.character in groups:
             game_dir = args.game_dir
             if not game_dir:
-                for p in ["C:/Program Files (x86)/Steam/steamapps/common/Hades II"]:
+                for p in STEAM_PATHS:
                     if os.path.isdir(p):
                         game_dir = p
                         break

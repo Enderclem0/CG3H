@@ -520,7 +520,8 @@ def _decode_curve(dll, curve2_addr, data_ptr, expected_dim):
         result = _decode_curve_dak32f(conv_data, expected_dim) if _valid_ptr(conv_data) else None
         dll.GrannyFreeCurve(ctypes.c_void_p(ret))
         return result
-    except Exception:
+    except Exception as e:
+        print(f"  WARNING: curve decode failed: {e}")
         return None
 
 
@@ -1421,7 +1422,8 @@ def _extract_all_textures(pkg_dir, texture_names):
             break
         try:
             chunks, _, _ = read_pkg_chunks(pkg_path)
-        except Exception:
+        except Exception as e:
+            print(f"  WARNING: failed to read {os.path.basename(pkg_path)}: {e}")
             continue
 
         # Use scan_textures which handles both Tex2D and Atlas entries
@@ -1547,7 +1549,8 @@ def _extract_model_texture(pkg_dir, character_name, gr2_texture_names=None):
     for pkg_path in pkg_files:
         try:
             chunks, _, _ = read_pkg_chunks(pkg_path)
-        except Exception:
+        except Exception as e:
+            print(f"  WARNING: failed to read {os.path.basename(pkg_path)}: {e}")
             continue
 
         for ci, (chunk, _) in enumerate(chunks):

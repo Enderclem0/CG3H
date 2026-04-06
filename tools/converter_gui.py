@@ -471,65 +471,55 @@ class App:
         import io
         import contextlib
 
-        ship_dir = os.path.join(self.game_path.get(), "Ship")
-        orig_cwd = os.getcwd()
+        game_dir = self.game_path.get()
         output_path = None
         ts_path = None
 
+        self._log_write_ui(self._build_log, f"Building mod from: {mod_dir}\n\n")
+
+        # Capture stdout/stderr
+        buf = io.StringIO()
         try:
-            if os.path.isdir(ship_dir):
-                os.chdir(ship_dir)
-
-            self._log_write_ui(self._build_log, f"Building mod from: {mod_dir}\n")
-            self._log_write_ui(self._build_log, f"Working directory: {os.getcwd()}\n\n")
-
-            # Capture stdout/stderr
-            buf = io.StringIO()
-            try:
-                with contextlib.redirect_stdout(buf), \
-                     contextlib.redirect_stderr(buf):
-                    output_path = cg3h_build.build_mod(mod_dir)
-            except Exception:
-                pass
-            finally:
-                captured = buf.getvalue()
-                if captured:
-                    self._log_write_ui(self._build_log, captured)
-
-            if output_path is None:
-                try:
-                    output_path = cg3h_build.build_mod(mod_dir)
-                except Exception as e:
-                    self._log_write_ui(self._build_log, f"\nBuild failed: {e}\n")
-                    self._ui(lambda: self._build_finish(False, mod_dir))
-                    return
-
-            self._log_write_ui(self._build_log, f"\nBuild output: {output_path}\n")
-
-            # Thunderstore packaging
-            if self._build_thunderstore.get():
-                self._log_write_ui(self._build_log, "\nCreating Thunderstore ZIP...\n")
-                try:
-                    buf2 = io.StringIO()
-                    with contextlib.redirect_stdout(buf2), \
-                         contextlib.redirect_stderr(buf2):
-                        ts_path = cg3h_build.package_thunderstore(mod_dir)
-                    captured2 = buf2.getvalue()
-                    if captured2:
-                        self._log_write_ui(self._build_log, captured2)
-                    if ts_path:
-                        self._log_write_ui(self._build_log,
-                                           f"Thunderstore ZIP: {ts_path}\n")
-                except Exception as e:
-                    self._log_write_ui(self._build_log,
-                                       f"Thunderstore packaging failed: {e}\n")
-
-            # Install to r2modman
-            if self._build_install_r2.get():
-                self._install_to_r2modman(mod_dir)
-
+            with contextlib.redirect_stdout(buf), \
+                 contextlib.redirect_stderr(buf):
+                output_path = cg3h_build.build_mod(mod_dir, game_dir=game_dir)
+        except Exception as e:
+            self._log_write_ui(self._build_log, f"\nBuild failed: {e}\n")
+            self._ui(lambda: self._build_finish(False, mod_dir))
+            return
         finally:
-            os.chdir(orig_cwd)
+            captured = buf.getvalue()
+            if captured:
+                self._log_write_ui(self._build_log, captured)
+
+        if not output_path:
+            self._log_write_ui(self._build_log, "\nBuild returned no output\n")
+            self._ui(lambda: self._build_finish(False, mod_dir))
+            return
+
+        self._log_write_ui(self._build_log, f"\nBuild output: {output_path}\n")
+
+        # Thunderstore packaging
+        if self._build_thunderstore.get():
+            self._log_write_ui(self._build_log, "\nCreating Thunderstore ZIP...\n")
+            try:
+                buf2 = io.StringIO()
+                with contextlib.redirect_stdout(buf2), \
+                     contextlib.redirect_stderr(buf2):
+                    ts_path = cg3h_build.package_thunderstore(mod_dir)
+                captured2 = buf2.getvalue()
+                if captured2:
+                    self._log_write_ui(self._build_log, captured2)
+                if ts_path:
+                    self._log_write_ui(self._build_log,
+                                       f"Thunderstore ZIP: {ts_path}\n")
+            except Exception as e:
+                self._log_write_ui(self._build_log,
+                                   f"Thunderstore packaging failed: {e}\n")
+
+        # Install to r2modman
+        if self._build_install_r2.get():
+            self._install_to_r2modman(mod_dir)
 
         self._ui(lambda: self._build_finish(True, mod_dir))
 
@@ -560,6 +550,12 @@ class App:
                 if os.path.isdir(dst):
                     shutil.rmtree(dst)
                 shutil.copytree(src, dst)
+
+        # Copy mod.json to plugins_data so Mods tab can find it
+        mod_json_src = os.path.join(mod_dir, "mod.json")
+        mod_json_dst = os.path.join(r2_dir, "plugins_data", mod_id, "mod.json")
+        if os.path.isfile(mod_json_src):
+            shutil.copy2(mod_json_src, mod_json_dst)
 
         self._log_write_ui(self._build_log, f"\nInstalled to r2modman: {r2_dir}\n")
 
@@ -929,12 +925,7 @@ class App:
             import contextlib
 
             game_dir = self.game_path.get()
-            orig_cwd = os.getcwd()
             try:
-                ship_dir = os.path.join(game_dir, "Ship")
-                if os.path.isdir(ship_dir):
-                    os.chdir(ship_dir)
-
                 buf = io.StringIO()
                 with contextlib.redirect_stdout(buf), \
                      contextlib.redirect_stderr(buf):
@@ -949,8 +940,6 @@ class App:
             except Exception as e:
                 self._ui(lambda: self._merge_status.config(
                     text=f"Merge failed: {e}", foreground="#a00"))
-            finally:
-                os.chdir(orig_cwd)
             self._ui(self._mods_refresh)
 
         threading.Thread(target=worker, daemon=True).start()

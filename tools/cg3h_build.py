@@ -169,7 +169,9 @@ def _strip_unchanged_data(glb_path, mod_dir):
         return buf.getvalue()
 
     except Exception as e:
+        import traceback
         print(f"  Strip failed: {e}")
+        traceback.print_exc()
         return None
 
 
@@ -780,7 +782,8 @@ def package_thunderstore(mod_dir):
                     print(f"  Packaged GLB: unchanged data stripped")
                 else:
                     zf.write(glb_full, glb)
-                    print(f"  WARNING: Could not strip unchanged data")
+                    print(f"  WARNING: Could not strip unchanged data — "
+                          f"full GLB included (may contain original geometry)")
 
         # Include conflicts.json (describes what this mod touches)
         conflicts = _build_conflicts_json(mod)
