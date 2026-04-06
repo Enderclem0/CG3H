@@ -558,58 +558,33 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
     gpk_dir = os.path.join(game_dir, "Content", "GR2", "_Optimized")
     dll_path = os.path.join(ship_dir, "granny2_x64.dll")
 
-    # Setup build output
+    # Setup build output — mods are data-only (no main.lua).
+    # The CG3HBuilder Thunderstore plugin handles all runtime logic.
+    # A minimal plugins/ stub is needed so H2M recognizes the plugins_data/ owner.
     build_dir = os.path.join(mod_dir, 'build')
     plugins_data = os.path.join(build_dir, 'plugins_data', mod_id)
     plugins = os.path.join(build_dir, 'plugins', mod_id)
     os.makedirs(plugins_data, exist_ok=True)
     os.makedirs(plugins, exist_ok=True)
 
-    # ── Build GPK (if mod has meshes) ──
-    glb_path = os.path.join(mod_dir, assets.get('glb', ''))
-    mesh_entries = target.get('mesh_entries', [f"{character}_Mesh"])
+    # ── Copy GLB for mesh/animation mods ──
+    # GPK building is a RUNTIME job handled by CG3HBuilder plugin.
+    # The mod builder only ships the GLB (+ export manifest for mesh routing).
+    glb_name = assets.get('glb', '')
+    glb_path = os.path.join(mod_dir, glb_name)
 
     has_anim_ops = 'patches_animations' in ops
     has_mesh_ops = ops & {'adds_meshes', 'replaces_meshes', 'patches_meshes'}
     has_mesh_or_anim_ops = has_mesh_ops or has_anim_ops
     if has_mesh_or_anim_ops and os.path.isfile(glb_path):
-        gpk_path = os.path.join(gpk_dir, f"{character}.gpk")
-        sdb_path = os.path.join(gpk_dir, f"{character}.sdb")
+        import shutil
+        shutil.copy2(glb_path, os.path.join(plugins_data, glb_name))
+        print(f"\n  Included GLB: {glb_name}")
 
-        if not os.path.isfile(gpk_path):
-            print(f"ERROR: Original {character}.gpk not found at {gpk_path}")
-            return False
-
-        output_gpk = os.path.join(plugins_data, f"{character}.gpk")
-
-        print(f"\n  Building GPK: {glb_path} -> {output_gpk}")
-
-        from gltf_to_gr2 import convert
-        try:
-            # Use manifest from export if available
-            manifest_path = os.path.join(mod_dir, 'manifest.json')
-
-            # Animation patch parameters
-            anim_cfg = assets.get('animations', {})
-            patch_animations = has_anim_ops
-            anim_patch_filter = anim_cfg.get('filter') if isinstance(anim_cfg, dict) else None
-
-            convert(
-                glb_path=glb_path,
-                gpk_path=gpk_path,
-                sdb_path=sdb_path,
-                dll_path=dll_path,
-                output_gpk=output_gpk,
-                manifest_path=manifest_path if os.path.isfile(manifest_path) else None,
-                allow_topology_change=bool(ops & {'replaces_meshes', 'adds_meshes'}),
-                patch_animations=patch_animations,
-                anim_patch_filter=anim_patch_filter,
-            )
-        except Exception as e:
-            print(f"ERROR: GPK build failed: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
+        # Copy export manifest if present (for mesh name routing)
+        manifest_path = os.path.join(mod_dir, 'manifest.json')
+        if os.path.isfile(manifest_path):
+            shutil.copy2(manifest_path, os.path.join(plugins_data, 'manifest.json'))
 
     # ── Build PKG + register in manifest (if mod has custom textures) ──
     # Two steps are needed for new texture names:
@@ -625,7 +600,9 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
 
     if custom_textures:
         pkg_dir = os.path.join(game_dir, "Content", "Packages", "1080p")
-        pkg_path = os.path.join(plugins_data, f"{mod_id}.pkg")
+        # Name PKG with CG3HBuilder prefix so the builder plugin can call
+        # LoadPackages on it (H2M validates the calling plugin's GUID is in the filename)
+        pkg_path = os.path.join(plugins_data, f"CG3HBuilder-{mod_id}.pkg")
 
         from pkg_texture import build_standalone_pkg, png_to_dds, add_manifest_entry
 
@@ -654,69 +631,24 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
         if pkg_textures:
             build_standalone_pkg(pkg_textures, pkg_path)
 
-    # ── Generate H2M manifest ──
-    dependencies = ["Hell2Modding-Hell2Modding-0.2.0"]
+    # Copy mod.json to build output (the CG3HBuilder plugin discovers mods via this file)
+    import shutil
+    shutil.copy2(os.path.join(mod_dir, 'mod.json'), os.path.join(plugins_data, 'mod.json'))
+
+    # Write minimal plugin stub (manifest only — no main.lua).
+    # H2M requires plugins/{id}/ to exist as owner of plugins_data/{id}/.
     h2m_manifest = {
         "name": name,
         "version_number": meta.get('version', '1.0.0'),
         "website_url": meta.get('url', ''),
         "description": meta.get('description', ''),
-        "dependencies": dependencies,
+        "dependencies": [
+            "Hell2Modding-Hell2Modding-0.2.0",
+            "Enderclem-CG3HBuilder-3.0.0",
+        ],
     }
     with open(os.path.join(plugins, 'manifest.json'), 'w') as f:
         json.dump(h2m_manifest, f, indent=2)
-
-    # ── Generate companion Lua ──
-    lua_lines = [
-        f'-- Auto-generated by CG3H v3.0',
-        f'-- Mod: {name} by {author}',
-        f'',
-    ]
-
-    if custom_textures:
-        # Load custom texture package using both approaches:
-        # 1. load_package_overrides_set — triggers real ReadTexture2D on scene
-        #    transition, needed for NEW texture names on late-loading characters
-        # 2. LoadPackages — pre-seeds mLoadedTexture2DHash cache, needed for
-        #    REPLACEMENT of existing texture names on always-loaded characters
-        lua_lines.extend([
-            f'-- Load textures via biome override (for new texture names)',
-            f'local mod_hash = rom.data.get_hash_guid_from_string("{mod_id}")',
-            f'for _, pkg in ipairs({{"{character}", "BiomeHub", "BiomeF", "BiomeIHouse"}}) do',
-            f'    local pkg_hash = rom.data.get_hash_guid_from_string(pkg)',
-            f'    rom.data.load_package_overrides_set(pkg_hash, {{mod_hash, pkg_hash}})',
-            f'end',
-            f'-- Also load via LoadPackages (for replacing existing texture names)',
-            f'local _loaded = false',
-            f'rom.on_import.post(function(script_name)',
-            f'    if _loaded then return end',
-            f'    if script_name == "Main.lua" then',
-            f'        _loaded = true',
-            f'        local pkg_path = rom.path.combine(_PLUGIN.plugins_data_mod_folder_path, _PLUGIN.guid)',
-            f'        rom.game.LoadPackages{{Name = pkg_path}}',
-            f'    end',
-            f'end)',
-            f'rom.log.info("[CG3H] Registered texture overrides for {name}")',
-        ])
-    else:
-        lua_lines.append(f'rom.log.info("[CG3H] Loaded: {name}")')
-
-    # If this is a mesh mod, add auto-build logic
-    if has_mesh_ops:
-        lua_lines.extend([
-            f'',
-            f'-- Auto-build GPK on first launch if missing',
-            f'local gpk_path = rom.path.combine(_PLUGIN.plugins_data_mod_folder_path, "{character}.gpk")',
-            f'local builder_path = rom.path.combine(_PLUGIN.plugins_data_mod_folder_path, "cg3h_builder.exe")',
-            f'if not rom.path.exists(gpk_path) and rom.path.exists(builder_path) then',
-            f'    rom.log.info("[CG3H] Building GPK for {name}...")',
-            f'    os.execute(builder_path .. " " .. _PLUGIN.plugins_data_mod_folder_path)',
-            f'    rom.log.info("[CG3H] GPK build complete")',
-            f'end',
-        ])
-
-    with open(os.path.join(plugins, 'main.lua'), 'w') as f:
-        f.write('\n'.join(lua_lines) + '\n')
 
     print(f"\n  Build complete!")
     print(f"  Output: {build_dir}")
@@ -752,7 +684,10 @@ def package_thunderstore(mod_dir):
             "version_number": version,
             "website_url": meta.get('url', ''),
             "description": meta.get('description', ''),
-            "dependencies": ["Hell2Modding-Hell2Modding-0.2.0"],
+            "dependencies": [
+                "Hell2Modding-Hell2Modding-0.2.0",
+                "Enderclem-CG3HBuilder-3.0.0",
+            ],
         }
         zf.writestr('manifest.json', json.dumps(ts_manifest, indent=2))
 
@@ -777,48 +712,25 @@ def package_thunderstore(mod_dir):
                 arc = os.path.relpath(full, build_dir)
                 zf.write(full, arc)
 
-        # Include source assets for user-side GPK build
-        zf.writestr('mod.json', json.dumps(mod, indent=2))
-
-        # Include GLB — but ONLY new meshes (strip original character geometry)
-        # For mesh_add: the GLB should only contain the added meshes
-        # For mesh_replace/mesh_patch: needs diff format (v3.1 milestone)
+        # Include GLB in plugins_data/ (stripped if possible)
+        pd_prefix = f'plugins_data/{mod_id}'
         assets_cfg = mod.get('assets', {})
         glb = assets_cfg.get('glb', '')
         if glb:
             glb_full = os.path.join(mod_dir, glb)
             if os.path.isfile(glb_full):
-                # Strip unchanged data — keep only new/modified meshes and textures
                 stripped = _strip_unchanged_data(glb_full, mod_dir)
                 if stripped:
-                    zf.writestr(glb, stripped)
+                    zf.writestr(f'{pd_prefix}/{glb}', stripped)
                     print(f"  Packaged GLB: unchanged data stripped")
                 else:
-                    zf.write(glb_full, glb)
-                    print(f"  WARNING: Could not strip unchanged data — "
-                          f"full GLB included (may contain original geometry)")
-
-        # Include conflicts.json (describes what this mod touches)
-        conflicts = _build_conflicts_json(mod)
-        zf.writestr('conflicts.json', json.dumps(conflicts, indent=2))
+                    zf.write(glb_full, f'{pd_prefix}/{glb}')
+                    print(f"  WARNING: Could not strip unchanged data")
 
         # Include export manifest if present (for mesh routing)
         manifest_file = os.path.join(mod_dir, 'manifest.json')
         if os.path.isfile(manifest_file):
-            zf.write(manifest_file, 'manifest.json')
-
-        # Include builder exe for mesh mods (auto-build GPK on user's machine)
-        pkg_ops = _infer_operations(mod)
-        if pkg_ops & {'adds_meshes', 'replaces_meshes', 'patches_meshes'}:
-            exe_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                    'dist', 'cg3h_builder.exe')
-            if os.path.isfile(exe_path):
-                zf.write(exe_path,
-                         f'plugins_data/{mod_id}/cg3h_builder.exe')
-                print(f"  Included cg3h_builder.exe")
-            else:
-                print(f"  WARNING: cg3h_builder.exe not found at {exe_path}")
-                print(f"  Run: pyinstaller --onefile tools/cg3h_builder_entry.py")
+            zf.write(manifest_file, f'{pd_prefix}/manifest.json')
 
     print(f"\n  Thunderstore package: {zip_path}.zip")
     return True

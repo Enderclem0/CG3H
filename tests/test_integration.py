@@ -299,9 +299,8 @@ def test_build_texture_mod():
         pkg_files = [f for f in os.listdir(pd) if f.endswith('.pkg')]
         assert len(pkg_files) > 0, f"No .pkg file in {os.listdir(pd)}"
 
-        pp = os.path.join(build, 'plugins', 'Test-RedTest')
-        assert os.path.isfile(os.path.join(pp, 'main.lua')), "No main.lua"
-        assert os.path.isfile(os.path.join(pp, 'manifest.json')), "No H2M manifest"
+        # Mods are data-only (no plugins/ folder — CG3HBuilder handles runtime)
+        assert os.path.isfile(os.path.join(pd, 'mod.json')), "No mod.json in plugins_data"
     finally:
         shutil.rmtree(tmp)
 
@@ -340,10 +339,16 @@ def test_thunderstore_zip_structure():
             names = zf.namelist()
             assert 'manifest.json' in names, "No Thunderstore manifest"
             assert 'README.md' in names, "No README"
-            assert 'mod.json' in names, "No mod.json"
+            # mod.json should be in plugins_data/
+            mod_json = [n for n in names if n.endswith('mod.json')]
+            assert len(mod_json) > 0, f"No mod.json in ZIP: {names}"
             # No .gpk in ZIP (CC content)
             gpk_files = [n for n in names if n.endswith('.gpk')]
             assert len(gpk_files) == 0, f"ZIP contains .gpk (CC content): {gpk_files}"
+            # CG3HBuilder dependency in manifest
+            manifest = json.loads(zf.read('manifest.json'))
+            assert any('CG3HBuilder' in d for d in manifest.get('dependencies', [])), \
+                f"Missing CG3HBuilder dependency: {manifest.get('dependencies')}"
     finally:
         shutil.rmtree(tmp)
 

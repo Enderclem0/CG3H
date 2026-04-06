@@ -40,15 +40,11 @@ jobs:
 
           Copy-Item tools/dist/cg3h_builder.exe thunderstore/plugins_data/CG3HBuilder/
           Copy-Item .github/thunderstore/README.md thunderstore/
+          Copy-Item .github/thunderstore/main.lua thunderstore/plugins/CG3HBuilder/
 
-          # Minimal main.lua — just log that the builder is available
+          # Plugin manifest with version
           @"
-          rom.log.info("[CG3H] CG3H Builder ready")
-          "@ | Set-Content thunderstore/plugins/CG3HBuilder/main.lua
-
-          # Plugin manifest
-          @"
-          {"name":"CG3HBuilder","version_number":"$version","website_url":"https://github.com/Enderclem0/CG3H","description":"CG3H Runtime Builder","dependencies":["Hell2Modding-Hell2Modding-0.2.0"]}
+          {"name":"CG3HBuilder","version_number":"$version","website_url":"https://github.com/Enderclem0/CG3H","description":"CG3H Runtime Builder — scans and loads CG3H mods","dependencies":["Hell2Modding-Hell2Modding-0.2.0"]}
           "@ | Set-Content thunderstore/plugins/CG3HBuilder/manifest.json
 
           Compress-Archive -Path thunderstore/* -DestinationPath "Enderclem-CG3HBuilder-$version.zip"
