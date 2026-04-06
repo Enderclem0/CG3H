@@ -51,30 +51,11 @@ TESTS = [
         "GLB only has Hub meshes",
     ]),
 
-    ("Blender", "3.1", "Edit texture in Blender", [
-        "Open exported GLB in Blender",
-        "Texture Paint mode, paint something visible",
-        "Export GLB (overwrite)",
-    ]),
-    ("Blender", "3.2", "Add new mesh", [
-        "Open exported GLB",
-        "Add primitive, parent to armature (Ctrl+P > Auto Weights)",
-        "Create new material + texture image (name it meaningfully)",
-        "Export GLB",
-    ]),
-    ("Blender", "3.3", "Edit existing mesh vertices", [
-        "Open exported GLB",
-        "Select body mesh, Edit mode, move vertices",
-        "Export GLB",
-    ]),
-
     ("Build", "4.1", "Texture-only mod", [
-        "Edit only texture (no mesh changes), export GLB",
-        "Build tab > browse to workspace",
-        "Check 'Install to r2modman'",
-        "Click Build",
-        "Build succeeds",
-        "Launch game via r2modman — texture change visible",
+        "Edit Hecate_Color.png in workspace (paint something visible)",
+        "Build tab > browse to workspace, Install to r2modman",
+        "Build succeeds, only modified texture(s) in PKG",
+        "Launch game via r2modman — texture change visible on Hecate",
     ]),
     ("Build", "4.2", "Mesh add mod", [
         "Use workspace with new mesh added (test 3.2)",

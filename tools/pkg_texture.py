@@ -434,8 +434,13 @@ def png_to_dds(png_path, fmt_code, width, height, mip_count):
     return header + pixel_data
 
 
-def _update_pkg_checksum(pkg_path):
-    """Recompute XXH64 hash for a .pkg file and update checksums.txt."""
+def _update_pkg_checksum(pkg_path, checksums_dir=None):
+    """Recompute XXH64 hash for a .pkg file and update checksums.txt.
+
+    If checksums_dir is given, updates checksums.txt in that directory
+    (useful when the PKG is in plugins_data but checksums.txt is in the
+    game's Packages directory).
+    """
     try:
         import xxhash
     except ImportError:
@@ -443,12 +448,11 @@ def _update_pkg_checksum(pkg_path):
               "Run: pip install xxhash")
         return
 
-    pkg_dir = os.path.dirname(pkg_path)
     pkg_name = os.path.basename(pkg_path)
-    checksums_path = os.path.join(pkg_dir, 'checksums.txt')
+    checksums_path = os.path.join(checksums_dir or os.path.dirname(pkg_path), 'checksums.txt')
 
     if not os.path.isfile(checksums_path):
-        print(f"  WARNING: checksums.txt not found in {pkg_dir}")
+        print(f"  WARNING: checksums.txt not found in {os.path.dirname(checksums_path)}")
         return
 
     # Compute new hash
@@ -566,6 +570,74 @@ def install_custom_texture(pkg_dir, texture_name, png_path_or_bytes, width, heig
             return None
     finally:
         os.unlink(dds_tmp.name)
+
+
+def add_manifest_entry(manifest_path, texture_name, output_path=None):
+    """Add a texture entry to a .pkg_manifest file.
+
+    Creates a minimal 0xDE atlas entry (0 sub-entries, just a texture name)
+    so the game's manifest-based asset loader registers the texture.
+    The manifest uses the same chunk format as PKGs but uncompressed.
+    """
+    if output_path is None:
+        output_path = manifest_path
+
+    with open(manifest_path, 'rb') as f:
+        raw = bytearray(f.read())
+
+    # Normalize texture name to use forward slashes (game normalizes \ to /)
+    tex_name = texture_name.replace('\\', '/')
+
+    # Build CSString for the texture name
+    name_bytes = tex_name.encode('utf-8')
+    if len(name_bytes) < 128:
+        cs_string = bytes([len(name_bytes)]) + name_bytes
+    else:
+        n = len(name_bytes)
+        cs = bytearray()
+        while n >= 128:
+            cs.append((n & 0x7F) | 0x80)
+            n >>= 7
+        cs.append(n)
+        cs_string = bytes(cs) + name_bytes
+
+    # Build manifest entry with magic header (version 4) and 1 sub-entry.
+    # 0 sub-entries causes LoadManifest to skip the texture entirely.
+    # Manifest uses BIG-ENDIAN int32 fields (confirmed from game binary).
+    # Format: [magic 0x7fb1776b] [version 4] [count 1] [sub-entry] [0xDD] [CSString name]
+    # Sub-entry (v4): CSString + int32×8 + float×2 + flags(1byte) + hull_count(int32=0)
+    sub_entry = cs_string                              # CSString sub-entry name
+    sub_entry += struct.pack('>iiii', 0, 0, 0, 0)      # offset/region fields
+    sub_entry += struct.pack('>iiii', 512, 512, 512, 512)  # dimensions
+    sub_entry += struct.pack('>ff', 1.0, 1.0)          # scaleX, scaleY
+    sub_entry += b'\x00'                               # flags byte (version > 0)
+    sub_entry += struct.pack('>I', 0)                  # hull_count = 0 (version > 2)
+    inner = struct.pack('>i', 0x7fb1776b)              # magic
+    inner += struct.pack('>i', 4)                      # version
+    inner += struct.pack('>i', 1)                      # count
+    inner += sub_entry
+    inner += b'\xDD' + cs_string                       # inline texture name
+    total_size = len(inner)
+
+    # Full entry: [0xDE tag] [int32 total_size] [inner]
+    entry = bytearray()
+    entry.append(0xDE)
+    entry.extend(struct.pack('>i', total_size))
+    entry.extend(inner)
+
+    # Find the last 0xFF (end of file) or 0xBE (end of chunk) marker
+    # and insert before it
+    insert_pos = len(raw)
+    for i in range(len(raw) - 1, -1, -1):
+        if raw[i] in (0xBE, 0xFF):
+            insert_pos = i
+            break
+
+    raw[insert_pos:insert_pos] = entry
+    with open(output_path, 'wb') as f:
+        f.write(raw)
+    print(f"  Manifest: added '{tex_name}' ({len(entry)} bytes)")
+    return True
 
 
 def _build_texture_entry(entry_name, pixel_data, fmt, width, height):
