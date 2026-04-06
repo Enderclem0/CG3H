@@ -1754,32 +1754,34 @@ def convert(
     print(f"[2/6] Extracting GPK: {gpk_path}")
     gpk_entries = extract_gpk(gpk_path)
 
-    # Load manifest if available — gives us mesh→entry routing
-    manifest = None
-    mesh_to_entry = {}  # glb_mesh_name → entry_name
+    # Load manifest if available (used for mesh name matching metadata)
     if manifest_path:
         import json
         with open(manifest_path) as f:
             manifest = json.load(f)
-        for m in manifest.get('meshes', []):
-            mesh_to_entry[m['name']] = m.get('entry', '')
-        print(f"  Manifest: {len(mesh_to_entry)} mesh->entry mappings")
+        print(f"  Manifest: {len(manifest.get('meshes', []))} meshes")
 
-    # Find all mesh entries to patch
+    # Select the body entry ({Character}_Mesh) for patching.
+    # All GLB meshes (existing + new) go to this single entry and are
+    # serialized in one pass.  Multi-entry support (patching Hat_Mesh,
+    # MelinoeOverlook_Mesh, etc. independently) is planned for v3.1.
     all_mesh_entries = [k for k in gpk_entries if k.endswith('_Mesh')]
+    if not all_mesh_entries:
+        raise KeyError(f"No _Mesh entries in GPK. Available: {sorted(gpk_entries)}")
+
+    char_name = os.path.splitext(os.path.basename(gpk_path))[0]
     if entry_name is not None:
         if entry_name not in gpk_entries:
             raise KeyError(f"Entry {entry_name!r} not in GPK. Available: {sorted(gpk_entries)}")
-        mesh_entry_names = [entry_name]
-    elif manifest and manifest.get('mesh_entries'):
-        mesh_entry_names = [e for e in manifest['mesh_entries'] if e in gpk_entries]
+        body_entry = entry_name
     else:
-        mesh_entry_names = all_mesh_entries
-    if not mesh_entry_names:
-        raise KeyError(f"No _Mesh entries in GPK. Available: {sorted(gpk_entries)}")
+        body_entry = f"{char_name}_Mesh"
+        if body_entry not in gpk_entries:
+            body_entry = all_mesh_entries[0]
 
-    if len(mesh_entry_names) > 1:
-        print(f"  Multi-entry GPK: {mesh_entry_names}")
+    if len(all_mesh_entries) > 1:
+        print(f"  Multi-entry GPK: {all_mesh_entries}")
+        print(f"  Patching body entry only: {body_entry}")
 
     print(f"[3/6] Reading SDB: {sdb_path}")
     with open(sdb_path, 'rb') as f:
@@ -1788,88 +1790,37 @@ def convert(
     print(f"[4/6] Loading Granny DLL + type map")
     dll = setup_granny(dll_path)
 
-    # For each mesh entry: load GR2, find matching GLB meshes, patch, serialize
-    total_patched = 0
-    remaining_glb = list(glb_meshes)  # GLB meshes not yet claimed by any entry
+    gr2_bytes = gpk_entries[body_entry]
+    print(f"\n  --- Entry: {body_entry} ({len(gr2_bytes):,} bytes) ---")
 
-    for me_name in mesh_entry_names:
-        gr2_bytes = gpk_entries[me_name]
-        print(f"\n  --- Entry: {me_name} ({len(gr2_bytes):,} bytes) ---")
+    gr2_file, sdb_file, fi, sdb_dict, sdb_crc, _keep = load_gr2(dll, gr2_bytes, sdb_bytes)
+    print(f"  SDB: {len(sdb_dict)} strings indexed  CRC=0x{sdb_crc:08X}")
 
-        gr2_file, sdb_file, fi, sdb_dict, sdb_crc, _keep = load_gr2(dll, gr2_bytes, sdb_bytes)
-        if total_patched == 0:
-            print(f"  SDB: {len(sdb_dict)} strings indexed  CRC=0x{sdb_crc:08X}")
+    # All GLB meshes go to the body entry (matched + new)
+    print(f"[5/6] Patching vertex data ({len(glb_meshes)} GLB meshes)")
+    total_patched = patch_vertex_data(
+        dll, fi, glb_meshes, strict=strict, positional=positional,
+        allow_topology_change=allow_topology_change,
+    )
 
-        # Route GLB meshes to this entry
-        entry_glb = []
-        still_remaining = []
-        if mesh_to_entry:
-            # Manifest-based routing: exact match on entry name
-            for glb_m in remaining_glb:
-                if mesh_to_entry.get(glb_m['name']) == me_name:
-                    entry_glb.append(glb_m)
-                else:
-                    still_remaining.append(glb_m)
-        else:
-            # Fallback: match by GR2 mesh names in this entry
-            gr2_mesh_list = get_gr2_meshes(fi)
-            gr2_norm_names = set()
-            for gm in gr2_mesh_list:
-                gr2_norm_names.add(_normalize_mesh_name(gm['name']))
-            for glb_m in remaining_glb:
-                glb_norm = _normalize_mesh_name(glb_m['name'])
-                glb_stripped = _strip_variants(glb_norm)
-                if glb_norm in gr2_norm_names or glb_stripped in {_strip_variants(n) for n in gr2_norm_names}:
-                    entry_glb.append(glb_m)
-                else:
-                    still_remaining.append(glb_m)
-        remaining_glb = still_remaining
-
-        # Route unmatched GLB meshes (new meshes added in Blender) to the
-        # main body entry so they're handled in a single serialize cycle.
-        # This avoids a double load→serialize that breaks custom materials.
-        char_name = os.path.splitext(os.path.basename(gpk_path))[0]
-        is_body_entry = (me_name == f"{char_name}_Mesh") or (len(mesh_entry_names) == 1)
-        if is_body_entry and remaining_glb:
-            print(f"  Adding {len(remaining_glb)} new mesh(es) to '{me_name}'")
-            entry_glb.extend(remaining_glb)
-            remaining_glb = []
-
-        if not entry_glb:
-            print(f"  No matching GLB meshes for this entry, skipping")
-            dll.GrannyFreeFile(gr2_file)
-            dll.GrannyFreeFile(sdb_file)
-            continue
-
-        print(f"[5/6] Patching vertex data ({len(entry_glb)} GLB meshes)")
-        n_patched = patch_vertex_data(
-            dll, fi, entry_glb, strict=strict, positional=positional,
-            allow_topology_change=allow_topology_change,
-        )
-        total_patched += n_patched
-
-        if n_patched > 0:
-            print(f"[6/6] Serializing modified GR2")
-            new_gr2_bytes = build_gr2_bytes(dll, fi, gr2_bytes, sdb_dict, sdb_crc)
-            gpk_entries[me_name] = new_gr2_bytes
-
-            if output_gr2 and len(mesh_entry_names) == 1:
-                with open(output_gr2, 'wb') as f:
-                    f.write(new_gr2_bytes)
-                print(f"  GR2 written: {output_gr2!r} ({len(new_gr2_bytes):,} bytes)")
-
+    if total_patched == 0:
         _keepalive.clear()
         dll.GrannyFreeFile(gr2_file)
         dll.GrannyFreeFile(sdb_file)
-
-    if total_patched == 0:
         raise RuntimeError("No meshes were patched — nothing to write")
 
-    if remaining_glb:
-        print(f"\n  WARNING: {len(remaining_glb)} GLB mesh(es) not routed to any entry:")
-        for m in remaining_glb[:5]:
-            print(f"    {m['name']}")
-        print(f"  These meshes will NOT appear in the output GPK.")
+    print(f"[6/6] Serializing modified GR2")
+    new_gr2_bytes = build_gr2_bytes(dll, fi, gr2_bytes, sdb_dict, sdb_crc)
+    gpk_entries[body_entry] = new_gr2_bytes
+
+    if output_gr2:
+        with open(output_gr2, 'wb') as f:
+            f.write(new_gr2_bytes)
+        print(f"  GR2 written: {output_gr2!r} ({len(new_gr2_bytes):,} bytes)")
+
+    _keepalive.clear()
+    dll.GrannyFreeFile(gr2_file)
+    dll.GrannyFreeFile(sdb_file)
 
     # Patch animation entries if requested
     n_anim_patched = 0

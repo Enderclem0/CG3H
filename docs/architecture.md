@@ -118,13 +118,16 @@ mesh, not LODs). The exporter appends `_2`, `_3` suffixes to disambiguate.
 The importer strips both these and legacy `_LOD` suffixes when matching GLB
 meshes back to GR2 meshes.
 
-### Multi-entry GPK support
+### Multi-entry GPK (export only — import is single-entry)
 Characters with multiple mesh entries (e.g. Hecate has `HecateBattle_Mesh` +
 `HecateHub_Mesh`) export ALL entries by default. The `--mesh-entry` flag filters
-to specific entries; `--list-entries` inspects what is available. The importer
-routes GLB meshes to the correct GR2 entry via the manifest's exact mesh-to-entry
-mapping. Each entry is patched and serialized separately, then packed into a
-single output GPK.
+to specific entries; `--list-entries` inspects what is available.
+
+The **importer** currently patches the body entry only (`{Character}_Mesh`).
+All GLB meshes (existing + new) are routed to this single entry and serialized
+in one pass.  This is required for custom MaterialBindings to survive Granny's
+serialization — a double load→serialize cycle corrupts custom material pointers.
+Full multi-entry import support is planned for v3.1.
 
 ### Animation export sanitization
 Several channel-level fixes prevent corrupt animation data from producing
