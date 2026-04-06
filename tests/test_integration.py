@@ -3,7 +3,7 @@ CG3H Integration Tests — tests the full pipeline without game/Blender.
 
 Requires: running from Ship/ directory (needs granny2_x64.dll)
 Usage:
-    cd "C:\Program Files (x86)\Steam\steamapps\common\Hades II\Ship"
+    cd "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Hades II\\Ship"
     python C:/Users/ender/GhidraHades2/tests/test_integration.py
 """
 import sys, os, json, struct, shutil, tempfile
