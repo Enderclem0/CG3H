@@ -611,49 +611,72 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
             traceback.print_exc()
             return False
 
-    # ── Build standalone PKG (if mod has custom textures) ──
+    # ── Build PKG (if mod has custom textures) ──
+    # Inject custom textures into a copy of the source .pkg that contains
+    # the character's existing 3D textures.  H2M's fsAppendPathComponent
+    # hook auto-redirects the game to our copy in plugins_data/.
+    # The source PKG is determined from the export manifest (usually Fx.pkg
+    # for GR2 model textures).
     tex_list = assets.get('textures', [])
     custom_textures = [t for t in tex_list if t.get('custom', True)]
 
     if custom_textures:
-        pkg_path = os.path.join(plugins_data, f"{mod_id}.pkg")
-        pkg_manifest_path = pkg_path + '_manifest'
+        pkg_dir = os.path.join(game_dir, "Content", "Packages", "1080p")
 
-        print(f"\n  Building PKG: {len(custom_textures)} custom texture(s)")
+        from pkg_texture import add_texture_entry, png_to_dds
 
-        from pkg_texture import build_standalone_pkg, png_to_dds
+        # Determine which source PKG to inject into from manifest
+        source_pkg_name = 'Fx.pkg'  # default — most GR2 model textures
+        manifest_path = os.path.join(mod_dir, 'manifest.json')
+        if os.path.isfile(manifest_path):
+            try:
+                with open(manifest_path) as f:
+                    manifest_data = json.load(f)
+                for tex_info in manifest_data.get('textures', {}).values():
+                    pkgs = tex_info.get('pkgs', [])
+                    if pkgs:
+                        source_pkg_name = pkgs[0]
+                        break
+            except Exception:
+                pass
 
-        pkg_textures = []
-        for tex in custom_textures:
-            tex_name = tex.get('name', '')
-            tex_file = tex.get('file', '')
-            full_path = os.path.join(mod_dir, tex_file)
+        source_pkg_path = os.path.join(pkg_dir, source_pkg_name)
+        target_pkg_path = os.path.join(plugins_data, source_pkg_name)
 
-            if not os.path.isfile(full_path):
-                print(f"  WARNING: texture file not found: {full_path}")
-                continue
+        if not os.path.isfile(source_pkg_path):
+            print(f"\n  ERROR: Source PKG not found: {source_pkg_path}")
+        else:
+            print(f"\n  Injecting {len(custom_textures)} texture(s) into {source_pkg_name}")
+            import shutil
+            shutil.copy2(source_pkg_path, target_pkg_path)
 
-            entry_name = f"GR2\\{tex_name}"
-            w = tex.get('width', 512)
-            h = tex.get('height', 512)
+            for tex in custom_textures:
+                tex_name = tex.get('name', '')
+                tex_file = tex.get('file', '')
+                full_path = os.path.join(mod_dir, tex_file)
+                if not os.path.isfile(full_path):
+                    print(f"  WARNING: texture file not found: {full_path}")
+                    continue
+                entry_name = f"GR2\\{tex_name}"
+                w = min(tex.get('width', 512), 512)
+                h = min(tex.get('height', 512), 512)
+                if full_path.lower().endswith('.png'):
+                    import tempfile
+                    dds_bytes = png_to_dds(full_path, 0x1C, w, h, 6)
+                    dds_tmp = tempfile.NamedTemporaryFile(suffix='.dds', delete=False)
+                    dds_tmp.write(dds_bytes)
+                    dds_tmp.close()
+                    dds_path = dds_tmp.name
+                else:
+                    dds_path = full_path
+                try:
+                    add_texture_entry(target_pkg_path, entry_name, dds_path, target_pkg_path)
+                finally:
+                    if full_path.lower().endswith('.png') and os.path.isfile(dds_path):
+                        os.unlink(dds_path)
 
-            if full_path.lower().endswith('.png'):
-                pkg_textures.append({
-                    'name': entry_name,
-                    'png_path': full_path,
-                    'width': min(w, 512),
-                    'height': min(h, 512),
-                    'fmt': 0x1C,
-                    'mip_count': 6,
-                })
-            elif full_path.lower().endswith('.dds'):
-                pkg_textures.append({
-                    'name': entry_name,
-                    'dds_path': full_path,
-                })
-
-        if pkg_textures:
-            build_standalone_pkg(pkg_textures, pkg_path, pkg_manifest_path)
+            pkg_size_mb = os.path.getsize(target_pkg_path) / (1024 * 1024)
+            print(f"  Built: {target_pkg_path} ({pkg_size_mb:.1f} MB)")
 
     # ── Generate H2M manifest ──
     h2m_manifest = {
@@ -673,24 +696,7 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
         f'',
     ]
 
-    # If we built a custom .pkg, load it when game Lua state is ready
-    if custom_textures:
-        lua_lines.extend([
-            f'-- Load custom texture package after game Lua is initialized',
-            f'local _loaded = false',
-            f'rom.on_import.post(function(script_name)',
-            f'    if _loaded then return end',
-            f'    if script_name == "Main.lua" then',
-            f'        _loaded = true',
-            f'        local pkg_path = rom.path.combine(_PLUGIN.plugins_data_mod_folder_path, _PLUGIN.guid)',
-            f'        rom.game.LoadPackages{{Name = pkg_path}}',
-            f'        rom.log.info("[CG3H] Loaded package: " .. pkg_path)',
-            f'    end',
-            f'end)',
-            f'rom.log.info("[CG3H] Registered: {name} (package will load on Main.lua import)")',
-        ])
-    else:
-        lua_lines.append(f'rom.log.info("[CG3H] Loaded: {name}")')
+    lua_lines.append(f'rom.log.info("[CG3H] Loaded: {name}")')
 
     # If this is a mesh mod, add auto-build logic
     if has_mesh_ops:

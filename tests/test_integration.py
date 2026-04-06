@@ -295,8 +295,9 @@ def test_build_texture_mod():
         assert os.path.isdir(build), "No build directory"
         pd = os.path.join(build, 'plugins_data', 'Test-RedTest')
         assert os.path.isdir(pd), f"No plugins_data: {os.listdir(build)}"
-        pkg = os.path.join(pd, 'Test-RedTest.pkg')
-        assert os.path.isfile(pkg), "No .pkg file"
+        # Custom textures are injected into the source .pkg (e.g. Fx.pkg)
+        pkg_files = [f for f in os.listdir(pd) if f.endswith('.pkg')]
+        assert len(pkg_files) > 0, f"No .pkg file in {os.listdir(pd)}"
 
         pp = os.path.join(build, 'plugins', 'Test-RedTest')
         assert os.path.isfile(os.path.join(pp, 'main.lua')), "No main.lua"

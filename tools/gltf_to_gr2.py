@@ -924,9 +924,18 @@ def build_gr2_bytes(dll, fi: int, gr2_raw: bytes, sdb_dict: dict[str, int],
     cleanup_fn  = ctypes.CFUNCTYPE(None, ctypes.c_uint64)(cleanup_ptr)
     cleanup_fn(ctypes.c_uint64(pw))
 
-    result = open(tmp, 'rb').read()
+    result = bytearray(open(tmp, 'rb').read())
     os.unlink(tmp)
-    return result
+
+    # Patch the runtime type tag at +0x44.
+    # GrannyCreatePlatformFileWriter writes 0x00000000 but the game expects
+    # the original tag (0x80000039 for Windows x64 Granny 2.12).
+    # Without this, the engine logs "File has run-time type tag of 0x0".
+    orig_type_tag = struct.unpack_from('<I', gr2_raw, 0x44)[0]
+    if orig_type_tag != 0 and len(result) > 0x48:
+        struct.pack_into('<I', result, 0x44, orig_type_tag)
+
+    return bytes(result)
 
 
 # ── Mesh matching and patching ────────────────────────────────────────────────
