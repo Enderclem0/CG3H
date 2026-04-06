@@ -202,15 +202,42 @@ Creates `.pkg` files from scratch rather than patching game packages:
 - Each custom texture is compressed to BC7/BC3/BC1 DDS with full mipchain
 - Wrapped in 0xAD (Texture2D) chunks with correct XNB headers
 - Written as a new `.pkg` with proper chunk table and offsets
-- H2M's `rom.game.LoadPackages` loads the standalone `.pkg` at runtime
-- No `.pkg_manifest` needed for H2M loading
+- No `.pkg_manifest` needed (GR2 model textures are NOT in manifest files)
+
+### H2M texture loading (confirmed via decompilation + hooks)
+
+Two loading mechanisms exist — they are NOT interchangeable:
+
+**`rom.game.LoadPackages` (Lua):**
+- Calls `sgg::GameAssetManager::LoadPackage` but does NOT call `ReadTexture2D`
+- Registers package metadata only — 0 bytes of texture data processed ("0Mb" logged)
+- Can REPLACE existing textures via `mLoadedTexture2DHash` cache pre-seeding
+- Cannot register NEW texture names (hash never created in `mTextureHandles`)
+
+**`load_package_overrides_set` (Lua) → triggers REAL `LoadPackage` C++ pipeline:**
+- Hooks `sgg::GameAssetManager::LoadPackage` at C++ level
+- When target package loads: `ReadPackageFile` → `ReadTexture2D` is called
+- Creates new `TextureHandle` entries for NEW texture names (Path A in ReadTexture2D)
+- Works for characters that load AFTER override is set (second pass / scene transition)
+- Does NOT work for always-loaded characters (Melinoe) — they load before hashes are ready
+
+**`rom.data.get_hash_guid_from_string` returns 0 on first Lua load** (hash system not initialized).
+Valid hashes only available after scene transition (second Lua load).
 
 ### H2M Lua companion
 
 Auto-generated `main.lua` included in every mod package:
-- `rom.game.LoadPackages` for custom .pkg loading
+- `load_package_overrides_set` for custom texture loading (biome override approach)
 - `rom.on_import.post` for deferred initialization
 - Auto-build GPK on first launch if missing (runs `cg3h_builder.exe`)
+
+### Custom texture limitation: always-loaded characters
+
+Characters like Melinoe whose GPK loads during the first pass (before `get_hash_guid_from_string`
+works) cannot currently have NEW custom textures. Their `AddModelData` runs once and is rejected
+on subsequent passes ("Failed to insert existing ModelFile"). Texture REPLACEMENT (same name)
+works via `LoadPackages` cache pre-seeding. See `docs/texture_loading_deep_dive.md` for full
+decompilation findings.
 
 ### PyInstaller standalone builder
 
