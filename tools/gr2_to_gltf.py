@@ -153,12 +153,18 @@ def _readable(ptr, size):
     return not _kernel32.IsBadReadPtr(ctypes.c_void_p(ptr), ctypes.c_size_t(size))
 
 def rq(addr, off):
+    if not _readable(addr + off, 8):
+        return 0
     return struct.unpack_from('<Q', (ctypes.c_uint8*8).from_address(addr+off), 0)[0]
 
 def ri(addr, off):
+    if not _readable(addr + off, 4):
+        return 0
     return struct.unpack_from('<i', (ctypes.c_uint8*4).from_address(addr+off), 0)[0]
 
 def safe_bytes(addr, n):
+    if not _readable(addr, n):
+        return b'\x00' * n
     return bytes((ctypes.c_uint8*n).from_address(addr))
 
 def read_cstr(ptr):

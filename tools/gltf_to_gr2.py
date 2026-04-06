@@ -606,14 +606,20 @@ def _readable(ptr, size):
 
 
 def rq(addr, off):
+    if not _readable(addr + off, 8):
+        return 0
     return struct.unpack_from('<Q', (ctypes.c_uint8 * 8).from_address(addr + off), 0)[0]
 
 
 def ri(addr, off):
+    if not _readable(addr + off, 4):
+        return 0
     return struct.unpack_from('<i', (ctypes.c_uint8 * 4).from_address(addr + off), 0)[0]
 
 
 def safe_bytes(addr, n):
+    if not _readable(addr, n):
+        return b'\x00' * n
     return bytes((ctypes.c_uint8 * n).from_address(addr))
 
 
@@ -721,11 +727,14 @@ def load_gr2(dll, gr2_bytes: bytes, sdb_bytes: bytes):
     sdb_count     = ctypes.c_uint32.from_address(str_db).value
     sdb_array_ptr = ctypes.c_uint64.from_address(str_db + 4).value
     sdb_dict: dict[str, int] = {}
-    for i in range(sdb_count):
-        str_ptr = ctypes.c_uint64.from_address(sdb_array_ptr + i * 8).value
-        if str_ptr:
-            s = ctypes.string_at(str_ptr).decode('utf-8', 'replace')
-            sdb_dict[s] = i
+    if not _valid_ptr(sdb_array_ptr):
+        print(f"  WARNING: SDB array pointer invalid (0x{sdb_array_ptr:X}), string map empty")
+    else:
+        for i in range(sdb_count):
+            str_ptr = ctypes.c_uint64.from_address(sdb_array_ptr + i * 8).value
+            if _valid_ptr(str_ptr):
+                s = ctypes.string_at(str_ptr).decode('utf-8', 'replace')
+                sdb_dict[s] = i
 
     # Read the real SDB CRC from str_db at +0x0C.
     # Decompilation of GrannyRemapFileStrings: iVar1 == *(int *)(param_2 + 0xc)
@@ -1885,9 +1894,10 @@ def convert(
         raise RuntimeError("No meshes were patched — nothing to write")
 
     # Unmatched GLB meshes = new meshes added in Blender
-    # Add them to the first mesh entry
+    # Add them to the main body entry ({Character}_Mesh), not accessories like Hat_Mesh
     if remaining_glb and mesh_entry_names:
-        first_entry = mesh_entry_names[0]
+        char_name = os.path.splitext(os.path.basename(gpk_path))[0]
+        first_entry = next((e for e in mesh_entry_names if e == f"{char_name}_Mesh"), mesh_entry_names[0])
         print(f"\n  Adding {len(remaining_glb)} new mesh(es) to '{first_entry}':")
         for m in remaining_glb:
             print(f"    {m['name']}")
