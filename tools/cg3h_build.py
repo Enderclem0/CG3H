@@ -347,12 +347,171 @@ def _build_conflicts_json(mod):
     return touches
 
 
+def _sync_mod_json(mod_dir):
+    """Detect workspace changes and update mod.json to match reality.
+
+    Compares the GLB against manifest.json to find new meshes, edited meshes,
+    and changed/new textures.  Updates mod.json's type and assets.textures
+    so that _infer_operations produces the correct build plan.
+    """
+    mod_json_path = os.path.join(mod_dir, 'mod.json')
+    manifest_path = os.path.join(mod_dir, 'manifest.json')
+    if not os.path.isfile(mod_json_path) or not os.path.isfile(manifest_path):
+        return
+
+    with open(mod_json_path) as f:
+        mod = json.load(f)
+    with open(manifest_path) as f:
+        manifest = json.load(f)
+
+    assets = mod.setdefault('assets', {})
+    glb_name = assets.get('glb', '')
+    glb_path = os.path.join(mod_dir, glb_name) if glb_name else ''
+    if not glb_path or not os.path.isfile(glb_path):
+        return
+
+    changed = False
+    types = set()
+    if isinstance(mod.get('type'), list):
+        types = set(mod['type'])
+    elif mod.get('type'):
+        types = {mod['type']}
+
+    # ── Detect mesh changes ──
+    manifest_meshes = {m['name']: m for m in manifest.get('meshes', [])}
+    if manifest_meshes:
+        try:
+            import pygltflib
+            import hashlib
+
+            gltf = pygltflib.GLTF2().load(glb_path)
+            blob = gltf.binary_blob()
+
+            has_new = False
+            has_edited = False
+            for mesh in (gltf.meshes or []):
+                if not mesh.name:
+                    continue
+                orig = manifest_meshes.get(mesh.name)
+                if orig is None:
+                    has_new = True
+                    continue
+                for prim in mesh.primitives:
+                    if prim.attributes.POSITION is not None:
+                        acc = gltf.accessors[prim.attributes.POSITION]
+                        if acc.count != orig.get('vertex_count', acc.count):
+                            has_edited = True
+                        else:
+                            bv = gltf.bufferViews[acc.bufferView]
+                            data = blob[bv.byteOffset:bv.byteOffset + bv.byteLength]
+                            if hashlib.md5(data).hexdigest() != orig.get('position_hash', ''):
+                                has_edited = True
+                    if prim.indices is not None:
+                        idx_acc = gltf.accessors[prim.indices]
+                        if idx_acc.count != orig.get('index_count', idx_acc.count):
+                            has_edited = True
+                    if has_edited:
+                        break
+
+            if has_new and 'mesh_add' not in types:
+                types.add('mesh_add')
+                changed = True
+            if has_edited and 'mesh_replace' not in types:
+                types.add('mesh_replace')
+                changed = True
+        except Exception:
+            pass
+
+    # ── Detect texture changes (same logic as _strip_unchanged_data) ──
+    manifest_textures = manifest.get('textures', {})
+    if manifest_textures:
+        try:
+            existing_tex_names = {t.get('name') for t in assets.get('textures', [])}
+            for tex_name, tex_info in manifest_textures.items():
+                if tex_info.get('variant') or tex_name in existing_tex_names:
+                    continue
+                orig_hash = tex_info.get('png_hash', '')
+                if not orig_hash:
+                    continue
+                png_file = os.path.join(mod_dir, f"{tex_name}.png")
+                if os.path.isfile(png_file):
+                    with open(png_file, 'rb') as fh:
+                        cur_hash = hashlib.md5(fh.read()).hexdigest()
+                    if cur_hash != orig_hash:
+                        assets.setdefault('textures', []).append({
+                            'name': tex_name,
+                            'file': f"{tex_name}.png",
+                            'replaces': True,
+                            'width': tex_info.get('width', 512),
+                            'height': tex_info.get('height', 512),
+                            'pkg_entry_name': tex_info.get('pkg_entry_name', f"GR2\\{tex_name}"),
+                            'pkgs': tex_info.get('pkgs', []),
+                        })
+                        if 'texture_replace' not in types:
+                            types.add('texture_replace')
+                        changed = True
+        except Exception:
+            pass
+
+    # ── Pick up custom textures from new meshes ──
+    # The converter writes *_custom_textures.json; also check build output
+    character = mod.get('target', {}).get('character', '')
+    for search_dir in [mod_dir, os.path.join(mod_dir, 'build')]:
+        for root, dirs, files in os.walk(search_dir):
+            for fname in files:
+                if fname.endswith('_custom_textures.json'):
+                    ct_path = os.path.join(root, fname)
+                    try:
+                        with open(ct_path) as f:
+                            custom = json.load(f)
+                        existing_tex_names = {t.get('name') for t in assets.get('textures', [])}
+                        # Extract PNGs from GLB for custom textures
+                        gltf = pygltflib.GLTF2().load(glb_path)
+                        blob = gltf.binary_blob()
+                        for tex_name, info in custom.items():
+                            if tex_name in existing_tex_names:
+                                continue
+                            img_idx = info.get('glb_image_index')
+                            if img_idx is not None and img_idx < len(gltf.images or []):
+                                img = gltf.images[img_idx]
+                                if img.bufferView is not None:
+                                    bv = gltf.bufferViews[img.bufferView]
+                                    png_data = blob[bv.byteOffset:bv.byteOffset + bv.byteLength]
+                                    png_file = f"{tex_name}.png"
+                                    with open(os.path.join(mod_dir, png_file), 'wb') as pf:
+                                        pf.write(png_data)
+                                    assets.setdefault('textures', []).append({
+                                        'name': tex_name,
+                                        'file': png_file,
+                                        'custom': True,
+                                        'width': 512,
+                                        'height': 512,
+                                    })
+                                    changed = True
+                    except Exception:
+                        pass
+
+    # ── Remove stale texture_replace if nothing left ──
+    if types - {'texture_replace'} and not assets.get('textures'):
+        types.discard('texture_replace')
+
+    # ── Save updated mod.json ──
+    if changed:
+        mod['type'] = sorted(types) if len(types) > 1 else (next(iter(types)) if types else '')
+        with open(mod_json_path, 'w') as f:
+            json.dump(mod, f, indent=2)
+        print(f"  mod.json updated: type={mod['type']}")
+
+
 def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
     """Build an H2M-compatible mod package from a mod.json directory."""
     mod_json_path = os.path.join(mod_dir, 'mod.json')
     if not os.path.isfile(mod_json_path):
         print(f"ERROR: No mod.json found in {mod_dir}")
         return False
+
+    # Sync mod.json with actual workspace changes before building
+    _sync_mod_json(mod_dir)
 
     with open(mod_json_path) as f:
         mod = json.load(f)
@@ -546,7 +705,7 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
 
     print(f"\n  Build complete!")
     print(f"  Output: {build_dir}")
-    return True
+    return build_dir
 
 
 def package_thunderstore(mod_dir):
@@ -565,6 +724,7 @@ def package_thunderstore(mod_dir):
         print("ERROR: Run build first")
         return False
 
+    mod_id = f"{author}-{name}".replace(' ', '')
     zip_name = f"{author}-{name}-{version}"
     zip_path = os.path.join(mod_dir, zip_name)
 

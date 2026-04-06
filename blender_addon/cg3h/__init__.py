@@ -200,14 +200,14 @@ class CG3H_OT_Import(bpy.types.Operator, ImportHelper):
 
         try:
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=120,
+                cmd, capture_output=True, text=True, timeout=600,
                 cwd=os.path.join(prefs.game_path, "Ship"),
             )
             if result.returncode != 0:
                 self.report({'ERROR'}, f"Export failed:\n{result.stderr or result.stdout}")
                 return {'CANCELLED'}
         except subprocess.TimeoutExpired:
-            self.report({'ERROR'}, "Export timed out (>120s)")
+            self.report({'ERROR'}, "Export timed out (>10min)")
             return {'CANCELLED'}
         except Exception as e:
             self.report({'ERROR'}, f"Export error: {e}")
@@ -355,7 +355,7 @@ class CG3H_OT_Export(bpy.types.Operator, ExportHelper):
 
         try:
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=120,
+                cmd, capture_output=True, text=True, timeout=600,
                 cwd=os.path.join(prefs.game_path, "Ship"),
             )
             if result.returncode != 0:
@@ -366,7 +366,7 @@ class CG3H_OT_Export(bpy.types.Operator, ExportHelper):
                 self.report({'ERROR'}, f"Import failed: {msg}")
                 return {'CANCELLED'}
         except subprocess.TimeoutExpired:
-            self.report({'ERROR'}, "Import timed out (>120s)")
+            self.report({'ERROR'}, "Import timed out (>10min)")
             return {'CANCELLED'}
         except Exception as e:
             self.report({'ERROR'}, f"Import error: {e}")
@@ -435,17 +435,14 @@ class CG3H_OT_BuildH2M(bpy.types.Operator):
 
         cmd = [
             sys.executable, build_script,
-            "--dir", self.mod_dir,
-            "--name", self.mod_name,
+            self.mod_dir,
         ]
-        if self.author:
-            cmd += ["--author", self.author]
         if self.thunderstore:
-            cmd.append("--thunderstore")
+            cmd.append("--package")
 
         try:
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=120,
+                cmd, capture_output=True, text=True, timeout=300,
             )
             if result.returncode != 0:
                 err = result.stderr or result.stdout
