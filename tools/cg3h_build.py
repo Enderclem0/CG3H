@@ -688,21 +688,19 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
     ]
 
     if custom_textures:
-        # Load standalone PKG via LoadPackages on Main.lua import.
-        # This works for both texture replacement and new textures on
-        # characters that load after Main.lua (most characters).
+        # Register standalone PKG as biome package override.
+        # load_package_overrides_set triggers the real C++ LoadPackage pipeline
+        # (ReadPackageFile → ReadTexture2D) which is required for textures to
+        # be registered.  rom.game.LoadPackages does NOT call ReadTexture2D.
+        # Note: get_hash_guid_from_string returns 0 on first Lua load — overrides
+        # only take effect after scene transition (second Lua load).
         lua_lines.extend([
-            f'local _loaded = false',
-            f'rom.on_import.post(function(script_name)',
-            f'    if _loaded then return end',
-            f'    if script_name == "Main.lua" then',
-            f'        _loaded = true',
-            f'        local pkg_path = rom.path.combine(_PLUGIN.plugins_data_mod_folder_path, _PLUGIN.guid)',
-            f'        rom.game.LoadPackages{{Name = pkg_path}}',
-            f'        rom.log.info("[CG3H] Loaded package: " .. pkg_path)',
-            f'    end',
-            f'end)',
-            f'rom.log.info("[CG3H] Registered: {name}")',
+            f'local mod_hash = rom.data.get_hash_guid_from_string("{mod_id}")',
+            f'for _, pkg in ipairs({{"{character}", "BiomeHub", "BiomeF", "BiomeIHouse"}}) do',
+            f'    local pkg_hash = rom.data.get_hash_guid_from_string(pkg)',
+            f'    rom.data.load_package_overrides_set(pkg_hash, {{mod_hash, pkg_hash}})',
+            f'end',
+            f'rom.log.info("[CG3H] Registered texture overrides for {name}")',
         ])
     else:
         lua_lines.append(f'rom.log.info("[CG3H] Loaded: {name}")')
