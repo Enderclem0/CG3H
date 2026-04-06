@@ -153,18 +153,12 @@ def _readable(ptr, size):
     return not _kernel32.IsBadReadPtr(ctypes.c_void_p(ptr), ctypes.c_size_t(size))
 
 def rq(addr, off):
-    if not _readable(addr + off, 8):
-        return 0
     return struct.unpack_from('<Q', (ctypes.c_uint8*8).from_address(addr+off), 0)[0]
 
 def ri(addr, off):
-    if not _readable(addr + off, 4):
-        return 0
     return struct.unpack_from('<i', (ctypes.c_uint8*4).from_address(addr+off), 0)[0]
 
 def safe_bytes(addr, n):
-    if not _readable(addr, n):
-        return b'\x00' * n
     return bytes((ctypes.c_uint8*n).from_address(addr))
 
 def read_cstr(ptr):
@@ -520,8 +514,7 @@ def _decode_curve(dll, curve2_addr, data_ptr, expected_dim):
         result = _decode_curve_dak32f(conv_data, expected_dim) if _valid_ptr(conv_data) else None
         dll.GrannyFreeCurve(ctypes.c_void_p(ret))
         return result
-    except Exception as e:
-        print(f"  WARNING: curve decode failed: {e}")
+    except Exception:
         return None
 
 
@@ -1422,8 +1415,7 @@ def _extract_all_textures(pkg_dir, texture_names):
             break
         try:
             chunks, _, _ = read_pkg_chunks(pkg_path)
-        except Exception as e:
-            print(f"  WARNING: failed to read {os.path.basename(pkg_path)}: {e}")
+        except Exception:
             continue
 
         # Use scan_textures which handles both Tex2D and Atlas entries
@@ -1549,8 +1541,7 @@ def _extract_model_texture(pkg_dir, character_name, gr2_texture_names=None):
     for pkg_path in pkg_files:
         try:
             chunks, _, _ = read_pkg_chunks(pkg_path)
-        except Exception as e:
-            print(f"  WARNING: failed to read {os.path.basename(pkg_path)}: {e}")
+        except Exception:
             continue
 
         for ci, (chunk, _) in enumerate(chunks):
@@ -1895,29 +1886,15 @@ def main():
         'gpk': f"{args.name}.gpk",
         'sdb': f"{args.name}.sdb",
         'mesh_entries': mesh_keys,
-        'meshes': [{'name': mn, 'entry': gi['entry'], 'gr2_index': gi['gr2_index'],
-                    'vertex_count': len(md[0]), 'index_count': len(md[5])}
-                   for mn, gi, md in zip(mesh_names, exported_gr2_indices, mesh_data_list)],
+        'meshes': [{'name': mn, 'entry': gi['entry'], 'gr2_index': gi['gr2_index']}
+                   for mn, gi in zip(mesh_names, exported_gr2_indices)],
     }
     if args.textures and 'manifest_textures' in dir():
         manifest['textures'] = manifest_textures
     if anim_data:
-        # Store per-animation content hashes for smart stripping
-        import hashlib as _mhl
-        anim_hashes = {}
-        for a in anim_data:
-            h = _mhl.md5()
-            for t in a.get('tracks', []):
-                for key in ('orient', 'pos', 'scale'):
-                    if t[key] is not None:
-                        knots, values, _ = t[key]
-                        h.update(knots.tobytes())
-                        h.update(values.tobytes())
-            anim_hashes[a['name']] = h.hexdigest()
         manifest['animations'] = {
             'count': len(anim_data),
             'names': [a['name'] for a in anim_data],
-            'hashes': anim_hashes,
         }
     manifest_path = os.path.join(os.path.dirname(out_path), 'manifest.json')
     with open(manifest_path, 'w') as f:

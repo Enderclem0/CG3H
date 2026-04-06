@@ -14,7 +14,7 @@ game path set in preferences.
 bl_info = {
     "name": "CG3H — Hades II Model Tools",
     "author": "Enderclem",
-    "version": (3, 0, 0),
+    "version": (1, 0, 0),
     "blender": (4, 0, 0),
     "location": "File > Import/Export",
     "description": "Import and export Hades II 3D models (.gpk)",
@@ -148,20 +148,10 @@ class CG3H_OT_Import(bpy.types.Operator, ImportHelper):
     filename_ext = ".gpk"
     filter_glob: StringProperty(default="*.gpk", options={'HIDDEN'}, maxlen=255)
 
-    textures: BoolProperty(
-        name="Import Textures",
-        description="Extract and apply textures from .pkg archives",
-        default=True,
-    )
-    animations: BoolProperty(
-        name="Import Animations",
-        description="Extract and import animation data",
+    all_lods: BoolProperty(
+        name="Import all LODs",
+        description="Include lower-resolution LOD duplicates",
         default=False,
-    )
-    anim_filter: StringProperty(
-        name="Animation Filter",
-        description="Only import animations matching this pattern (e.g. 'Idle*')",
-        default="",
     )
 
     def execute(self, context):
@@ -191,23 +181,19 @@ class CG3H_OT_Import(bpy.types.Operator, ImportHelper):
             "--dll", dll,
             "-o", tmp_glb,
         ]
-        if self.textures:
-            cmd.append("--textures")
-        if self.animations:
-            cmd.append("--animations")
-        if self.anim_filter:
-            cmd += ["--anim-filter", self.anim_filter]
+        if self.all_lods:
+            cmd.append("--all-lods")
 
         try:
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=600,
+                cmd, capture_output=True, text=True, timeout=120,
                 cwd=os.path.join(prefs.game_path, "Ship"),
             )
             if result.returncode != 0:
                 self.report({'ERROR'}, f"Export failed:\n{result.stderr or result.stdout}")
                 return {'CANCELLED'}
         except subprocess.TimeoutExpired:
-            self.report({'ERROR'}, "Export timed out (>10min)")
+            self.report({'ERROR'}, "Export timed out (>120s)")
             return {'CANCELLED'}
         except Exception as e:
             self.report({'ERROR'}, f"Export error: {e}")
@@ -262,28 +248,15 @@ class CG3H_OT_Export(bpy.types.Operator, ExportHelper):
         description="Write the raw .gr2 file alongside the .gpk",
         default=False,
     )
-    allow_topology_change: BoolProperty(
-        name="Allow Topology Change",
-        description="Allow different vertex/face counts from the original mesh",
-        default=True,
-    )
-    manifest: StringProperty(
-        name="Manifest",
-        description="Path to manifest.json for multi-file mod builds (auto-detected from export folder)",
-        subtype='FILE_PATH',
-        default="",
-    )
 
     def draw(self, context):
         layout = self.layout
         layout.prop(self, "character")
         layout.prop(self, "positional")
-        layout.prop(self, "allow_topology_change")
         layout.prop(self, "save_gr2")
-        layout.prop(self, "manifest")
         layout.separator()
+        layout.label(text="Vertex count must match the original exactly.", icon='INFO')
         layout.label(text="Export from Blender with Normals OFF.", icon='INFO')
-        layout.label(text="New meshes must be parented to the armature.", icon='INFO')
 
     def execute(self, context):
         prefs = _prefs()
@@ -337,25 +310,13 @@ class CG3H_OT_Export(bpy.types.Operator, ExportHelper):
         ]
         if self.positional:
             cmd.append("--positional")
-        if self.allow_topology_change:
-            cmd.append("--allow-topology-change")
-
-        # Auto-detect manifest.json in the export folder if not explicitly set
-        manifest_path = self.manifest
-        if not manifest_path:
-            candidate = os.path.join(os.path.dirname(output_gpk), "manifest.json")
-            if os.path.isfile(candidate):
-                manifest_path = candidate
-        if manifest_path and os.path.isfile(manifest_path):
-            cmd += ["--manifest", manifest_path]
-
         if self.save_gr2:
             gr2_path = os.path.splitext(output_gpk)[0] + ".gr2"
             cmd += ["--output-gr2", gr2_path]
 
         try:
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=600,
+                cmd, capture_output=True, text=True, timeout=120,
                 cwd=os.path.join(prefs.game_path, "Ship"),
             )
             if result.returncode != 0:
@@ -366,7 +327,7 @@ class CG3H_OT_Export(bpy.types.Operator, ExportHelper):
                 self.report({'ERROR'}, f"Import failed: {msg}")
                 return {'CANCELLED'}
         except subprocess.TimeoutExpired:
-            self.report({'ERROR'}, "Import timed out (>10min)")
+            self.report({'ERROR'}, "Import timed out (>120s)")
             return {'CANCELLED'}
         except Exception as e:
             self.report({'ERROR'}, f"Import error: {e}")
@@ -379,104 +340,6 @@ class CG3H_OT_Export(bpy.types.Operator, ExportHelper):
 
         self.report({'INFO'}, f"Exported to {output_gpk}")
         return {'FINISHED'}
-
-
-# ── Build H2M Operator ───────────────────────────────────────────────────────
-
-class CG3H_OT_BuildH2M(bpy.types.Operator):
-    """Build a Hades II mod package (.h2m) for distribution"""
-    bl_idname = "cg3h.build_h2m"
-    bl_label = "Build H2M Package"
-    bl_options = {'REGISTER'}
-
-    mod_dir: StringProperty(
-        name="Mod Directory",
-        description="Root directory of the mod project (contains modified .gpk files)",
-        subtype='DIR_PATH',
-    )
-    mod_name: StringProperty(
-        name="Mod Name",
-        description="Display name for the mod",
-        default="My Hades II Mod",
-    )
-    author: StringProperty(
-        name="Author",
-        description="Author name for the mod metadata",
-        default="",
-    )
-    thunderstore: BoolProperty(
-        name="Thunderstore Format",
-        description="Also generate a Thunderstore-compatible package",
-        default=False,
-    )
-
-    def invoke(self, context, event):
-        return context.window_manager.invoke_props_dialog(self, width=400)
-
-    def draw(self, context):
-        layout = self.layout
-        layout.prop(self, "mod_dir")
-        layout.prop(self, "mod_name")
-        layout.prop(self, "author")
-        layout.prop(self, "thunderstore")
-
-    def execute(self, context):
-        prefs = _prefs()
-        tools = prefs.tools_path
-        build_script = os.path.join(tools, "cg3h_build.py")
-
-        if not os.path.isfile(build_script):
-            self.report({'ERROR'}, f"cg3h_build.py not found at: {tools}")
-            return {'CANCELLED'}
-
-        if not self.mod_dir or not os.path.isdir(self.mod_dir):
-            self.report({'ERROR'}, "Mod directory is not set or does not exist")
-            return {'CANCELLED'}
-
-        cmd = [
-            sys.executable, build_script,
-            self.mod_dir,
-        ]
-        if self.thunderstore:
-            cmd.append("--package")
-
-        try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=300,
-            )
-            if result.returncode != 0:
-                err = result.stderr or result.stdout
-                lines = [l for l in err.strip().split('\n') if l.strip()]
-                msg = lines[-1] if lines else "Unknown error"
-                self.report({'ERROR'}, f"Build failed: {msg}")
-                return {'CANCELLED'}
-        except subprocess.TimeoutExpired:
-            self.report({'ERROR'}, "Build timed out (>120s)")
-            return {'CANCELLED'}
-        except Exception as e:
-            self.report({'ERROR'}, f"Build error: {e}")
-            return {'CANCELLED'}
-
-        self.report({'INFO'}, f"Built mod package in {self.mod_dir}")
-        return {'FINISHED'}
-
-
-# ── CG3H Menu ────────────────────────────────────────────────────────────────
-
-class CG3H_MT_Menu(bpy.types.Menu):
-    bl_idname = "CG3H_MT_menu"
-    bl_label = "CG3H"
-
-    def draw(self, context):
-        layout = self.layout
-        layout.operator(CG3H_OT_Import.bl_idname, text="Import Hades II Model")
-        layout.operator(CG3H_OT_Export.bl_idname, text="Export Hades II Model")
-        layout.separator()
-        layout.operator(CG3H_OT_BuildH2M.bl_idname, text="Build H2M Package")
-
-
-def menu_func_cg3h(self, context):
-    self.layout.menu(CG3H_MT_Menu.bl_idname)
 
 
 # ── Registration ──────────────────────────────────────────────────────────────
@@ -493,8 +356,6 @@ classes = [
     CG3HPreferences,
     CG3H_OT_Import,
     CG3H_OT_Export,
-    CG3H_OT_BuildH2M,
-    CG3H_MT_Menu,
 ]
 
 
@@ -503,11 +364,9 @@ def register():
         bpy.utils.register_class(cls)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export)
-    bpy.types.TOPBAR_MT_editor_menus.append(menu_func_cg3h)
 
 
 def unregister():
-    bpy.types.TOPBAR_MT_editor_menus.remove(menu_func_cg3h)
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
     for cls in reversed(classes):
