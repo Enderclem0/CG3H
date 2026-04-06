@@ -699,10 +699,9 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
             f'-- Auto-build GPK on first launch if missing',
             f'local gpk_path = rom.path.combine(_PLUGIN.plugins_data_mod_folder_path, "{character}.gpk")',
             f'local builder_path = rom.path.combine(_PLUGIN.plugins_data_mod_folder_path, "cg3h_builder.exe")',
-            f'local mod_json_path = rom.path.combine(_PLUGIN.plugins_data_mod_folder_path, "..")',
             f'if not rom.path.exists(gpk_path) and rom.path.exists(builder_path) then',
             f'    rom.log.info("[CG3H] Building GPK for {name}...")',
-            f'    os.execute(builder_path .. " " .. mod_json_path)',
+            f'    os.execute(builder_path .. " " .. _PLUGIN.plugins_data_mod_folder_path)',
             f'    rom.log.info("[CG3H] GPK build complete")',
             f'end',
         ])
