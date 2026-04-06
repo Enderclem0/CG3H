@@ -20,6 +20,14 @@ _tools_dir = os.path.dirname(os.path.abspath(__file__))
 if _tools_dir not in sys.path:
     sys.path.insert(0, _tools_dir)
 
+STEAM_PATHS = [
+    "C:/Program Files (x86)/Steam/steamapps/common/Hades II",
+    "C:/Program Files/Steam/steamapps/common/Hades II",
+    "D:/Steam/steamapps/common/Hades II",
+    "D:/SteamLibrary/steamapps/common/Hades II",
+    "E:/SteamLibrary/steamapps/common/Hades II",
+]
+
 
 def _strip_unchanged_data(glb_path, mod_dir):
     """
@@ -538,10 +546,7 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
 
     # Auto-detect game dir
     if game_dir is None:
-        for p in [
-            "C:/Program Files (x86)/Steam/steamapps/common/Hades II",
-            "D:/Steam/steamapps/common/Hades II",
-        ]:
+        for p in STEAM_PATHS:
             if os.path.isdir(p):
                 game_dir = p
                 break

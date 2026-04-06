@@ -631,6 +631,27 @@ def read_cstr(ptr):
     return b[:b.index(0)].decode('utf-8', 'replace') if 0 in b else ''
 
 
+def _expand_ref_array(fi: int, count_offset: int, new_ptr: int) -> None:
+    """Expand a Granny ArrayOfReferences field by one entry.
+
+    Reads the count at fi+count_offset and pointer at fi+count_offset+4,
+    allocates a new array with room for one more entry, copies old data,
+    appends new_ptr, and updates both count and pointer in fi.
+    """
+    old_count = ri(fi, count_offset)
+    old_arr = rq(fi, count_offset + 4)
+    new_count = old_count + 1
+    new_arr = (ctypes.c_uint8 * (new_count * 8))()
+    if _valid_ptr(old_arr):
+        ctypes.memmove(new_arr, old_arr, old_count * 8)
+    struct.pack_into('<Q', new_arr, old_count * 8, new_ptr)
+    _keepalive.append(new_arr)
+    struct.pack_into('<i', (ctypes.c_uint8 * 4).from_address(fi + count_offset),
+                     0, new_count)
+    struct.pack_into('<Q', (ctypes.c_uint8 * 8).from_address(fi + count_offset + 4),
+                     0, ctypes.addressof(new_arr))
+
+
 def _t(struct_name, field_name) -> int:
     try:
         return _TYPES[struct_name][field_name]
@@ -1652,80 +1673,32 @@ def patch_vertex_data(
                 if new_mesh_ptr is not None:
                     # Expand fi->Meshes array
                     _meshes_off = _t('granny_file_info', 'Meshes')
-                    old_count = ri(fi, _meshes_off)
-                    old_arr = rq(fi, _meshes_off + 4)
-
-                    new_count = old_count + 1
-                    new_arr = (ctypes.c_uint8 * (new_count * 8))()
-                    if _valid_ptr(old_arr):
-                        ctypes.memmove(new_arr, old_arr, old_count * 8)
-                    struct.pack_into('<Q', new_arr, old_count * 8, new_mesh_ptr)
-                    _keepalive.append(new_arr)
-
-                    struct.pack_into('<i', (ctypes.c_uint8 * 4).from_address(fi + _meshes_off),
-                                     0, new_count)
-                    struct.pack_into('<Q', (ctypes.c_uint8 * 8).from_address(fi + _meshes_off + 4),
-                                     0, ctypes.addressof(new_arr))
+                    _expand_ref_array(fi, _meshes_off, new_mesh_ptr)
 
                     # Also expand Model[0]->MeshBindings so the game renders it
                     model_count = ri(fi, 0x60)
                     if model_count > 0:
                         model0 = rq(rq(fi, 0x64), 0)
-                        # MeshBindings at model+0x54 (after Name(8)+Skeleton(8)+Transform(68))
-                        mb_off = 0x54
-                        old_mb_count = ri(model0, mb_off)
-                        old_mb_ptr = rq(model0, mb_off + 4)
-                        new_mb_count = old_mb_count + 1
-                        new_mb_arr = (ctypes.c_uint8 * (new_mb_count * 8))()
-                        if _valid_ptr(old_mb_ptr):
-                            ctypes.memmove(new_mb_arr, old_mb_ptr, old_mb_count * 8)
-                        struct.pack_into('<Q', new_mb_arr, old_mb_count * 8, new_mesh_ptr)
-                        _keepalive.append(new_mb_arr)
-                        struct.pack_into('<i', (ctypes.c_uint8 * 4).from_address(model0 + mb_off),
-                                         0, new_mb_count)
-                        struct.pack_into('<Q', (ctypes.c_uint8 * 8).from_address(model0 + mb_off + 4),
-                                         0, ctypes.addressof(new_mb_arr))
+                        _expand_ref_array(model0, 0x54, new_mesh_ptr)
 
                     # Expand fi->Materials and fi->Textures if custom material was created
                     if custom_mat_ptr is not None:
                         # fi->Materials (ArrayOfReferences)
                         try:
                             mats_off = _t('granny_file_info', 'Materials')
-                            old_mat_count = ri(fi, mats_off)
-                            old_mat_arr = rq(fi, mats_off + 4)
-                            new_mat_count = old_mat_count + 1
-                            new_mat_arr = (ctypes.c_uint8 * (new_mat_count * 8))()
-                            if _valid_ptr(old_mat_arr):
-                                ctypes.memmove(new_mat_arr, old_mat_arr, old_mat_count * 8)
-                            struct.pack_into('<Q', new_mat_arr, old_mat_count * 8, custom_mat_ptr)
-                            _keepalive.append(new_mat_arr)
-                            struct.pack_into('<i', (ctypes.c_uint8 * 4).from_address(fi + mats_off),
-                                             0, new_mat_count)
-                            struct.pack_into('<Q', (ctypes.c_uint8 * 8).from_address(fi + mats_off + 4),
-                                             0, ctypes.addressof(new_mat_arr))
+                            _expand_ref_array(fi, mats_off, custom_mat_ptr)
                         except KeyError:
                             pass
 
                         # fi->Textures (ArrayOfReferences)
                         try:
                             texs_off = _t('granny_file_info', 'Textures')
-                            old_tex_count = ri(fi, texs_off)
-                            old_tex_arr = rq(fi, texs_off + 4)
                             # Get the texture ptr from the material chain
                             # outer_mat -> Maps[0] -> inner_mat -> Texture
                             maps_ptr = rq(custom_mat_ptr, 0x0C)  # Maps ptr
                             inner_mat_ptr = rq(maps_ptr, 0x08)   # Map->Material
                             tex_ptr = rq(inner_mat_ptr, 0x14)    # Material->Texture
-                            new_tex_count = old_tex_count + 1
-                            new_tex_arr = (ctypes.c_uint8 * (new_tex_count * 8))()
-                            if _valid_ptr(old_tex_arr):
-                                ctypes.memmove(new_tex_arr, old_tex_arr, old_tex_count * 8)
-                            struct.pack_into('<Q', new_tex_arr, old_tex_count * 8, tex_ptr)
-                            _keepalive.append(new_tex_arr)
-                            struct.pack_into('<i', (ctypes.c_uint8 * 4).from_address(fi + texs_off),
-                                             0, new_tex_count)
-                            struct.pack_into('<Q', (ctypes.c_uint8 * 8).from_address(fi + texs_off + 4),
-                                             0, ctypes.addressof(new_tex_arr))
+                            _expand_ref_array(fi, texs_off, tex_ptr)
                         except KeyError:
                             pass
 
@@ -1977,45 +1950,17 @@ def convert(
                                                 material_ptr=custom_mat_ptr)
                 if new_mesh_ptr is not None:
                     _meshes_off = _t('granny_file_info', 'Meshes')
-                    old_count = ri(fi, _meshes_off)
-                    old_arr = rq(fi, _meshes_off + 4)
-                    new_count = old_count + 1
-                    new_arr = (ctypes.c_uint8 * (new_count * 8))()
-                    if _valid_ptr(old_arr):
-                        ctypes.memmove(new_arr, old_arr, old_count * 8)
-                    struct.pack_into('<Q', new_arr, old_count * 8, new_mesh_ptr)
-                    _keepalive.append(new_arr)
-                    struct.pack_into('<i', (ctypes.c_uint8 * 4).from_address(fi + _meshes_off), 0, new_count)
-                    struct.pack_into('<Q', (ctypes.c_uint8 * 8).from_address(fi + _meshes_off + 4), 0, ctypes.addressof(new_arr))
+                    _expand_ref_array(fi, _meshes_off, new_mesh_ptr)
 
                     model_count = ri(fi, 0x60)
                     if model_count > 0:
                         model0 = rq(rq(fi, 0x64), 0)
-                        mb_off = 0x54
-                        old_mb_count = ri(model0, mb_off)
-                        old_mb_ptr = rq(model0, mb_off + 4)
-                        new_mb_count = old_mb_count + 1
-                        new_mb_arr = (ctypes.c_uint8 * (new_mb_count * 8))()
-                        if _valid_ptr(old_mb_ptr):
-                            ctypes.memmove(new_mb_arr, old_mb_ptr, old_mb_count * 8)
-                        struct.pack_into('<Q', new_mb_arr, old_mb_count * 8, new_mesh_ptr)
-                        _keepalive.append(new_mb_arr)
-                        struct.pack_into('<i', (ctypes.c_uint8 * 4).from_address(model0 + mb_off), 0, new_mb_count)
-                        struct.pack_into('<Q', (ctypes.c_uint8 * 8).from_address(model0 + mb_off + 4), 0, ctypes.addressof(new_mb_arr))
+                        _expand_ref_array(model0, 0x54, new_mesh_ptr)
 
                     if custom_mat_ptr is not None:
                         try:
                             mats_off = _t('granny_file_info', 'Materials')
-                            old_mc = ri(fi, mats_off)
-                            old_ma = rq(fi, mats_off + 4)
-                            new_mc = old_mc + 1
-                            new_ma = (ctypes.c_uint8 * (new_mc * 8))()
-                            if _valid_ptr(old_ma):
-                                ctypes.memmove(new_ma, old_ma, old_mc * 8)
-                            struct.pack_into('<Q', new_ma, old_mc * 8, custom_mat_ptr)
-                            _keepalive.append(new_ma)
-                            struct.pack_into('<i', (ctypes.c_uint8 * 4).from_address(fi + mats_off), 0, new_mc)
-                            struct.pack_into('<Q', (ctypes.c_uint8 * 8).from_address(fi + mats_off + 4), 0, ctypes.addressof(new_ma))
+                            _expand_ref_array(fi, mats_off, custom_mat_ptr)
                         except KeyError:
                             pass
                         try:
@@ -2023,16 +1968,7 @@ def convert(
                             maps_ptr = rq(custom_mat_ptr, 0x0C)
                             inner_mat = rq(maps_ptr, 0x08)
                             tex_ptr = rq(inner_mat, 0x14)
-                            old_tc = ri(fi, texs_off)
-                            old_ta = rq(fi, texs_off + 4)
-                            new_tc = old_tc + 1
-                            new_ta = (ctypes.c_uint8 * (new_tc * 8))()
-                            if _valid_ptr(old_ta):
-                                ctypes.memmove(new_ta, old_ta, old_tc * 8)
-                            struct.pack_into('<Q', new_ta, old_tc * 8, tex_ptr)
-                            _keepalive.append(new_ta)
-                            struct.pack_into('<i', (ctypes.c_uint8 * 4).from_address(fi + texs_off), 0, new_tc)
-                            struct.pack_into('<Q', (ctypes.c_uint8 * 8).from_address(fi + texs_off + 4), 0, ctypes.addressof(new_ta))
+                            _expand_ref_array(fi, texs_off, tex_ptr)
                         except KeyError:
                             pass
 

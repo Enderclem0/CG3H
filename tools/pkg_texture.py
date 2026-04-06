@@ -568,6 +568,45 @@ def install_custom_texture(pkg_dir, texture_name, png_path_or_bytes, width, heig
         os.unlink(dds_tmp.name)
 
 
+def _build_texture_entry(entry_name, pixel_data, fmt, width, height):
+    """Build a 0xAD texture entry (tag + CSString + BE size + XNB + tex header + pixels).
+
+    Returns bytes ready to insert into a PKG chunk.
+    """
+    # CSString: 7-bit length + raw bytes
+    name_bytes = entry_name.encode('utf-8')
+    if len(name_bytes) < 128:
+        cs_string = bytes([len(name_bytes)]) + name_bytes
+    else:
+        n = len(name_bytes)
+        cs = bytearray()
+        while n >= 128:
+            cs.append((n & 0x7F) | 0x80)
+            n >>= 7
+        cs.append(n)
+        cs_string = bytes(cs) + name_bytes
+
+    # XNB header (10 bytes)
+    xnb_content_size = 20 + len(pixel_data)
+    xnb_total = 10 + xnb_content_size
+    xnb_header = b'XNBw\x06\x00' + struct.pack('<I', xnb_total)
+
+    # Texture header (20 bytes): fmt, w, h, depth=1, pixel_size
+    tex_header = struct.pack('<IIIII', fmt, width, height, 1, len(pixel_data))
+
+    # Total data size (for the BE size field)
+    total_data = len(xnb_header) + len(tex_header) + len(pixel_data)
+
+    entry = bytearray()
+    entry.append(0xAD)  # Tex2D tag
+    entry.extend(cs_string)
+    entry.extend(struct.pack('<I', _swap32(total_data)))  # big-endian size
+    entry.extend(xnb_header)
+    entry.extend(tex_header)
+    entry.extend(pixel_data)
+    return bytes(entry)
+
+
 def add_texture_entry(pkg_path, entry_name, dds_path, output_path=None):
     """
     Add a NEW texture entry to a .pkg file.
@@ -606,42 +645,7 @@ def add_texture_entry(pkg_path, entry_name, dds_path, output_path=None):
     else:
         fmt = 0x1C  # default BC7
 
-    # Build the new entry bytes (no XNB wrapper for Tex2D entries... wait, they need XNB)
-    # Entry format: tag(1) + CSString(name) + BE_size(4) + XNB(10) + tex_header(20) + pixels
-
-    # CSString: 7-bit length + raw bytes
-    name_bytes = entry_name.encode('utf-8')
-    if len(name_bytes) < 128:
-        cs_string = bytes([len(name_bytes)]) + name_bytes
-    else:
-        # 7-bit encoding for longer strings
-        n = len(name_bytes)
-        cs = bytearray()
-        while n >= 128:
-            cs.append((n & 0x7F) | 0x80)
-            n >>= 7
-        cs.append(n)
-        cs_string = bytes(cs) + name_bytes
-
-    # XNB header (10 bytes)
-    xnb_content_size = 20 + len(pixel_data)  # tex header + pixels
-    xnb_total = 10 + xnb_content_size
-    xnb_header = b'XNBw\x06\x00' + struct.pack('<I', xnb_total)
-
-    # Texture header (20 bytes): fmt, w, h, depth=1, pixel_size
-    tex_header = struct.pack('<IIIII', fmt, dds_w, dds_h, 1, len(pixel_data))
-
-    # Total data size (for the BE size field)
-    total_data = len(xnb_header) + len(tex_header) + len(pixel_data)
-
-    # Build complete entry
-    entry = bytearray()
-    entry.append(0xAD)  # Tex2D tag
-    entry.extend(cs_string)
-    entry.extend(struct.pack('<I', _swap32(total_data)))  # big-endian size
-    entry.extend(xnb_header)
-    entry.extend(tex_header)
-    entry.extend(pixel_data)
+    entry = _build_texture_entry(entry_name, pixel_data, fmt, dds_w, dds_h)
 
     # Read and decompress the .pkg
     with open(pkg_path, 'rb') as f:
@@ -768,37 +772,7 @@ def build_standalone_pkg(textures, output_path, output_manifest_path=None):
         else:
             fmt = 0x1C
 
-        # CSString: 7-bit length + raw bytes
-        name_bytes = entry_name.encode('utf-8')
-        if len(name_bytes) < 128:
-            cs_string = bytes([len(name_bytes)]) + name_bytes
-        else:
-            n = len(name_bytes)
-            cs = bytearray()
-            while n >= 128:
-                cs.append((n & 0x7F) | 0x80)
-                n >>= 7
-            cs.append(n)
-            cs_string = bytes(cs) + name_bytes
-
-        # XNB header
-        xnb_content_size = 20 + len(pixel_data)
-        xnb_total = 10 + xnb_content_size
-        xnb_header = b'XNBw\x06\x00' + struct.pack('<I', xnb_total)
-
-        # Texture header
-        tex_header = struct.pack('<IIIII', fmt, dds_w, dds_h, 1, len(pixel_data))
-
-        # Total data size (big-endian)
-        total_data = len(xnb_header) + len(tex_header) + len(pixel_data)
-
-        # Write entry
-        chunk.append(0xAD)
-        chunk.extend(cs_string)
-        chunk.extend(struct.pack('<I', _swap32(total_data)))
-        chunk.extend(xnb_header)
-        chunk.extend(tex_header)
-        chunk.extend(pixel_data)
+        chunk.extend(_build_texture_entry(entry_name, pixel_data, fmt, dds_w, dds_h))
 
         print(f"  Added: {entry_name} ({dds_w}x{dds_h} fmt=0x{fmt:X} "
               f"{len(pixel_data):,} bytes)")
