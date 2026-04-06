@@ -654,25 +654,8 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
         if pkg_textures:
             build_standalone_pkg(pkg_textures, pkg_path)
 
-        # Register new texture names in the Fx.pkg_manifest so the game
-        # creates texture handles during manifest loading.  Without this,
-        # LoadPackages can override existing textures but not create new ones.
-        if new_tex_names:
-            source_manifest = os.path.join(pkg_dir, 'Fx.pkg_manifest')
-            target_manifest = os.path.join(plugins_data, 'Fx.pkg_manifest')
-            if os.path.isfile(source_manifest):
-                import shutil
-                shutil.copy2(source_manifest, target_manifest)
-                for tex_name in new_tex_names:
-                    add_manifest_entry(target_manifest, f"GR2/{tex_name}", target_manifest)
-                from pkg_texture import _update_pkg_checksum
-                _update_pkg_checksum(target_manifest, checksums_dir=pkg_dir)
-                print(f"  Manifest: {len(new_tex_names)} new texture(s) registered")
-
     # ── Generate H2M manifest ──
     dependencies = ["Hell2Modding-Hell2Modding-0.2.0"]
-    if has_mesh_ops:
-        dependencies.append("Enderclem-CG3HBuilder-3.0.0")
     h2m_manifest = {
         "name": name,
         "version_number": meta.get('version', '1.0.0'),
@@ -691,40 +674,44 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
     ]
 
     if custom_textures:
-        # Register standalone PKG as biome package override.
-        # load_package_overrides_set triggers the real C++ LoadPackage pipeline
-        # (ReadPackageFile → ReadTexture2D) which is required for textures to
-        # be registered.  rom.game.LoadPackages does NOT call ReadTexture2D.
-        # Note: get_hash_guid_from_string returns 0 on first Lua load — overrides
-        # only take effect after scene transition (second Lua load).
+        # Load custom texture package using both approaches:
+        # 1. load_package_overrides_set — triggers real ReadTexture2D on scene
+        #    transition, needed for NEW texture names on late-loading characters
+        # 2. LoadPackages — pre-seeds mLoadedTexture2DHash cache, needed for
+        #    REPLACEMENT of existing texture names on always-loaded characters
         lua_lines.extend([
+            f'-- Load textures via biome override (for new texture names)',
             f'local mod_hash = rom.data.get_hash_guid_from_string("{mod_id}")',
             f'for _, pkg in ipairs({{"{character}", "BiomeHub", "BiomeF", "BiomeIHouse"}}) do',
             f'    local pkg_hash = rom.data.get_hash_guid_from_string(pkg)',
             f'    rom.data.load_package_overrides_set(pkg_hash, {{mod_hash, pkg_hash}})',
             f'end',
+            f'-- Also load via LoadPackages (for replacing existing texture names)',
+            f'local _loaded = false',
+            f'rom.on_import.post(function(script_name)',
+            f'    if _loaded then return end',
+            f'    if script_name == "Main.lua" then',
+            f'        _loaded = true',
+            f'        local pkg_path = rom.path.combine(_PLUGIN.plugins_data_mod_folder_path, _PLUGIN.guid)',
+            f'        rom.game.LoadPackages{{Name = pkg_path}}',
+            f'    end',
+            f'end)',
             f'rom.log.info("[CG3H] Registered texture overrides for {name}")',
         ])
     else:
         lua_lines.append(f'rom.log.info("[CG3H] Loaded: {name}")')
 
-    # If this is a mesh mod, add auto-build logic using the shared CG3HBuilder plugin
+    # If this is a mesh mod, add auto-build logic
     if has_mesh_ops:
         lua_lines.extend([
             f'',
-            f'-- Auto-build GPK on first launch if missing (uses shared CG3HBuilder)',
+            f'-- Auto-build GPK on first launch if missing',
             f'local gpk_path = rom.path.combine(_PLUGIN.plugins_data_mod_folder_path, "{character}.gpk")',
-            f'if not rom.path.exists(gpk_path) then',
-            f'    -- Find cg3h_builder.exe from CG3HBuilder plugin',
-            f'    local builder_base = _PLUGIN.plugins_data_mod_folder_path:gsub("[^/\\\\]+[/\\\\]?$", "") .. "CG3HBuilder"',
-            f'    local builder_path = rom.path.combine(builder_base, "cg3h_builder.exe")',
-            f'    if rom.path.exists(builder_path) then',
-            f'        rom.log.info("[CG3H] Building GPK for {name}...")',
-            f'        os.execute(builder_path .. " " .. _PLUGIN.plugins_data_mod_folder_path)',
-            f'        rom.log.info("[CG3H] GPK build complete")',
-            f'    else',
-            f'        rom.log.info("[CG3H] WARNING: cg3h_builder.exe not found — install CG3HBuilder plugin")',
-            f'    end',
+            f'local builder_path = rom.path.combine(_PLUGIN.plugins_data_mod_folder_path, "cg3h_builder.exe")',
+            f'if not rom.path.exists(gpk_path) and rom.path.exists(builder_path) then',
+            f'    rom.log.info("[CG3H] Building GPK for {name}...")',
+            f'    os.execute(builder_path .. " " .. _PLUGIN.plugins_data_mod_folder_path)',
+            f'    rom.log.info("[CG3H] GPK build complete")',
             f'end',
         ])
 
@@ -820,8 +807,18 @@ def package_thunderstore(mod_dir):
         if os.path.isfile(manifest_file):
             zf.write(manifest_file, 'manifest.json')
 
-        # Mesh mods use the shared CG3HBuilder Thunderstore plugin (no bundled exe)
-        # The dependency is declared in manifest.json
+        # Include builder exe for mesh mods (auto-build GPK on user's machine)
+        pkg_ops = _infer_operations(mod)
+        if pkg_ops & {'adds_meshes', 'replaces_meshes', 'patches_meshes'}:
+            exe_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    'dist', 'cg3h_builder.exe')
+            if os.path.isfile(exe_path):
+                zf.write(exe_path,
+                         f'plugins_data/{mod_id}/cg3h_builder.exe')
+                print(f"  Included cg3h_builder.exe")
+            else:
+                print(f"  WARNING: cg3h_builder.exe not found at {exe_path}")
+                print(f"  Run: pyinstaller --onefile tools/cg3h_builder_entry.py")
 
     print(f"\n  Thunderstore package: {zip_path}.zip")
     return True
