@@ -1667,7 +1667,13 @@ def main():
             print(f"  {k} ({len(v):,} bytes){tag}")
         sys.exit(0)
 
-    # Select mesh entries to export
+    # Select mesh entry to export.
+    # Default: body entry ({Character}_Mesh).  Multi-entry export is available
+    # via --mesh-entry but the importer currently only patches the body entry.
+    if not all_mesh_keys:
+        print(f"ERROR: No _Mesh entry found. Available: {list(entries.keys())[:10]}")
+        sys.exit(1)
+
     if args.mesh_entry:
         selected_keys = [s.strip() for s in args.mesh_entry.split(',')]
         mesh_keys = []
@@ -1684,11 +1690,17 @@ def main():
             print(f"ERROR: No matching mesh entries. Available: {all_mesh_keys}")
             sys.exit(1)
     else:
-        # Default: ALL mesh entries
-        mesh_keys = all_mesh_keys
-        if not mesh_keys:
-            print(f"ERROR: No _Mesh entry found. Available: {list(entries.keys())[:10]}")
-            sys.exit(1)
+        # Default: body entry only ({Character}_Mesh)
+        char_name = os.path.splitext(os.path.basename(gpk_path))[0]
+        body_entry = f"{char_name}_Mesh"
+        if body_entry in all_mesh_keys:
+            mesh_keys = [body_entry]
+        else:
+            mesh_keys = [all_mesh_keys[0]]
+        if len(all_mesh_keys) > 1:
+            print(f"  Multi-entry GPK: {all_mesh_keys}")
+            print(f"  Exporting body entry only: {mesh_keys[0]}")
+            print(f"  Use --mesh-entry to export other entries")
 
     print(f"[2/5] Loading SDB: {sdb_path}")
     with open(sdb_path, 'rb') as f:
