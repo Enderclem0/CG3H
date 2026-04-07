@@ -5,10 +5,8 @@ Adds File > Import/Export menu entries for Hades II models:
   Import: .gpk file → Blender scene (meshes + armature)
   Export: Blender scene → patched .gpk file
 
-Requires the CG3H tools directory to be configured in addon preferences.
-The tools directory must contain gr2_to_gltf.py, gltf_to_gr2.py, and
-granny_types.py. The game's granny2_x64.dll is auto-detected from the
-game path set in preferences.
+Self-contained: bundles cg3h_exporter.exe and cg3h_importer.exe,
+no external Python or dependencies required.
 """
 
 bl_info = {
@@ -22,10 +20,8 @@ bl_info = {
 }
 
 import bpy
-import math
 import os
 import subprocess
-import sys
 import tempfile
 from bpy.props import BoolProperty, EnumProperty, StringProperty
 from bpy_extras.io_utils import ExportHelper, ImportHelper
@@ -49,17 +45,13 @@ def _find_game_path():
     return ""
 
 
-def _find_tools_dir():
-    # Check relative to this addon file (if installed alongside tools/)
-    addon_dir = os.path.dirname(os.path.abspath(__file__))
-    candidates = [
-        os.path.join(addon_dir, "..", "..", "tools"),  # repo layout
-        os.path.join(addon_dir, "tools"),
-    ]
-    for c in candidates:
-        if os.path.isfile(os.path.join(c, "gr2_to_gltf.py")):
-            return os.path.normpath(c)
-    return ""
+def _addon_dir():
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _exe_path(name):
+    """Find a bundled exe (cg3h_exporter.exe or cg3h_importer.exe)."""
+    return os.path.join(_addon_dir(), name)
 
 
 # ── Preferences ───────────────────────────────────────────────────────────────
@@ -73,17 +65,10 @@ class CG3HPreferences(bpy.types.AddonPreferences):
         subtype='DIR_PATH',
         default=_find_game_path(),
     )
-    tools_path: StringProperty(
-        name="CG3H Tools Directory",
-        description="Directory containing gr2_to_gltf.py, gltf_to_gr2.py, etc.",
-        subtype='DIR_PATH',
-        default=_find_tools_dir(),
-    )
 
     def draw(self, context):
         layout = self.layout
         layout.prop(self, "game_path")
-        layout.prop(self, "tools_path")
 
         # Validation
         issues = []
@@ -97,9 +82,10 @@ class CG3HPreferences(bpy.types.AddonPreferences):
             if not os.path.isdir(gpk_dir):
                 issues.append("Content/GR2/_Optimized/ not found")
 
-        if not self.tools_path or not os.path.isfile(
-                os.path.join(self.tools_path, "gr2_to_gltf.py")):
-            issues.append("Tools directory invalid (gr2_to_gltf.py not found)")
+        if not os.path.isfile(_exe_path("cg3h_exporter.exe")):
+            issues.append("cg3h_exporter.exe not found in addon directory")
+        if not os.path.isfile(_exe_path("cg3h_importer.exe")):
+            issues.append("cg3h_importer.exe not found in addon directory")
 
         if issues:
             box = layout.box()
@@ -148,19 +134,33 @@ class CG3H_OT_Import(bpy.types.Operator, ImportHelper):
     filename_ext = ".gpk"
     filter_glob: StringProperty(default="*.gpk", options={'HIDDEN'}, maxlen=255)
 
-    all_lods: BoolProperty(
-        name="Import all LODs",
-        description="Include lower-resolution LOD duplicates",
+    textures: BoolProperty(
+        name="Include Textures",
+        description="Embed character textures from .pkg files into the GLB",
+        default=True,
+    )
+    animations: BoolProperty(
+        name="Include Animations",
+        description="Import animation data (can be slow for characters with many animations)",
         default=False,
     )
+    anim_filter: StringProperty(
+        name="Animation Filter",
+        description="Only import animations matching this pattern (e.g. 'Idle'). Leave empty for all.",
+        default="",
+    )
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "textures")
+        layout.prop(self, "animations")
+        if self.animations:
+            layout.prop(self, "anim_filter")
 
     def execute(self, context):
-        prefs = _prefs()
-        tools = prefs.tools_path
-        exporter = os.path.join(tools, "gr2_to_gltf.py")
-
-        if not os.path.isfile(exporter):
-            self.report({'ERROR'}, f"gr2_to_gltf.py not found at: {tools}")
+        exporter_exe = _exe_path("cg3h_exporter.exe")
+        if not os.path.isfile(exporter_exe):
+            self.report({'ERROR'}, "cg3h_exporter.exe not found in addon directory")
             return {'CANCELLED'}
 
         gpk_path = self.filepath
@@ -169,31 +169,35 @@ class CG3H_OT_Import(bpy.types.Operator, ImportHelper):
         dll = _dll_path()
 
         if not os.path.isfile(dll):
-            self.report({'ERROR'}, f"granny2_x64.dll not found. Set game path in addon preferences.")
+            self.report({'ERROR'}, "granny2_x64.dll not found. Set game path in addon preferences.")
             return {'CANCELLED'}
 
-        # Export to a temp .glb, then import into Blender
         tmp_glb = tempfile.mktemp(suffix=".glb")
 
         cmd = [
-            sys.executable, exporter, name,
+            exporter_exe, name,
             "--gpk-dir", gpk_dir,
             "--dll", dll,
             "-o", tmp_glb,
         ]
-        if self.all_lods:
-            cmd.append("--all-lods")
+        if self.textures:
+            cmd.append("--textures")
+        if self.animations:
+            cmd.append("--animations")
+            if self.anim_filter.strip():
+                cmd += ["--anim-filter", self.anim_filter.strip()]
 
+        timeout = 600 if self.animations else 120
         try:
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=120,
-                cwd=os.path.join(prefs.game_path, "Ship"),
+                cmd, capture_output=True, text=True, timeout=timeout,
+                cwd=os.path.join(_prefs().game_path, "Ship"),
             )
             if result.returncode != 0:
                 self.report({'ERROR'}, f"Export failed:\n{result.stderr or result.stdout}")
                 return {'CANCELLED'}
         except subprocess.TimeoutExpired:
-            self.report({'ERROR'}, "Export timed out (>120s)")
+            self.report({'ERROR'}, f"Export timed out (>{timeout}s)")
             return {'CANCELLED'}
         except Exception as e:
             self.report({'ERROR'}, f"Export error: {e}")
@@ -203,16 +207,8 @@ class CG3H_OT_Import(bpy.types.Operator, ImportHelper):
             self.report({'ERROR'}, "Export produced no output file")
             return {'CANCELLED'}
 
-        # Import the .glb into Blender
         bpy.ops.import_scene.gltf(filepath=tmp_glb)
 
-        # Apply coordinate space rotation (Hades uses Y-up, Blender uses Z-up)
-        # glTF import handles this automatically, but apply -90 X to match game view
-        for obj in context.selected_objects:
-            if obj.type == 'ARMATURE':
-                obj.rotation_euler[0] = math.radians(-90)
-
-        # Clean up temp file
         try:
             os.unlink(tmp_glb)
         except OSError:
@@ -224,121 +220,163 @@ class CG3H_OT_Import(bpy.types.Operator, ImportHelper):
 
 # ── Export Operator ───────────────────────────────────────────────────────────
 
-class CG3H_OT_Export(bpy.types.Operator, ExportHelper):
-    """Export selected meshes back to a Hades II .gpk"""
+class CG3H_OT_Export(bpy.types.Operator):
+    """Export selected meshes as a CG3H mod (GLB + mod.json + Thunderstore ZIP)"""
     bl_idname = "export_scene.cg3h_gpk"
-    bl_label = "Export Hades II Model"
+    bl_label = "Export as Hades II Mod"
     bl_options = {'REGISTER'}
-
-    filename_ext = ".gpk"
-    filter_glob: StringProperty(default="*.gpk", options={'HIDDEN'}, maxlen=255)
 
     character: EnumProperty(
         name="Original Character",
-        description="Which character's GPK to patch (provides skeleton + topology)",
+        description="Which character this mod targets",
         items=_get_characters,
     )
-    positional: BoolProperty(
-        name="Positional Matching",
-        description="Match meshes by index instead of name (use when variant names differ)",
-        default=False,
+    mod_name: StringProperty(
+        name="Mod Name",
+        description="Name for your mod",
+        default="MyMod",
     )
-    save_gr2: BoolProperty(
-        name="Also save .gr2",
-        description="Write the raw .gr2 file alongside the .gpk",
-        default=False,
+    author: StringProperty(
+        name="Author",
+        description="Your name",
+        default="Modder",
     )
+    output_dir: StringProperty(
+        name="Output Directory",
+        description="Where to create the mod workspace",
+        subtype='DIR_PATH',
+        default=os.path.join(os.path.expanduser("~"), "Documents", "CG3H_Mods"),
+    )
+
+    def invoke(self, context, event):
+        # Auto-detect character from selected objects
+        for obj in context.selected_objects:
+            name = obj.name or ""
+            # Try matching armature/skin name (e.g. "Melinoe_Skin", "Moros_Rig:...")
+            for part in [name.split("_")[0], name.split(":")[0].split("_")[0]]:
+                items = _get_characters(self, context)
+                for value, label, _ in items:
+                    if value.lower() == part.lower():
+                        self.character = value
+                        break
+        return context.window_manager.invoke_props_dialog(self, width=400)
 
     def draw(self, context):
         layout = self.layout
         layout.prop(self, "character")
-        layout.prop(self, "positional")
-        layout.prop(self, "save_gr2")
-        layout.separator()
-        layout.label(text="Vertex count must match the original exactly.", icon='INFO')
-        layout.label(text="Export from Blender with Normals OFF.", icon='INFO')
+        layout.prop(self, "mod_name")
+        layout.prop(self, "author")
+        layout.prop(self, "output_dir")
 
     def execute(self, context):
-        prefs = _prefs()
-        tools = prefs.tools_path
-        importer = os.path.join(tools, "gltf_to_gr2.py")
-
-        if not os.path.isfile(importer):
-            self.report({'ERROR'}, f"gltf_to_gr2.py not found at: {tools}")
-            return {'CANCELLED'}
-
         if self.character == "NONE":
             self.report({'ERROR'}, "No character selected. Set game path in addon preferences.")
             return {'CANCELLED'}
 
-        dll = _dll_path()
-        gpk_dir = _gpk_dir()
-        gpk_path = os.path.join(gpk_dir, f"{self.character}.gpk")
-        sdb_path = os.path.join(gpk_dir, f"{self.character}.sdb")
+        character = self.character
+        mod_name = self.mod_name.strip() or "MyMod"
+        author = self.author.strip() or "Modder"
+        workspace = os.path.join(self.output_dir, mod_name)
+        os.makedirs(workspace, exist_ok=True)
 
-        for path, label in [(dll, "DLL"), (gpk_path, "GPK"), (sdb_path, "SDB")]:
-            if not os.path.isfile(path):
-                self.report({'ERROR'}, f"{label} not found: {path}")
-                return {'CANCELLED'}
-
-        # Export selected objects to a temp .glb (no normals to avoid vertex splitting)
-        tmp_glb = tempfile.mktemp(suffix=".glb")
-
+        # Export GLB
+        glb_path = os.path.join(workspace, f"{character}.glb")
         bpy.ops.export_scene.gltf(
-            filepath=tmp_glb,
+            filepath=glb_path,
             use_selection=True,
             export_format='GLB',
             export_normals=False,
             export_tangents=False,
-            export_colors=False,
             export_yup=True,
         )
 
-        if not os.path.isfile(tmp_glb):
+        if not os.path.isfile(glb_path):
             self.report({'ERROR'}, "glTF export produced no file. Select meshes + armature first.")
             return {'CANCELLED'}
 
-        # Run gltf_to_gr2.py
-        output_gpk = self.filepath
-        cmd = [
-            sys.executable, importer, tmp_glb,
-            "--gpk", gpk_path,
-            "--sdb", sdb_path,
-            "--dll", dll,
-            "--output-gpk", output_gpk,
-            "--strict",
-        ]
-        if self.positional:
-            cmd.append("--positional")
-        if self.save_gr2:
-            gr2_path = os.path.splitext(output_gpk)[0] + ".gr2"
-            cmd += ["--output-gr2", gr2_path]
+        # Generate mod.json
+        import json
+        mod_json = {
+            "format": "cg3h-mod/1.0",
+            "metadata": {
+                "name": mod_name,
+                "author": author,
+                "version": "1.0.0",
+                "description": f"{mod_name} for {character}",
+            },
+            "type": "mesh_replace",
+            "target": {
+                "character": character,
+                "mesh_entries": [f"{character}_Mesh"],
+            },
+            "assets": {
+                "glb": f"{character}.glb",
+            },
+        }
+        with open(os.path.join(workspace, "mod.json"), "w") as f:
+            json.dump(mod_json, f, indent=2)
 
-        try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=120,
-                cwd=os.path.join(prefs.game_path, "Ship"),
-            )
-            if result.returncode != 0:
-                err = result.stderr or result.stdout
-                # Extract the most useful line
-                lines = [l for l in err.strip().split('\n') if l.strip()]
-                msg = lines[-1] if lines else "Unknown error"
-                self.report({'ERROR'}, f"Import failed: {msg}")
-                return {'CANCELLED'}
-        except subprocess.TimeoutExpired:
-            self.report({'ERROR'}, "Import timed out (>120s)")
-            return {'CANCELLED'}
-        except Exception as e:
-            self.report({'ERROR'}, f"Import error: {e}")
-            return {'CANCELLED'}
-        finally:
+        # Copy icon if available
+        icon_src = os.path.join(_addon_dir(), "..", "icon.png")
+        if not os.path.isfile(icon_src):
+            icon_src = os.path.join(_addon_dir(), "..", "..", "icon.png")
+        if os.path.isfile(icon_src):
+            import shutil
+            shutil.copy2(icon_src, os.path.join(workspace, "icon.png"))
+
+        # Run exporter to generate manifest.json (for mesh routing)
+        exporter_exe = _exe_path("cg3h_exporter.exe")
+        gpk_dir = _gpk_dir()
+        dll = _dll_path()
+        if os.path.isfile(exporter_exe) and os.path.isfile(dll):
+            manifest_glb = tempfile.mktemp(suffix=".glb")
+            cmd = [
+                exporter_exe, character,
+                "--gpk-dir", gpk_dir,
+                "--dll", dll,
+                "-o", manifest_glb,
+            ]
             try:
-                os.unlink(tmp_glb)
-            except OSError:
+                subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=120,
+                    cwd=os.path.join(_prefs().game_path, "Ship"),
+                )
+                manifest_src = os.path.splitext(manifest_glb)[0] + "_manifest.json"
+                if os.path.isfile(manifest_src):
+                    import shutil
+                    shutil.copy2(manifest_src, os.path.join(workspace, "manifest.json"))
+                    os.unlink(manifest_src)
+            except Exception:
                 pass
+            finally:
+                if os.path.isfile(manifest_glb):
+                    os.unlink(manifest_glb)
 
-        self.report({'INFO'}, f"Exported to {output_gpk}")
+        # Build Thunderstore ZIP via cg3h_build
+        builder_exe = _exe_path("cg3h_importer.exe")
+        # cg3h_importer is gltf_to_gr2 — we need cg3h_build for packaging
+        # Use the bundled exporter's Python to call cg3h_build if available,
+        # otherwise just create the workspace and let the user build manually
+        zip_path = None
+        try:
+            import sys as _sys
+            addon = _addon_dir()
+            if addon not in _sys.path:
+                _sys.path.insert(0, addon)
+            import cg3h_build
+            game_dir = _prefs().game_path
+            cg3h_build.build_mod(workspace, game_dir=game_dir)
+            cg3h_build.package_thunderstore(workspace)
+            mod_id = f"{author}-{mod_name}".replace(" ", "")
+            zip_name = f"{mod_id}-1.0.0.zip"
+            zip_path = os.path.join(workspace, zip_name)
+        except Exception as build_err:
+            pass
+
+        if zip_path and os.path.isfile(zip_path):
+            self.report({'INFO'}, f"Mod ready: {zip_path}")
+        else:
+            self.report({'INFO'}, f"Workspace created: {workspace} (build manually with CG3H GUI)")
         return {'FINISHED'}
 
 
@@ -349,7 +387,7 @@ def menu_func_import(self, context):
 
 
 def menu_func_export(self, context):
-    self.layout.operator(CG3H_OT_Export.bl_idname, text="Hades II Model (.gpk)")
+    self.layout.operator(CG3H_OT_Export.bl_idname, text="Hades II Mod (CG3H)")
 
 
 classes = [

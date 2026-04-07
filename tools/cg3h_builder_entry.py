@@ -268,10 +268,25 @@ def scan_and_build_all(plugins_data_dir, game_dir=None):
         return False
 
     # Scan for CG3H mods with GLBs
+    # Handles both flat layout (manual install) and nested layout (r2modman)
+    #   flat:   plugins_data/{mod_id}/mod.json
+    #   nested: plugins_data/{mod_id}/{mod_id}/mod.json
     by_character = {}
     for entry in sorted(os.listdir(plugins_data_dir)):
         mod_dir = os.path.join(plugins_data_dir, entry)
+        if not os.path.isdir(mod_dir):
+            continue
         mod_json_path = os.path.join(mod_dir, 'mod.json')
+        if not os.path.isfile(mod_json_path):
+            # Check one level deeper (r2modman nesting)
+            for sub in os.listdir(mod_dir):
+                sub_path = os.path.join(mod_dir, sub)
+                if os.path.isdir(sub_path):
+                    candidate = os.path.join(sub_path, 'mod.json')
+                    if os.path.isfile(candidate):
+                        mod_json_path = candidate
+                        mod_dir = sub_path
+                        break
         if not os.path.isfile(mod_json_path):
             continue
 
@@ -298,12 +313,28 @@ def scan_and_build_all(plugins_data_dir, game_dir=None):
             'manifest_path': os.path.join(mod_dir, 'manifest.json'),
         })
 
+    # Output GPKs next to cg3h_builder.exe (handles r2modman nesting)
+    # When running as PyInstaller exe, sys.executable is the exe path
+    if getattr(sys, 'frozen', False):
+        builder_dir = os.path.dirname(sys.executable)
+    else:
+        builder_dir = os.path.join(plugins_data_dir, 'CG3HBuilder')
+    os.makedirs(builder_dir, exist_ok=True)
+
+    # Clean up GPKs for characters that no longer have mods
+    for f in os.listdir(builder_dir):
+        if f.endswith('.gpk'):
+            char = f[:-4]
+            if char not in by_character:
+                os.unlink(os.path.join(builder_dir, f))
+                cache_key = os.path.join(builder_dir, f"{char}.cache_key")
+                if os.path.isfile(cache_key):
+                    os.unlink(cache_key)
+                print(f"  Removed stale GPK: {f}")
+
     if not by_character:
         print("No CG3H mesh mods found")
         return True
-
-    builder_dir = os.path.join(plugins_data_dir, 'CG3HBuilder')
-    os.makedirs(builder_dir, exist_ok=True)
     gpk_dir = os.path.join(game_dir, "Content", "GR2", "_Optimized")
     sdb_dir = gpk_dir
     dll_path = os.path.join(game_dir, "Ship", "granny2_x64.dll")
@@ -316,12 +347,29 @@ def scan_and_build_all(plugins_data_dir, game_dir=None):
 
     for character, char_mods in sorted(by_character.items()):
         output_gpk = os.path.join(builder_dir, f"{character}.gpk")
+        cache_key_path = os.path.join(builder_dir, f"{character}.cache_key")
 
-        # Check cache
-        if os.path.isfile(output_gpk):
-            print(f"  {character}: cached ({len(char_mods)} mod(s))")
-            cached += 1
-            continue
+        # Build a cache key from sorted mod ids + GLB modification times
+        current_key = ""
+        for mi in sorted(char_mods, key=lambda m: m['id']):
+            glb_mtime = os.path.getmtime(mi['glb_path']) if os.path.isfile(mi['glb_path']) else 0
+            current_key += f"{mi['id']}:{glb_mtime}\n"
+
+        # Check cache — rebuild if mods changed
+        if os.path.isfile(output_gpk) and os.path.isfile(cache_key_path):
+            with open(cache_key_path) as f:
+                saved_key = f.read()
+            if saved_key == current_key:
+                print(f"  {character}: cached ({len(char_mods)} mod(s))")
+                cached += 1
+                continue
+            else:
+                print(f"  {character}: mods changed, rebuilding...")
+                os.unlink(output_gpk)
+        elif os.path.isfile(output_gpk):
+            # No cache key file — legacy cache, rebuild
+            print(f"  {character}: no cache key, rebuilding...")
+            os.unlink(output_gpk)
 
         original_gpk = os.path.join(gpk_dir, f"{character}.gpk")
         sdb_path = os.path.join(sdb_dir, f"{character}.sdb")
@@ -382,12 +430,14 @@ def scan_and_build_all(plugins_data_dir, game_dir=None):
             traceback.print_exc()
             ok = False
 
-        # Clean up temp merged GLB
         if os.path.isfile(merged_glb):
             os.unlink(merged_glb)
 
         if ok:
             built += 1
+            # Save cache key so we can detect mod changes
+            with open(cache_key_path, 'w') as f:
+                f.write(current_key)
             print(f"  {character}: done -> {output_gpk}")
         else:
             failed += 1

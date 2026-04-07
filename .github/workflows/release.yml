@@ -23,10 +23,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install numpy pygltflib lz4 etcpak Pillow xxhash pyinstaller
 
-      - name: Build cg3h_builder.exe with PyInstaller
+      - name: Build executables with PyInstaller
         working-directory: tools
         run: |
-          pyinstaller --onefile --name cg3h_builder --collect-all etcpak --collect-all archspec --hidden-import numpy --hidden-import lz4.block --hidden-import pygltflib --hidden-import PIL cg3h_builder_entry.py
+          pyinstaller cg3h_builder.spec --distpath ../dist/builder --workpath ../build/builder -y
+          pyinstaller gr2_to_gltf.spec --distpath ../dist/addon --workpath ../build/addon_export -y
+          pyinstaller gltf_to_gr2.spec --distpath ../dist/addon --workpath ../build/addon_import -y
 
       - name: Create Thunderstore package
         run: |
@@ -38,16 +40,33 @@ jobs:
           New-Item -ItemType Directory -Force -Path thunderstore/plugins/CG3HBuilder
           New-Item -ItemType Directory -Force -Path thunderstore/plugins_data/CG3HBuilder
 
-          Copy-Item tools/dist/cg3h_builder.exe thunderstore/plugins_data/CG3HBuilder/
+          Copy-Item dist/builder/cg3h_builder.exe thunderstore/plugins_data/CG3HBuilder/
           Copy-Item .github/thunderstore/README.md thunderstore/
           Copy-Item .github/thunderstore/main.lua thunderstore/plugins/CG3HBuilder/
 
-          # Plugin manifest with version
+          if (Test-Path .github/thunderstore/icon.png) {
+            Copy-Item .github/thunderstore/icon.png thunderstore/
+          } elseif (Test-Path icon.png) {
+            Copy-Item icon.png thunderstore/
+          }
+
           @"
           {"name":"CG3HBuilder","version_number":"$version","website_url":"https://github.com/Enderclem0/CG3H","description":"CG3H Runtime Builder — scans and loads CG3H mods","dependencies":["Hell2Modding-Hell2Modding-0.2.0"]}
           "@ | Set-Content thunderstore/plugins/CG3HBuilder/manifest.json
 
           Compress-Archive -Path thunderstore/* -DestinationPath "Enderclem-CG3HBuilder-$version.zip"
+        shell: pwsh
+
+      - name: Create Blender addon ZIP
+        run: |
+          New-Item -ItemType Directory -Force -Path blender_addon_build/cg3h
+          Copy-Item blender_addon/cg3h/__init__.py blender_addon_build/cg3h/
+          Copy-Item dist/addon/cg3h_exporter.exe blender_addon_build/cg3h/
+          Copy-Item dist/addon/cg3h_importer.exe blender_addon_build/cg3h/
+          Copy-Item dist/builder/cg3h_builder.exe blender_addon_build/cg3h/
+          Copy-Item tools/cg3h_build.py blender_addon_build/cg3h/
+          Copy-Item tools/pkg_texture.py blender_addon_build/cg3h/
+          Compress-Archive -Path blender_addon_build/cg3h -DestinationPath cg3h_blender_addon.zip
         shell: pwsh
 
       - name: Create tools ZIP for Python users
@@ -60,14 +79,16 @@ jobs:
         with:
           name: release-assets
           path: |
-            tools/dist/cg3h_builder.exe
+            dist/builder/cg3h_builder.exe
             tools.zip
             Enderclem-CG3HBuilder-*.zip
+            cg3h_blender_addon.zip
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            tools/dist/cg3h_builder.exe
+            dist/builder/cg3h_builder.exe
             tools.zip
             Enderclem-CG3HBuilder-*.zip
+            cg3h_blender_addon.zip

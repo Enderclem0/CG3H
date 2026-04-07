@@ -171,10 +171,13 @@ def _strip_unchanged_data(glb_path, mod_dir):
             print(f"  Stripped {stripped_anims} unchanged animation(s), "
                   f"keeping {len(keep_anims)}")
 
-        import io
-        buf = io.BytesIO()
-        gltf.save(buf)
-        return buf.getvalue()
+        import tempfile
+        tmp = tempfile.mktemp(suffix=".glb")
+        gltf.save(tmp)
+        with open(tmp, "rb") as f:
+            data = f.read()
+        os.unlink(tmp)
+        return data
 
     except Exception as e:
         import traceback
@@ -586,16 +589,62 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
         if os.path.isfile(manifest_path):
             shutil.copy2(manifest_path, os.path.join(plugins_data, 'manifest.json'))
 
-    # ── Build PKG + register in manifest (if mod has custom textures) ──
-    # Two steps are needed for new texture names:
-    #   1. Manifest registration — the game only creates texture handles for
-    #      entries listed in the .pkg_manifest.  Without this, new texture
-    #      names are never registered and LoadPackages has nothing to fill.
-    #   2. Standalone PKG — provides the actual pixel data, loaded via
-    #      LoadPackages in the Lua companion.
-    # For REPLACEMENT textures (same name as existing), only step 2 is needed
-    # since the hash is already registered from the original manifest.
+    # ── Build PKG (if mod has custom textures) ──
+    # Auto-detect textures from the GLB if not listed in mod.json
     tex_list = assets.get('textures', [])
+    if not tex_list and os.path.isfile(glb_path):
+        try:
+            import pygltflib
+            gltf = pygltflib.GLTF2().load(glb_path)
+
+            # Load manifest to identify original meshes
+            manifest_path = os.path.join(mod_dir, 'manifest.json')
+            original_mesh_names = set()
+            if os.path.isfile(manifest_path):
+                with open(manifest_path) as mf:
+                    manifest = json.load(mf)
+                original_mesh_names = {m['name'] for m in manifest.get('meshes', [])}
+
+            # Find image indices used only by NEW meshes (not original character meshes)
+            new_image_indices = set()
+            for mesh in gltf.meshes:
+                if mesh.name in original_mesh_names:
+                    continue
+                for prim in mesh.primitives:
+                    if prim.material is not None and prim.material < len(gltf.materials or []):
+                        mat = gltf.materials[prim.material]
+                        if mat.pbrMetallicRoughness and mat.pbrMetallicRoughness.baseColorTexture:
+                            tex_idx = mat.pbrMetallicRoughness.baseColorTexture.index
+                            if tex_idx < len(gltf.textures or []):
+                                src = gltf.textures[tex_idx].source
+                                if src is not None:
+                                    new_image_indices.add(src)
+
+            blob = gltf.binary_blob()
+            for img_idx in new_image_indices:
+                img = gltf.images[img_idx]
+                if img.name and img.bufferView is not None:
+                    bv = gltf.bufferViews[img.bufferView]
+                    png_path = os.path.join(mod_dir, f"{img.name}.png")
+                    if not os.path.isfile(png_path):
+                        with open(png_path, 'wb') as pf:
+                            pf.write(blob[bv.byteOffset:bv.byteOffset + bv.byteLength])
+                    tex_list.append({
+                        "name": img.name,
+                        "file": f"{img.name}.png",
+                        "custom": True,
+                        "width": 512,
+                        "height": 512,
+                    })
+            if tex_list:
+                print(f"\n  Auto-detected {len(tex_list)} texture(s) from GLB")
+                assets['textures'] = tex_list
+                mod['assets'] = assets
+                with open(mod_json_path, 'w') as f:
+                    json.dump(mod, f, indent=2)
+        except Exception as e:
+            print(f"  Texture auto-detect warning: {e}")
+
     custom_textures = [t for t in tex_list if t.get('custom', True)]
 
     if custom_textures:
@@ -691,8 +740,12 @@ def package_thunderstore(mod_dir):
         }
         zf.writestr('manifest.json', json.dumps(ts_manifest, indent=2))
 
-        # Icon
+        # Icon — mod's own or default CG3H icon
         icon_path = os.path.join(mod_dir, meta.get('preview', 'icon.png'))
+        if not os.path.isfile(icon_path):
+            icon_path = os.path.join(mod_dir, 'icon.png')
+        if not os.path.isfile(icon_path):
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'icon.png')
         if os.path.isfile(icon_path):
             zf.write(icon_path, 'icon.png')
 
