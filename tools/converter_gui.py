@@ -33,13 +33,7 @@ IMPORTER   = os.path.join(SCRIPT_DIR, "gltf_to_gr2.py")
 
 DEFAULT_OUTPUT = os.path.join(os.path.expanduser("~"), "Documents", "CG3H_Mods")
 
-STEAM_PATHS = [
-    r"C:\Program Files (x86)\Steam\steamapps\common\Hades II",
-    r"C:\Program Files\Steam\steamapps\common\Hades II",
-    r"D:\Steam\steamapps\common\Hades II",
-    r"D:\SteamLibrary\steamapps\common\Hades II",
-    r"E:\SteamLibrary\steamapps\common\Hades II",
-]
+from cg3h_constants import STEAM_PATHS, CG3H_BUILDER_DEPENDENCY
 
 
 def find_game_path():
@@ -584,18 +578,16 @@ class App:
                 with open(mods_yml_path) as f:
                     existing_text = f.read()
 
-            # Remove old entry for this mod if present (between "- manifestVersion" markers)
+            # Remove old entry for this mod if present
             lines = existing_text.split("\n")
             filtered = []
             skip = False
-            for line in lines:
+            for i, line in enumerate(lines):
                 if line.startswith("- manifestVersion:"):
                     if skip:
                         skip = False
-                    # Check if next lines contain our mod_id
-                    idx = lines.index(line) if line in lines else -1
                     # Peek ahead for name field
-                    block = "\n".join(lines[lines.index(line):lines.index(line)+5])
+                    block = "\n".join(lines[i:i+5])
                     if f"name: {mod_id}" in block:
                         skip = True
                         continue
@@ -626,7 +618,7 @@ class App:
                 f"  installedAtTime: {int(time.time() * 1000)}\n"
                 f"  loaders: []\n"
                 f"  dependencies:\n"
-                f"    - Enderclem-CG3HBuilder-3.0.0\n"
+                f"    - {CG3H_BUILDER_DEPENDENCY}\n"
                 f"  incompatibilities: []\n"
                 f"  optionalDependencies: []\n"
                 f"  versionNumber:\n"

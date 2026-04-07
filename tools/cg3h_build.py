@@ -20,13 +20,7 @@ _tools_dir = os.path.dirname(os.path.abspath(__file__))
 if _tools_dir not in sys.path:
     sys.path.insert(0, _tools_dir)
 
-STEAM_PATHS = [
-    "C:/Program Files (x86)/Steam/steamapps/common/Hades II",
-    "C:/Program Files/Steam/steamapps/common/Hades II",
-    "D:/Steam/steamapps/common/Hades II",
-    "D:/SteamLibrary/steamapps/common/Hades II",
-    "E:/SteamLibrary/steamapps/common/Hades II",
-]
+from cg3h_constants import STEAM_PATHS, CG3H_BUILDER_DEPENDENCY, H2M_DEPENDENCY
 
 
 def _strip_unchanged_data(glb_path, mod_dir):
@@ -645,7 +639,7 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
         except Exception as e:
             print(f"  Texture auto-detect warning: {e}")
 
-    custom_textures = [t for t in tex_list if t.get('custom', True)]
+    custom_textures = [t for t in tex_list if t.get('custom', False)]
 
     if custom_textures:
         pkg_dir = os.path.join(game_dir, "Content", "Packages", "1080p")
@@ -692,8 +686,8 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
         "website_url": meta.get('url', ''),
         "description": meta.get('description', ''),
         "dependencies": [
-            "Hell2Modding-Hell2Modding-0.2.0",
-            "Enderclem-CG3HBuilder-3.0.0",
+            H2M_DEPENDENCY,
+            CG3H_BUILDER_DEPENDENCY,
         ],
     }
     with open(os.path.join(plugins, 'manifest.json'), 'w') as f:
@@ -734,8 +728,8 @@ def package_thunderstore(mod_dir):
             "website_url": meta.get('url', ''),
             "description": meta.get('description', ''),
             "dependencies": [
-                "Hell2Modding-Hell2Modding-0.2.0",
-                "Enderclem-CG3HBuilder-3.0.0",
+                H2M_DEPENDENCY,
+                CG3H_BUILDER_DEPENDENCY,
             ],
         }
         zf.writestr('manifest.json', json.dumps(ts_manifest, indent=2))

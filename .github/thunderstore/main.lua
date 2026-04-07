@@ -47,7 +47,7 @@ local mod_count = 0
 for _, entry in ipairs(rom.path.get_directories(plugins_data_dir) or {}) do
     -- Skip our own folder and build output
     local dir_name = entry:match("([^/\\]+)$") or ""
-    if dir_name:find("CG3HBuilder") or entry:find("build") then
+    if dir_name:find("CG3HBuilder") or dir_name == "build" then
         goto continue_scan
     end
     local mod_json_path, mod_data_dir = find_mod_json(entry)

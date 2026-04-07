@@ -44,7 +44,7 @@ pip install pyinstaller  # only needed to build cg3h_builder.exe
 
 The game's `granny2_x64.dll` is required (auto-detected from Steam path).
 
-For end users: **no Python needed** — mesh mods include `cg3h_builder.exe` (29MB standalone), and texture mods ship pre-built `.pkg` files.
+For end users: **no Python needed** — install the [CG3HBuilder](https://thunderstore.io/c/hades-ii/p/Enderclem/CG3HBuilder/) plugin via r2modman, which handles GPK building and texture loading at runtime.
 
 ---
 
@@ -60,8 +60,8 @@ python tools/converter_gui.py
 Three tabs:
 
 - **Create** — Pick a character, export to a mod workspace (GLB + textures + `mod.json`).
-- **Build** — Build an H2M-compatible package (GPK + standalone .pkg + Lua companion). Optional Thunderstore ZIP with `--package`. One-click r2modman install.
-- **Mods** — View installed mods, detect conflicts, set merge order, disable/remove/rebuild.
+- **Build** — Build a Thunderstore package (GLB + .pkg + manifest). One-click r2modman install.
+- **Mods** — View installed CG3H mods, CG3HBuilder status, GPK build state.
 
 ### Building a mod from the CLI
 
@@ -77,17 +77,14 @@ The builder reads `mod.json` from the current directory, auto-detects the game p
 
 ### What the build produces
 
-For **texture_replace** mods:
-- Standalone `.pkg` file (built from scratch, not a modified game file)
-- H2M Lua companion (`main.lua`)
+All mods are **data-only** packages (no exe, no Lua):
+- `.glb` with new/modified meshes
+- `mod.json` descriptor
+- Standalone `.pkg` for custom textures (auto-detected from GLB)
+- H2M plugin stub (manifest with CG3HBuilder dependency)
 - Ready for Thunderstore upload
 
-For **mesh_add** mods:
-- `.glb` with new meshes only (no copyrighted geometry)
-- `cg3h_builder.exe` for on-device GPK building
-- Standalone `.pkg` for custom textures
-- H2M Lua companion
-- Ready for Thunderstore upload
+The shared **CG3HBuilder** plugin (installed once) handles all runtime logic: scanning mods, merging GLBs per character, building GPKs, and loading textures.
 
 ### Mod types
 
@@ -105,15 +102,16 @@ See [`docs/mod_spec.md`](docs/mod_spec.md) for the full mod specification.
 
 ## Blender Addon
 
-1. In Blender: Edit > Preferences > Add-ons > Install
-2. Navigate to `blender_addon/cg3h/` and select `__init__.py`
+Self-contained addon (55MB ZIP) — no Python dependencies needed.
+
+1. In Blender: Edit > Preferences > Add-ons > Install from Disk
+2. Select `cg3h_blender_addon.zip` from the [releases page](https://github.com/Enderclem0/CG3H/releases)
 3. Enable "CG3H — Hades II Model Tools"
-4. Set the game path and tools path in addon preferences
+4. Set the game path in addon preferences
 
 Features:
-- **File > Import > Hades II Model (.gpk)** — import from `Content/GR2/_Optimized/`
-- **File > Export > Hades II Model (.gpk)** — export selected meshes + armature
-- **CG3H menu** — texture options, animation export, topology change toggle, Build for H2M
+- **File > Import > Hades II Model (.gpk)** — import meshes, textures, and animations
+- **File > Export > Hades II Mod (CG3H)** — export as a complete mod (GLB + mod.json + Thunderstore ZIP)
 
 ## CLI Tools
 
@@ -176,7 +174,8 @@ tools/
   cg3h_build.py             H2M mod builder (mod.json -> Thunderstore ZIP)
   mod_merger.py             Multi-mod merger with conflict detection
   converter_gui.py          CG3H Mod Builder GUI (Create/Build/Mods)
-  cg3h_builder_entry.py     PyInstaller entry point for cg3h_builder.exe
+  cg3h_builder_entry.py     Runtime GPK builder + GLB merger (PyInstaller entry point)
+  cg3h_constants.py         Shared constants (Steam paths, dependency versions)
   gpk_pack.py               GPK archive pack/unpack
   granny_types.py           Dynamic Granny struct offset resolver
   Start_gui.bat             Windows launcher
@@ -216,14 +215,22 @@ docs/
 6. Recompute per-bone OBB for frustum culling
 7. Serialize via Granny write API, LZ4-compress into output `.gpk`
 
-### Build Pipeline (`cg3h build`)
+### Build Pipeline (`cg3h_build.py`)
 
 1. Read `mod.json` descriptor
-2. Auto-detect game directory from Steam paths
-3. For texture_replace: build standalone `.pkg` (BC7/BC3 compressed with mipmaps)
-4. For mesh_add: bundle GLB + `cg3h_builder.exe` for on-device GPK building
-5. Generate H2M Lua companion and Thunderstore manifest
+2. Auto-detect textures from GLB (new meshes only)
+3. Build standalone `.pkg` for custom textures (BC7/BC3 compressed with mipmaps)
+4. Strip unchanged meshes from GLB
+5. Generate H2M plugin stub with CG3HBuilder dependency
 6. Optionally create Thunderstore ZIP (`--package`)
+
+### Runtime Pipeline (CG3HBuilder)
+
+1. Scan `plugins_data/` for installed CG3H mods
+2. Group by character, merge GLBs from multiple mods
+3. Build GPK on first launch (cached, rebuilds when mods change)
+4. Register GPKs via `rom.data.add_granny_file` (no restart needed)
+5. Load custom textures via biome overrides + LoadPackages
 
 ## Documentation
 

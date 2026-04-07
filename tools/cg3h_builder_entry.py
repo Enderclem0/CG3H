@@ -19,13 +19,7 @@ if _dir not in sys.path:
 if sys.stdout and sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
-STEAM_PATHS = [
-    "C:/Program Files (x86)/Steam/steamapps/common/Hades II",
-    "C:/Program Files/Steam/steamapps/common/Hades II",
-    "D:/Steam/steamapps/common/Hades II",
-    "D:/SteamLibrary/steamapps/common/Hades II",
-    "E:/SteamLibrary/steamapps/common/Hades II",
-]
+from cg3h_constants import STEAM_PATHS
 
 
 def _merge_glbs(char_mods, output_dir, character):
@@ -134,24 +128,25 @@ def _merge_glbs(char_mods, output_dir, character):
                     base_gltf.accessors.append(new_acc)
                     acc_offset_map[acc_idx] = new_acc_idx
 
-            # Remap material index from other GLB to merged GLB
-            new_mat_idx = None
-            if prim.material is not None:
-                new_mat_idx = prim.material + mat_offset
+            # Build all primitives with remapped accessors and materials
+            new_prims = []
+            for prim in mesh.primitives:
+                new_mat_idx = None
+                if prim.material is not None:
+                    new_mat_idx = prim.material + mat_offset
+                new_prims.append(pygltflib.Primitive(
+                    attributes=pygltflib.Attributes(
+                        POSITION=acc_offset_map.get(prim.attributes.POSITION),
+                        NORMAL=acc_offset_map.get(prim.attributes.NORMAL),
+                        TEXCOORD_0=acc_offset_map.get(prim.attributes.TEXCOORD_0),
+                        JOINTS_0=acc_offset_map.get(prim.attributes.JOINTS_0),
+                        WEIGHTS_0=acc_offset_map.get(prim.attributes.WEIGHTS_0),
+                    ),
+                    indices=acc_offset_map.get(prim.indices),
+                    material=new_mat_idx,
+                ))
 
-            new_prim = pygltflib.Primitive(
-                attributes=pygltflib.Attributes(
-                    POSITION=acc_offset_map.get(prim.attributes.POSITION),
-                    NORMAL=acc_offset_map.get(prim.attributes.NORMAL),
-                    TEXCOORD_0=acc_offset_map.get(prim.attributes.TEXCOORD_0),
-                    JOINTS_0=acc_offset_map.get(prim.attributes.JOINTS_0),
-                    WEIGHTS_0=acc_offset_map.get(prim.attributes.WEIGHTS_0),
-                ),
-                indices=acc_offset_map.get(prim.indices),
-                material=new_mat_idx,
-            )
-
-            new_mesh = pygltflib.Mesh(name=mesh.name, primitives=[new_prim])
+            new_mesh = pygltflib.Mesh(name=mesh.name, primitives=new_prims)
             new_mesh_idx = len(base_gltf.meshes)
             base_gltf.meshes.append(new_mesh)
             base_mesh_names.add(mesh.name)
