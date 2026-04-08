@@ -51,7 +51,10 @@ class App:
         self.root.title("CG3H Mod Builder")
         self.root.minsize(900, 650)
 
-        self.game_path = tk.StringVar(value=find_game_path())
+        self._config_path = os.path.join(SCRIPT_DIR, ".cg3h_config.json")
+        self._config = self._load_config()
+
+        self.game_path = tk.StringVar(value=self._config.get("game_path", find_game_path()))
         self._all_names: list[str] = []
         self._status = tk.StringVar(value="Ready")
 
@@ -80,6 +83,24 @@ class App:
             if os.path.isdir(c):
                 return c
         return None
+
+    # -- Config persistence ----------------------------------------------------
+
+    def _load_config(self):
+        try:
+            if os.path.isfile(self._config_path):
+                with open(self._config_path) as f:
+                    return json.load(f)
+        except Exception:
+            pass
+        return {}
+
+    def _save_config(self):
+        try:
+            with open(self._config_path, 'w') as f:
+                json.dump(self._config, f, indent=2)
+        except Exception:
+            pass
 
     # -- Top-level UI ---------------------------------------------------------
 
@@ -139,22 +160,6 @@ class App:
         self._create_char_lb.pack(side=tk.LEFT, fill=tk.X, expand=True)
         char_sb.pack(side=tk.RIGHT, fill=tk.Y)
         self._create_char_lb.bind('<<ListboxSelect>>', self._on_char_select)
-
-        # Mod name
-        row2 = ttk.Frame(top)
-        row2.pack(fill=tk.X, pady=(0, 4))
-        ttk.Label(row2, text="Mod name:", width=14, anchor=tk.W).pack(side=tk.LEFT)
-        self._create_mod_name = tk.StringVar()
-        ttk.Entry(row2, textvariable=self._create_mod_name, width=28).pack(
-            side=tk.LEFT, padx=6)
-
-        # Author
-        row3 = ttk.Frame(top)
-        row3.pack(fill=tk.X, pady=(0, 4))
-        ttk.Label(row3, text="Author:", width=14, anchor=tk.W).pack(side=tk.LEFT)
-        self._create_author = tk.StringVar(value="Modder")
-        ttk.Entry(row3, textvariable=self._create_author, width=20).pack(
-            side=tk.LEFT, padx=6)
 
         # Options
         opt_frame = ttk.LabelFrame(top, text="Options", padding=8)
@@ -217,15 +222,9 @@ class App:
             messagebox.showwarning("No character", "Select a character from the dropdown.")
             return
 
-        mod_name = self._create_mod_name.get().strip()
-        if not mod_name:
-            messagebox.showwarning("No mod name", "Enter a mod name.")
-            return
-
-        author = self._create_author.get().strip() or "Modder"
         out_base = self._create_output.get().strip() or DEFAULT_OUTPUT
-        # Workspace folder: output/ModName/
-        workspace = os.path.join(out_base, mod_name.replace(" ", ""))
+        # Workspace folder: output/Character/
+        workspace = os.path.join(out_base, character)
 
         dll = self._dll_path()
         if not os.path.isfile(dll):
@@ -242,11 +241,11 @@ class App:
 
         threading.Thread(
             target=self._create_worker,
-            args=(character, mod_name, author, workspace, dll),
+            args=(character, workspace, dll),
             daemon=True,
         ).start()
 
-    def _create_worker(self, character, mod_name, author, workspace, dll):
+    def _create_worker(self, character, workspace, dll):
         gpk_dir = self._gpk_dir()
 
         # Step 1: Export character to GLB
@@ -296,13 +295,14 @@ class App:
             mesh_entries = [e.strip() for e in mesh_entry.split(",") if e.strip()] \
                 if mesh_entry else [f"{character}_Mesh"]
 
+            saved_author = self._config.get("author", "Modder")
             mod_json = {
                 "format": "cg3h-mod/1.0",
                 "metadata": {
-                    "name": mod_name,
-                    "author": author,
+                    "name": character,
+                    "author": saved_author,
                     "version": "1.0.0",
-                    "description": f"{mod_name} for {character}",
+                    "description": f"Mod for {character}",
                 },
                 "type": "mesh_replace",
                 "target": {
@@ -373,6 +373,21 @@ class App:
         self._build_info = ttk.Label(top, text="", foreground="#555")
         self._build_info.pack(anchor=tk.W, pady=(2, 6))
 
+        # Mod name + Author (used for Thunderstore packaging and r2modman install)
+        meta_frame = ttk.Frame(top)
+        meta_frame.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(meta_frame, text="Mod name:", width=14, anchor=tk.W).pack(side=tk.LEFT)
+        self._build_mod_name = tk.StringVar()
+        ttk.Entry(meta_frame, textvariable=self._build_mod_name, width=28).pack(
+            side=tk.LEFT, padx=6)
+
+        author_frame = ttk.Frame(top)
+        author_frame.pack(fill=tk.X, pady=(0, 6))
+        ttk.Label(author_frame, text="Author:", width=14, anchor=tk.W).pack(side=tk.LEFT)
+        self._build_author = tk.StringVar(value=self._config.get("author", "Modder"))
+        ttk.Entry(author_frame, textvariable=self._build_author, width=20).pack(
+            side=tk.LEFT, padx=6)
+
         # Options
         self._build_thunderstore = tk.BooleanVar(value=False)
         ttk.Checkbutton(top, text="Also create Thunderstore ZIP",
@@ -427,6 +442,12 @@ class App:
         character = m.get("target", {}).get("character", m.get("character", "?"))
         version = meta.get("version", m.get("version", "?"))
 
+        # Populate mod name and author fields from mod.json
+        if name and name != "?":
+            self._build_mod_name.set(name)
+        if author and author != "?":
+            self._build_author.set(author)
+
         # Detect operations if cg3h_build is available
         ops_str = mod_type
         if cg3h_build and hasattr(cg3h_build, "_infer_operations"):
@@ -460,6 +481,26 @@ class App:
         if not os.path.isfile(os.path.join(mod_dir, "mod.json")):
             messagebox.showerror("No mod.json", f"mod.json not found in:\n{mod_dir}")
             return
+
+        # Save author preference
+        author = self._build_author.get().strip() or "Modder"
+        self._config["author"] = author
+        self._save_config()
+
+        # Update mod.json with current mod name + author before building
+        mod_name = self._build_mod_name.get().strip()
+        if mod_name or author:
+            try:
+                mod_json_path = os.path.join(mod_dir, "mod.json")
+                with open(mod_json_path) as f:
+                    m = json.load(f)
+                if mod_name:
+                    m.setdefault("metadata", {})["name"] = mod_name
+                m.setdefault("metadata", {})["author"] = author
+                with open(mod_json_path, 'w') as f:
+                    json.dump(m, f, indent=2)
+            except Exception:
+                pass
 
         self._log_clear(self._build_log)
         self._build_running = True

@@ -65,10 +65,16 @@ class CG3HPreferences(bpy.types.AddonPreferences):
         subtype='DIR_PATH',
         default=_find_game_path(),
     )
+    author: StringProperty(
+        name="Default Author",
+        description="Your modder name (saved for future exports)",
+        default="Modder",
+    )
 
     def draw(self, context):
         layout = self.layout
         layout.prop(self, "game_path")
+        layout.prop(self, "author")
 
         # Validation
         issues = []
@@ -238,7 +244,7 @@ class CG3H_OT_Export(bpy.types.Operator):
     )
     author: StringProperty(
         name="Author",
-        description="Your name",
+        description="Your name (loaded from addon preferences)",
         default="Modder",
     )
     output_dir: StringProperty(
@@ -249,6 +255,9 @@ class CG3H_OT_Export(bpy.types.Operator):
     )
 
     def invoke(self, context, event):
+        # Load author from preferences
+        self.author = _prefs().author
+
         # Auto-detect character from selected objects
         for obj in context.selected_objects:
             name = obj.name or ""
