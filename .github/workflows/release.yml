@@ -70,7 +70,7 @@ jobs:
           Copy-Item dist/builder/cg3h_builder.exe blender_addon_build/cg3h/
           Copy-Item tools/cg3h_build.py blender_addon_build/cg3h/
           Copy-Item tools/pkg_texture.py blender_addon_build/cg3h/
-          Compress-Archive -Path blender_addon_build/cg3h -DestinationPath cg3h_blender_addon.zip
+          Compress-Archive -Path blender_addon_build/cg3h -DestinationPath CG3H-Blender-Addon.zip
         shell: pwsh
 
       - name: Create tools ZIP for Python users
@@ -85,7 +85,7 @@ jobs:
           path: |
             CG3H-Python-Tools.zip
             CG3H-Merger-*.zip
-            cg3h_blender_addon.zip
+            CG3H-Blender-Addon.zip
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -93,4 +93,4 @@ jobs:
           files: |
             CG3H-Python-Tools.zip
             CG3H-Merger-*.zip
-            cg3h_blender_addon.zip
+            CG3H-Blender-Addon.zip
