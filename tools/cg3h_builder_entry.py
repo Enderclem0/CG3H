@@ -22,6 +22,34 @@ if sys.stdout and sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8'
 from cg3h_constants import STEAM_PATHS
 
 
+def _merge_manifests(char_mods):
+    """Merge manifest.json from all mods targeting the same character.
+
+    Returns combined manifest dict with union of mesh entries and mesh mappings,
+    or None if no manifests exist.
+    """
+    merged = {'meshes': [], 'mesh_entries': []}
+    seen_meshes = set()
+    seen_entries = set()
+
+    for mod_info in char_mods:
+        mp = mod_info.get('manifest_path', '')
+        if not mp or not os.path.isfile(mp):
+            continue
+        with open(mp) as f:
+            m = json.load(f)
+        for entry in m.get('mesh_entries', []):
+            if entry not in seen_entries:
+                merged['mesh_entries'].append(entry)
+                seen_entries.add(entry)
+        for mesh in m.get('meshes', []):
+            if mesh['name'] not in seen_meshes:
+                merged['meshes'].append(mesh)
+                seen_meshes.add(mesh['name'])
+
+    return merged if merged['meshes'] else None
+
+
 def _merge_glbs(char_mods, output_dir, character):
     """Merge meshes from multiple GLBs into one combined GLB.
 
@@ -224,6 +252,7 @@ def build_gpk(mod_dir, game_dir=None):
     patch_anims = 'animation_patch' in types
     anim_cfg = mod.get('assets', {}).get('animations', {})
     anim_filter = anim_cfg.get('filter') if isinstance(anim_cfg, dict) else None
+    new_mesh_routing = mod.get('target', {}).get('new_mesh_routing')
 
     print(f"Building GPK: {character}")
     print(f"  GLB: {glb_path}")
@@ -241,6 +270,7 @@ def build_gpk(mod_dir, game_dir=None):
             allow_topology_change=allow_topo,
             patch_animations=patch_anims,
             anim_patch_filter=anim_filter,
+            new_mesh_routing=new_mesh_routing,
         )
         print(f"  Output: {output_gpk}")
         return True
@@ -389,10 +419,11 @@ def scan_and_build_all(plugins_data_dir, game_dir=None):
         # Use first mod's manifest (for mesh name routing)
         manifest = char_mods[0]['manifest_path']
 
-        # Collect operations from all mods
+        # Collect operations and routing from all mods
         allow_topo = False
         patch_anims = False
         anim_filter = None
+        merged_routing = {}
         for mod_info in char_mods:
             mod = mod_info['mod']
             mod_type = mod.get('type', '')
@@ -404,6 +435,13 @@ def scan_and_build_all(plugins_data_dir, game_dir=None):
                 anim_cfg = mod.get('assets', {}).get('animations', {})
                 if isinstance(anim_cfg, dict) and anim_cfg.get('filter'):
                     anim_filter = anim_cfg['filter']
+            # Merge new_mesh_routing from all mods
+            routing = mod.get('target', {}).get('new_mesh_routing', {})
+            for mesh_name, entries in routing.items():
+                merged_routing[mesh_name] = entries
+
+        # Phase 4: merge manifests from all mods
+        merged_manifest = _merge_manifests(char_mods)
 
         for mi in char_mods:
             print(f"    - {mi['id']}")
@@ -415,10 +453,11 @@ def scan_and_build_all(plugins_data_dir, game_dir=None):
                 sdb_path=sdb_path,
                 dll_path=dll_path,
                 output_gpk=output_gpk,
-                manifest_path=manifest if os.path.isfile(manifest) else None,
+                manifest_dict=merged_manifest,
                 allow_topology_change=allow_topo,
                 patch_animations=patch_anims,
                 anim_patch_filter=anim_filter,
+                new_mesh_routing=merged_routing or None,
             )
             ok = True
         except Exception as e:

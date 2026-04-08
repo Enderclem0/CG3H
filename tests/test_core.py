@@ -643,5 +643,66 @@ def test_routing_new_mesh_targeted():
     assert len(routing['Hub_Mesh']) == 0
 
 
+def test_merge_manifests_union():
+    """Merged manifest contains union of entries and meshes."""
+    from cg3h_builder_entry import _merge_manifests
+
+    tmpdir = tempfile.mkdtemp()
+    try:
+        m1_path = os.path.join(tmpdir, 'mod1', 'manifest.json')
+        m2_path = os.path.join(tmpdir, 'mod2', 'manifest.json')
+        os.makedirs(os.path.dirname(m1_path))
+        os.makedirs(os.path.dirname(m2_path))
+
+        with open(m1_path, 'w') as f:
+            json.dump({'mesh_entries': ['Battle_Mesh'], 'meshes': [
+                {'name': 'BattleMesh', 'entry': 'Battle_Mesh', 'gr2_index': 0}
+            ]}, f)
+        with open(m2_path, 'w') as f:
+            json.dump({'mesh_entries': ['Hub_Mesh'], 'meshes': [
+                {'name': 'HubMesh', 'entry': 'Hub_Mesh', 'gr2_index': 0}
+            ]}, f)
+
+        char_mods = [
+            {'manifest_path': m1_path},
+            {'manifest_path': m2_path},
+        ]
+        merged = _merge_manifests(char_mods)
+
+        assert merged is not None
+        assert set(merged['mesh_entries']) == {'Battle_Mesh', 'Hub_Mesh'}
+        assert len(merged['meshes']) == 2
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_merge_manifests_no_duplicates():
+    """Same mesh from two manifests appears only once."""
+    from cg3h_builder_entry import _merge_manifests
+
+    tmpdir = tempfile.mkdtemp()
+    try:
+        m1_path = os.path.join(tmpdir, 'mod1', 'manifest.json')
+        m2_path = os.path.join(tmpdir, 'mod2', 'manifest.json')
+        os.makedirs(os.path.dirname(m1_path))
+        os.makedirs(os.path.dirname(m2_path))
+
+        mesh = {'name': 'SharedMesh', 'entry': 'Body_Mesh', 'gr2_index': 0}
+        with open(m1_path, 'w') as f:
+            json.dump({'mesh_entries': ['Body_Mesh'], 'meshes': [mesh]}, f)
+        with open(m2_path, 'w') as f:
+            json.dump({'mesh_entries': ['Body_Mesh'], 'meshes': [mesh]}, f)
+
+        merged = _merge_manifests([
+            {'manifest_path': m1_path},
+            {'manifest_path': m2_path},
+        ])
+
+        assert len(merged['meshes']) == 1
+        assert len(merged['mesh_entries']) == 1
+    finally:
+        shutil.rmtree(tmpdir)
+
+
 if __name__ == '__main__':
     sys.exit(_run_all())
