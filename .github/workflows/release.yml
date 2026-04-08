@@ -58,7 +58,7 @@ jobs:
           {"name":"CG3HBuilder","version_number":"$version","website_url":"https://github.com/Enderclem0/CG3H","description":"CG3H Runtime Builder — scans and loads CG3H mods","dependencies":["Hell2Modding-Hell2Modding-0.2.0"]}
           "@ | Set-Content thunderstore/plugins/CG3HBuilder/manifest.json
 
-          Compress-Archive -Path thunderstore/* -DestinationPath "Enderclem-CG3HBuilder-$version.zip"
+          Compress-Archive -Path thunderstore/* -DestinationPath "CG3H-Merger-$version.zip"
         shell: pwsh
 
       - name: Create Blender addon ZIP
@@ -75,7 +75,7 @@ jobs:
 
       - name: Create tools ZIP for Python users
         run: |
-          Compress-Archive -Path tools/* -DestinationPath tools.zip
+          Compress-Archive -Path tools/* -DestinationPath CG3H-Python-Tools.zip
         shell: pwsh
 
       - name: Upload build artifacts
@@ -83,14 +83,14 @@ jobs:
         with:
           name: release-assets
           path: |
-            tools.zip
-            Enderclem-CG3HBuilder-*.zip
+            CG3H-Python-Tools.zip
+            CG3H-Merger-*.zip
             cg3h_blender_addon.zip
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            tools.zip
-            Enderclem-CG3HBuilder-*.zip
+            CG3H-Python-Tools.zip
+            CG3H-Merger-*.zip
             cg3h_blender_addon.zip
