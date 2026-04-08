@@ -1786,7 +1786,8 @@ def main():
         print(f"[*] Extracting 3D model textures", flush=True)
         pkg_dir = args.pkg_dir
         if pkg_dir is None:
-            content_dir = os.path.dirname(os.path.dirname(args.gpk_dir))
+            gpk_dir_clean = args.gpk_dir.rstrip("/\\")
+            content_dir = os.path.dirname(os.path.dirname(gpk_dir_clean))
             pkg_dir = os.path.join(content_dir, "Packages", "1080p")
 
         if os.path.isdir(pkg_dir):
