@@ -83,7 +83,6 @@ jobs:
         with:
           name: release-assets
           path: |
-            dist/builder/cg3h_builder.exe
             tools.zip
             Enderclem-CG3HBuilder-*.zip
             cg3h_blender_addon.zip
@@ -92,7 +91,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/builder/cg3h_builder.exe
             tools.zip
             Enderclem-CG3HBuilder-*.zip
             cg3h_blender_addon.zip
