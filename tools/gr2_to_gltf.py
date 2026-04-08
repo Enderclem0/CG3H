@@ -1667,9 +1667,8 @@ def main():
             print(f"  {k} ({len(v):,} bytes){tag}")
         sys.exit(0)
 
-    # Select mesh entry to export.
-    # Default: body entry ({Character}_Mesh).  Multi-entry export is available
-    # via --mesh-entry but the importer currently only patches the body entry.
+    # Select mesh entries to export.
+    # Default: all _Mesh entries.  Use --mesh-entry to filter to specific entries.
     if not all_mesh_keys:
         print(f"ERROR: No _Mesh entry found. Available: {list(entries.keys())[:10]}")
         sys.exit(1)
@@ -1690,17 +1689,10 @@ def main():
             print(f"ERROR: No matching mesh entries. Available: {all_mesh_keys}")
             sys.exit(1)
     else:
-        # Default: body entry only ({Character}_Mesh)
-        char_name = os.path.splitext(os.path.basename(gpk_path))[0]
-        body_entry = f"{char_name}_Mesh"
-        if body_entry in all_mesh_keys:
-            mesh_keys = [body_entry]
-        else:
-            mesh_keys = [all_mesh_keys[0]]
-        if len(all_mesh_keys) > 1:
-            print(f"  Multi-entry GPK: {all_mesh_keys}")
-            print(f"  Exporting body entry only: {mesh_keys[0]}")
-            print(f"  Use --mesh-entry to export other entries")
+        # Default: all mesh entries
+        mesh_keys = list(all_mesh_keys)
+        if len(mesh_keys) > 1:
+            print(f"  Multi-entry GPK: {mesh_keys}")
 
     print(f"[2/5] Loading SDB: {sdb_path}")
     with open(sdb_path, 'rb') as f:
@@ -1725,10 +1717,27 @@ def main():
         gr2_file, sdb_file, cur_fi, _keep = load_gr2(dll, gr2_bytes, sdb_bytes)
         _all_keeps.append((gr2_file, sdb_file, _keep))
 
-        # Read skeleton from first entry only
+        # Merge skeleton: first entry provides base, subsequent entries add missing bones
+        entry_bones, entry_name_to_idx = read_skeleton(cur_fi)
         if bones is None:
-            bones, bone_name_to_idx = read_skeleton(cur_fi)
+            bones = list(entry_bones)
+            bone_name_to_idx = dict(entry_name_to_idx)
             print(f"  Skeleton: {len(bones)} bones")
+        else:
+            added = 0
+            for bone in entry_bones:
+                if bone['name'] not in bone_name_to_idx:
+                    # Remap parent index to the merged list
+                    new_parent = -1
+                    if bone['parent'] >= 0 and bone['parent'] < len(entry_bones):
+                        parent_name = entry_bones[bone['parent']]['name']
+                        new_parent = bone_name_to_idx.get(parent_name, -1)
+                    new_bone = dict(bone, parent=new_parent)
+                    bone_name_to_idx[bone['name']] = len(bones)
+                    bones.append(new_bone)
+                    added += 1
+            if added:
+                print(f"  Merged {added} new bone(s) from {mesh_key} (total: {len(bones)})")
 
         # Get per-mesh texture map for THIS entry
         entry_tex_map, _ = _read_mesh_texture_map(cur_fi, debug=args.debug)
