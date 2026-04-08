@@ -573,5 +573,75 @@ def test_skeleton_merge_parent_remap():
     assert bones[2]['parent'] == 1  # arm is at index 1 in merged
 
 
+def test_routing_with_manifest():
+    """Manifest routes meshes to their source entries."""
+    from gltf_to_gr2 import _build_entry_routing
+
+    manifest = {
+        'meshes': [
+            {'name': 'BattleMesh', 'entry': 'Battle_Mesh'},
+            {'name': 'HubMesh', 'entry': 'Hub_Mesh'},
+        ]
+    }
+    glb_meshes = [
+        {'name': 'BattleMesh'},
+        {'name': 'HubMesh'},
+    ]
+    entries = ['Battle_Mesh', 'Hub_Mesh']
+    routing = _build_entry_routing(manifest, glb_meshes, entries)
+
+    assert len(routing['Battle_Mesh']) == 1
+    assert routing['Battle_Mesh'][0]['name'] == 'BattleMesh'
+    assert len(routing['Hub_Mesh']) == 1
+    assert routing['Hub_Mesh'][0]['name'] == 'HubMesh'
+
+
+def test_routing_without_manifest():
+    """Without manifest, all meshes go to first entry."""
+    from gltf_to_gr2 import _build_entry_routing
+
+    glb_meshes = [{'name': 'A'}, {'name': 'B'}]
+    entries = ['First_Mesh', 'Second_Mesh']
+    routing = _build_entry_routing(None, glb_meshes, entries)
+
+    assert len(routing['First_Mesh']) == 2
+    assert len(routing['Second_Mesh']) == 0
+
+
+def test_routing_new_mesh_all_entries():
+    """New meshes (not in manifest) go to all entries by default."""
+    from gltf_to_gr2 import _build_entry_routing
+
+    manifest = {
+        'meshes': [
+            {'name': 'Existing', 'entry': 'Battle_Mesh'},
+        ]
+    }
+    glb_meshes = [
+        {'name': 'Existing'},
+        {'name': 'NewGlasses'},
+    ]
+    entries = ['Battle_Mesh', 'Hub_Mesh']
+    routing = _build_entry_routing(manifest, glb_meshes, entries)
+
+    assert len(routing['Battle_Mesh']) == 2  # Existing + NewGlasses
+    assert len(routing['Hub_Mesh']) == 1     # NewGlasses only
+    assert routing['Hub_Mesh'][0]['name'] == 'NewGlasses'
+
+
+def test_routing_new_mesh_targeted():
+    """New meshes with routing go to specified entries only."""
+    from gltf_to_gr2 import _build_entry_routing
+
+    manifest = {'meshes': []}
+    glb_meshes = [{'name': 'Glasses'}]
+    entries = ['Battle_Mesh', 'Hub_Mesh']
+    routing = _build_entry_routing(manifest, glb_meshes, entries,
+                                   new_mesh_routing={'Glasses': ['Battle_Mesh']})
+
+    assert len(routing['Battle_Mesh']) == 1
+    assert len(routing['Hub_Mesh']) == 0
+
+
 if __name__ == '__main__':
     sys.exit(_run_all())
