@@ -124,7 +124,8 @@ Mark with [PASS], [FAIL], or [SKIP] + notes.
 - [ ] Check "Also create Thunderstore ZIP"
 - [ ] Build succeeds
 - [ ] ZIP created in workspace
-- [ ] ZIP contains: mod.json, stripped GLB, .pkg, plugins/, manifest.json, README.md
+- [ ] ZIP root contains Thunderstore-format `manifest.json` (name, version_number, website_url, description, dependencies)
+- [ ] ZIP contains `plugins/` dir with `plugins_data/` and Lua init; `mod.json` lives inside `plugins_data/`
 - [ ] ZIP does NOT contain .gpk (built on user's machine)
 - [ ] ZIP does NOT contain unchanged meshes/textures/animations
 
@@ -137,27 +138,16 @@ Mark with [PASS], [FAIL], or [SKIP] + notes.
 - [ ] Click Refresh
 - [ ] Installed mod appears in list with correct info
 
-### 5b. Disable a mod
-- [ ] Select mod, click Disable
-- [ ] Mod shows as disabled in list
-- [ ] Launch game — mod effect is gone
-
-### 5c. Re-enable (rebuild)
-- [ ] Select disabled mod, click Rebuild
-- [ ] Switches to Build tab with workspace loaded
-- [ ] Build and install
-- [ ] Mod active again in game
-
-### 5d. Remove a mod
-- [ ] Select mod, click Remove
-- [ ] Mod removed from r2modman
-- [ ] Workspace folder still exists (not deleted)
-
-### 5e. Edit a mod
-- [ ] Select mod, click Edit
+### 5b. Open mod folder
+- [ ] Select mod, click Open Folder
 - [ ] Opens workspace folder in file explorer
 - [ ] Make changes in Blender, re-export
 - [ ] Come back to Build tab, rebuild
+
+### 5c. Remove a mod
+- [ ] Select mod, click Remove
+- [ ] Mod removed from r2modman
+- [ ] Workspace folder still exists (not deleted)
 
 ---
 
@@ -173,17 +163,14 @@ Mark with [PASS], [FAIL], or [SKIP] + notes.
 ### 6b. Two mesh_add mods for same character
 - [ ] Install mod A (adds crown to Melinoe)
 - [ ] Install mod B (adds cape to Melinoe)
-- [ ] Mods tab shows both, no hard conflict
-- [ ] Click "Rebuild Merged"
-- [ ] Merged GPK created in CG3H-Merged-Melinoe/
+- [ ] Both appear in Mods tab, no hard conflict
+- [ ] Merge handled via CLI (`mod_merger.py`); no GUI merge button exists
 - [ ] Game shows BOTH crown and cape
 
-### 6c. Mod priority reordering
-- [ ] In Mods tab, change merge order (move mod up/down)
-- [ ] Rebuild merged
-- [ ] Verify priority change takes effect (for conflicting texture, other mod wins)
+### 6c. Texture mod + mesh mod (independent)
+> _Note: GUI mod priority reordering (move up/down) is not implemented. Priority is
+> managed via `cg3h_mod_priority.json` created by `mod_merger.py`._
 
-### 6d. Texture mod + mesh mod (independent)
 - [ ] Install texture mod for Melinoe
 - [ ] Install mesh_add mod for Moros
 - [ ] No conflict (different characters)
@@ -199,7 +186,7 @@ Mark with [PASS], [FAIL], or [SKIP] + notes.
 ## 7. CLI Path
 
 ### 7a. cg3h_build.py from command line
-- [ ] `python tools/cg3h_build.py <mod_dir>` builds successfully
+- [ ] `python tools/cg3h_build.py <mod_dir> --r2-plugins-dir <path>` builds successfully
 - [ ] `python tools/cg3h_build.py <mod_dir> --package` creates ZIP
 - [ ] `python tools/cg3h_build.py <mod_dir> --check-conflicts` reports conflicts
 

@@ -5,7 +5,7 @@
 CG3H operates at two stages of the mod lifecycle:
 
 - **Build-time** (mod creator): Export game models to GLB, edit in Blender, then `cg3h build` produces an H2M-compatible package (GPK + standalone PKG + Lua companion) ready for Thunderstore upload.
-- **Runtime** (end user): On the player's machine, `cg3h_builder.exe` builds the GPK from the mod's GLB + the player's local game files. When multiple mods target the same character, the **mod merger** fuses them into a single merged GPK + merged PKG per character, applied in priority order.
+- **Runtime** (end user): On the player's machine, the shared **CG3HBuilder Thunderstore plugin** scans all installed CG3H mods, merges GLBs targeting the same character via `_merge_glbs`, builds the GPK with a single `convert()` call, and loads custom textures. When multiple mods target the same character, they are fused into a single merged GPK + merged PKG per character, applied in priority order.
 
 Neither stage modifies game files. Build-time strips copyrighted content from distribution. Runtime reconstructs it locally and merges all active mods into one coherent package that H2M loads.
 
@@ -37,7 +37,7 @@ symbols (`GrannyFileInfoType`, `GrannyMeshType`, etc.). No hardcoded offsets exc
 | Lua GrannyTexture override parsing | Done |
 | End-to-end DLL verification | Done |
 | In-game testing | Done |
-| Test suite (25 unit + 15 integration = 40 tests) | Done |
+| Test suite (25 unit + 34 integration + 15 e2e = 74 tests) | Done |
 | GitHub Actions release pipeline | Done |
 
 ## Key Design Decisions
@@ -162,12 +162,11 @@ H2M-compatible folder structure (optionally packaged as a Thunderstore ZIP):
 2. Auto-detect game directory from Steam library paths
 3. **texture_replace**: compress PNG to BC7/BC3 DDS, build standalone `.pkg`
    from scratch (not a modified game package)
-4. **mesh_add**: bundle GLB containing only new geometry (no copyrighted meshes),
-   include `cg3h_builder.exe` for on-device GPK building
+4. **mesh_add**: bundle GLB containing only new geometry (no copyrighted meshes);
+   the shared CG3HBuilder plugin handles on-device GPK building at runtime
 5. **animation_patch**: bundle GLB with modified animation curves
-6. Generate `main.lua` (H2M Lua companion)
-7. Generate Thunderstore `manifest.json`
-8. `--package` flag: ZIP everything for upload
+6. Generate Thunderstore `manifest.json`
+7. `--package` flag: ZIP everything for upload (mods are data-only, no `main.lua`)
 
 ### Operation-based system
 
@@ -227,12 +226,14 @@ Two loading mechanisms exist — they are NOT interchangeable:
 **`rom.data.get_hash_guid_from_string` returns 0 on first Lua load** (hash system not initialized).
 Valid hashes only available after scene transition (second Lua load).
 
-### H2M Lua companion
+### H2M Lua companion (CG3HBuilder plugin)
 
-Auto-generated `main.lua` included in every mod package:
+The shared CG3HBuilder Thunderstore plugin contains a single `main.lua` that handles
+all runtime logic. Individual mods are data-only and ship no Lua code.
+- Scans all installed CG3H mods on startup
+- Merges GLBs targeting the same character, builds GPK with cache invalidation
 - `load_package_overrides_set` for custom texture loading (biome override approach)
-- `rom.on_import.post` for deferred initialization
-- Auto-build GPK on first launch if missing (runs `cg3h_builder.exe`)
+- `LoadPackages` via `rom.on_import.post` for replacing existing texture names
 
 ### Custom texture limitation: always-loaded characters
 
@@ -247,21 +248,21 @@ decompilation findings.
 `cg3h_builder.exe` is a PyInstaller-frozen version of the mesh build pipeline:
 - Bundles Python + numpy + pygltflib + lz4 + ctypes Granny DLL loader
 - 29MB single-file executable
-- Included in Thunderstore ZIP for mesh mods only
+- Included in the shared CG3HBuilder Thunderstore plugin (not in individual mods)
 - Uses the end user's local `granny2_x64.dll` (auto-detected from Steam path)
 
 ### Runtime: On-Device GPK Build
 
 When a mesh mod is installed, the end user does not receive a pre-built GPK (that would
-contain copyrighted geometry). Instead, the Lua companion detects a missing GPK on first
-launch and runs `cg3h_builder.exe`, which:
+contain copyrighted geometry). Instead, the CG3HBuilder plugin always runs `cg3h_builder.exe`
+on startup with cache invalidation, which:
 
 1. Reads the shipped GLB (custom meshes only) + the player's local `.gpk` + `.sdb`
 2. Appends new meshes / replaces meshes / patches vertices using the same import pipeline as `gltf_to_gr2.py`
-3. Writes the output GPK into the mod's `plugins_data` folder
+3. Writes the output GPK into CG3HBuilder's `plugins_data` directory
 4. H2M picks up the GPK on the next load
 
-This runs once per mod install (or when the mod updates). The built GPK is cached locally.
+The built GPK is cached locally and rebuilt when mod content changes.
 
 ### Runtime: Multi-Mod Merger (`mod_merger.py`)
 
@@ -279,19 +280,15 @@ Two mods cannot each ship their own `Melinoe.gpk` — the merger resolves this.
    - `mesh_add` + `mesh_add` → compatible (both appended)
    - `mesh_add` + `mesh_replace` → warning (may not interact well)
    - Different animation filters → compatible
-5. **Sequential merge** — applies each mod in priority order to the previous output:
-   - Starts from the original `.gpk` (from the player's game install)
-   - Each mod's GLB is imported via `gltf_to_gr2.convert()` with `allow_topology_change=True`
-   - Intermediate GPKs are written and chained; only the final output is kept
+5. **Single-pass merge** — uses `_merge_glbs` to fuse all mods' GLBs into one merged GLB per character, then a single `convert()` call builds the final GPK (no intermediate GPKs or chaining)
 6. **PKG merge** — collects all custom textures from all mods and builds a single `CG3H-Merged-<Character>.pkg`
-7. **Lua merge** — generates a merged `main.lua` that loads the combined package
 
 **Output:** `plugins_data/CG3H-Merged-<Character>/` containing the merged GPK, merged PKG, and merged Lua companion. H2M loads this as a single mod.
 
 **Trigger points:**
-- GUI Mods tab → "Rebuild" button
+- GUI Mods tab → Refresh, Open Folder, Remove buttons
 - CLI: `python mod_merger.py <r2_dir> [--game-dir DIR] [--character NAME]`
-- Lua companion auto-build on first launch (single-mod case)
+- CG3HBuilder plugin auto-build on startup (with cache invalidation)
 
 ## Future Work
 

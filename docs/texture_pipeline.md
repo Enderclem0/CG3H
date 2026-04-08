@@ -125,8 +125,13 @@ The primary workflow builds a new `.pkg` from scratch:
 1. Compress custom PNG to BC7/BC3/BC1 DDS with mipmaps via `etcpak`
 2. Wrap each texture in a 0xAD (Texture2D) chunk with correct XNB headers
 3. Write `.pkg` file with proper chunk table and offsets
-4. H2M loads the standalone `.pkg` at runtime via `rom.game.LoadPackages`
-5. The game's texture resolver picks up the replacement by name (last-loaded wins)
+4. H2M loads the standalone `.pkg` at runtime using a dual-method approach:
+   - `load_package_overrides_set` — for NEW texture names not already in the game's
+     cache; triggers real `ReadTexture2D` on scene transition
+   - `rom.game.LoadPackages` (via `rom.on_import.post`) — for REPLACING existing
+     texture names; pre-seeds the `mLoadedTexture2DHash` cache so last-loaded wins
+   Both methods must be used together. Using only one fails for certain cases.
+5. The game's texture resolver picks up the replacement by name
 
 No game files are modified. No `.pkg_manifest` is needed for H2M loading.
 No checksum updates needed (H2M bypasses `checksums.txt` validation).

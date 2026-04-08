@@ -14,8 +14,10 @@ Replace a character's texture without touching the mesh.
 
 ```json
 {
+  "format": "cg3h-mod/1.0",
+  "metadata": {"name": "MelRetexture", "author": "YourName", "version": "1.0.0"},
   "type": "texture_replace",
-  "character": "Melinoe",
+  "target": {"character": "Melinoe"},
   "assets": {
     "textures": ["MelinoeRetexture.png"]
   }
@@ -32,8 +34,10 @@ Add new geometry attached to a character's skeleton. Original meshes are not dis
 
 ```json
 {
+  "format": "cg3h-mod/1.0",
+  "metadata": {"name": "MelCrown", "author": "YourName", "version": "1.0.0"},
   "type": "mesh_add",
-  "character": "Melinoe",
+  "target": {"character": "Melinoe"},
   "assets": {
     "glb": "CrownAccessory.glb",
     "textures": ["Crown_Color.png"]
@@ -47,7 +51,7 @@ Add new geometry attached to a character's skeleton. Original meshes are not dis
 3. Builds standalone `.pkg` for custom textures
 4. Outputs GPK to the mod's H2M directory
 
-**CC-free**: Only the GLB (custom meshes) and PNGs are shipped. `cg3h_builder.exe` (29MB) is included so end users can build the GPK on their machine without Python.
+**CC-free**: Only the GLB (custom meshes) and PNGs are shipped. The shared CG3HBuilder Thunderstore plugin builds the GPK on end users' machines at game launch.
 
 ### mesh_replace
 
@@ -55,8 +59,10 @@ Replace a character's meshes entirely with new ones.
 
 ```json
 {
+  "format": "cg3h-mod/1.0",
+  "metadata": {"name": "CustomMel", "author": "YourName", "version": "1.0.0"},
   "type": "mesh_replace",
-  "character": "Melinoe",
+  "target": {"character": "Melinoe"},
   "assets": {
     "glb": "CustomMelinoe.glb",
     "textures": ["CustomMel_Color.png"]
@@ -74,8 +80,10 @@ Modify existing mesh vertices (reshape, sculpt) without adding or removing meshe
 
 ```json
 {
+  "format": "cg3h-mod/1.0",
+  "metadata": {"name": "MelReshape", "author": "YourName", "version": "1.0.0"},
   "type": "mesh_patch",
-  "character": "Melinoe",
+  "target": {"character": "Melinoe"},
   "assets": {
     "glb": "MelinoeEdited.glb"
   }
@@ -92,8 +100,10 @@ Replace or modify specific animation curves on a character.
 
 ```json
 {
+  "format": "cg3h-mod/1.0",
+  "metadata": {"name": "MelIdleEdit", "author": "YourName", "version": "1.0.0"},
   "type": "animation_patch",
-  "character": "Melinoe",
+  "target": {"character": "Melinoe"},
   "assets": {
     "glb": "Melinoe_edited.glb",
     "animations": {
@@ -121,8 +131,10 @@ A mod can perform multiple operations:
 
 ```json
 {
+  "format": "cg3h-mod/1.0",
+  "metadata": {"name": "MelCombo", "author": "YourName", "version": "1.0.0"},
   "type": ["mesh_patch", "animation_patch"],
-  "character": "Melinoe",
+  "target": {"character": "Melinoe"},
   "assets": {
     "glb": "Melinoe_edited.glb",
     "animations": {
@@ -141,12 +153,17 @@ The build system also infers operations from assets automatically via `_infer_op
 
 ```json
 {
-  "name": "MyMod",
-  "version": "1.0.0",
-  "author": "YourName",
-  "description": "Description of the mod",
+  "format": "cg3h-mod/1.0",
+  "metadata": {
+    "name": "MyMod",
+    "author": "YourName",
+    "version": "1.0.0",
+    "description": "Description of the mod"
+  },
   "type": "texture_replace",
-  "character": "Melinoe",
+  "target": {
+    "character": "Melinoe"
+  },
   "assets": {
     "glb": "CustomMesh.glb",
     "textures": ["CustomTexture.png"],
@@ -162,17 +179,18 @@ The build system also infers operations from assets automatically via `_infer_op
 
 | Field | Description |
 |-------|-------------|
-| `name` | Mod name (used for Thunderstore manifest and H2M folder naming) |
-| `version` | Semver version string |
-| `author` | Author name |
+| `format` | Must be `"cg3h-mod/1.0"` |
+| `metadata.name` | Mod name (used for Thunderstore manifest and H2M folder naming) |
+| `metadata.version` | Semver version string |
+| `metadata.author` | Author name |
 | `type` | One of the 5 types, or an array for combined types |
-| `character` | Target character name (must match a `.gpk` in `_Optimized/`) |
+| `target.character` | Target character name (must match a `.gpk` in `_Optimized/`) |
 
 **Optional fields:**
 
 | Field | Description |
 |-------|-------------|
-| `description` | Human-readable description |
+| `metadata.description` | Human-readable description |
 | `assets.glb` | Path to GLB file (relative to mod.json) |
 | `assets.textures` | Array of PNG filenames |
 | `assets.animations` | Animation patch config (`patch` + optional `filter`) |
@@ -181,21 +199,30 @@ The build system also infers operations from assets automatically via `_infer_op
 
 ## Thunderstore Package Structure
 
+CG3H mods are **data-only** packages. All runtime logic (GPK building, PKG loading, texture registration) is handled by the shared **CG3HBuilder** Thunderstore plugin, which is declared as a dependency.
+
 ```
 AuthorName-ModName/
-  mod.json                  CG3H mod descriptor
-  manifest.json             Thunderstore manifest (auto-generated)
-  main.lua                  H2M Lua companion (auto-generated)
-  *.glb                     Custom meshes (mesh_add only, CC-free)
-  *.png                     Custom textures
-  *.pkg                     Standalone texture package (pre-built)
-  cg3h_builder.exe          Standalone builder (mesh mods only)
+  manifest.json             Thunderstore manifest (auto-generated, depends on CG3HBuilder)
+  icon.png                  Thunderstore icon
+  README.md                 Thunderstore description
+  plugins/
+    AuthorName-ModName/
+      manifest.json         H2M plugin manifest (name + version, no main.lua)
+  plugins_data/
+    AuthorName-ModName/
+      mod.json              CG3H mod descriptor
+      *.glb                 Custom meshes (mesh_add/mesh_replace, CC-free)
+      manifest.json         Export manifest (mesh routing metadata)
+      *.pkg                 Standalone texture package (pre-built)
 ```
 
-The Lua companion handles:
-- Loading standalone `.pkg` via `rom.game.LoadPackages`
-- Auto-building GPK on first launch (runs `cg3h_builder.exe` if needed)
-- Deferred loading via `rom.on_import.post`
+The CG3HBuilder plugin (installed once as a shared dependency) handles:
+- Scanning all installed CG3H mods via `mod.json` discovery
+- Building GPKs at game launch from GLBs + the player's local game files
+- Caching built GPKs (only rebuilds when mods change)
+- Loading standalone `.pkg` files via `rom.game.LoadPackages`
+- Merging multiple mods targeting the same character into one GPK
 
 ---
 
@@ -237,11 +264,10 @@ When mods are compatible, `mod_merger.py`:
 3. Sorts by `cg3h_mod_priority.json` (higher index = applied later = wins)
 4. Applies each mod sequentially to the original GPK from the player's game install
 5. Merges all custom textures into a single `CG3H-Merged-<Character>.pkg`
-6. Generates a merged `main.lua` that loads the combined package
-7. Outputs everything to `plugins_data/CG3H-Merged-<Character>/`
+6. Outputs everything to `plugins_data/CG3H-Merged-<Character>/`
 
 The merge is triggered via the GUI Mods tab ("Rebuild"), the CLI (`python mod_merger.py`),
-or automatically by the Lua companion on first launch for single-mod cases.
+or automatically by the CG3HBuilder plugin at game launch.
 
 See [`architecture.md`](architecture.md) for the full merge flow and conflict check details.
 
@@ -263,10 +289,11 @@ CG3H operates at two stages of the mod lifecycle:
 ### Runtime (end user)
 
 1. Install Hell2Modding via r2modman
-2. Install CG3H mods from Thunderstore
-3. Launch the game — H2M loads the mods automatically
-4. For mesh mods: `cg3h_builder.exe` runs on first launch to build the GPK from the player's local game files + the shipped GLB (no copyrighted geometry distributed)
-5. For multiple mods on the same character: the mod merger fuses them into one merged GPK + PKG
+2. Install CG3H mods from Thunderstore (CG3HBuilder is pulled automatically as a dependency)
+3. Launch the game — CG3HBuilder scans all installed CG3H mods
+4. For mesh mods: CG3HBuilder builds the GPK from the player's local game files + the shipped GLB (no copyrighted geometry distributed)
+5. For multiple mods on the same character: CG3HBuilder merges them into one GPK
+6. Built GPKs are cached and only rebuilt when mods change
 
 ### Build internals
 
@@ -282,8 +309,7 @@ mod.json + assets
     |     mesh_patch      -> patch vertices in GPK
     |     animation_patch -> patch curves in GPK
     |
-    +-- Generate main.lua (H2M Lua companion)
-    +-- Generate manifest.json (Thunderstore)
+    +-- Generate manifest.json (Thunderstore, depends on CG3HBuilder)
     +-- Smart strip: remove unchanged assets from distribution
     |
     +-- Output H2M-compatible folder structure

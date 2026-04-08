@@ -45,17 +45,18 @@ Hell2Modding integration, non-destructive mod distribution, and complete GUI rew
   - Textures: compared by PNG hash against manifest
   - Animations: compared by content hash against manifest
   - Unchanged assets stripped from distribution
-- **PyInstaller exe** (`cg3h_builder.exe`, 29MB) — no Python needed for end users
-  - Included in Thunderstore ZIP for mesh mods
-  - Lua companion auto-runs on first launch to build GPK
-- **H2M Lua companion** — auto-generated `main.lua`:
-  - `rom.game.LoadPackages` for custom .pkg loading
-  - `rom.on_import.post` for deferred initialization
-  - Auto-build GPK on first launch if missing
+- **Shared CG3HBuilder Thunderstore plugin** — single shared dependency handles all runtime logic:
+  - Scans installed CG3H mods via `mod.json` discovery at game launch
+  - Builds GPKs from GLBs + player's local game files (no Python needed for end users)
+  - Caches built GPKs, only rebuilds when mods change
+  - Loads custom `.pkg` textures via `rom.game.LoadPackages`
+  - Merges multiple mods targeting the same character into one GPK
+- **Data-only mod packages** — mods contain only assets (GLB, PNG, PKG, mod.json), no executable or Lua code
+  - Minimal `plugins/` stub (H2M manifest only, no `main.lua`)
+  - All runtime logic centralized in CG3HBuilder
 - **Thunderstore packaging** — ZIP ready for upload:
   - mod.json + stripped GLB + PNG (CC-free for mesh_add + texture_replace)
-  - Standalone .pkg + H2M manifest + Lua companion
-  - `cg3h_builder.exe` for mesh mods
+  - Standalone .pkg + H2M manifest
   - `conflicts.json` describing what the mod touches
 - **GitHub Actions** — tag `v*` triggers automated release build
 - **Blender addon v3.0** — textures, animations, topology change, Build for H2M menu
@@ -79,7 +80,6 @@ Hell2Modding integration, non-destructive mod distribution, and complete GUI rew
 ### Known Issues
 
 - `mesh_replace` and `mesh_patch` types still require distributing copyrighted geometry; v3.1 will add a diff format for CC-free distribution
-- `cg3h_builder.exe` is 29MB due to PyInstaller bundling; may be reduced in future versions
 
 ---
 

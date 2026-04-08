@@ -14,24 +14,28 @@ Build non-destructive mod packages for [Hell2Modding (H2M)](https://github.com/S
 | Vertex, UV, normal, and topology edits | Working |
 | Bone weight painting from Blender | Working |
 | Add new meshes (accessories, custom geometry) | Working |
+| Custom textures on new meshes | Working |
 | Animation export and import | Working |
 | Texture export (per-mesh DDS + embedded PNG in GLB) | Working |
 | Texture import (PNG/DDS -> standalone .pkg) | Working |
 | Multi-texture per character (per-mesh material chain) | Working |
-| Multi-entry GPK (characters with multiple mesh entries) | Working |
 | Parallel batch export (auto-scaled across CPU cores) | Working |
-| H2M mod packages (`cg3h build` -> Thunderstore ZIP) | Working |
-| Standalone .pkg builder (custom textures from scratch) | Working |
-| PyInstaller exe (`cg3h_builder.exe`, no Python needed) | Working |
-| Blender addon v3.0 with CG3H menu | Working |
+| H2M mod packages (Thunderstore ZIP) | Working |
+| Runtime GPK building (no copyrighted data distributed) | Working |
+| Multi-mod merging (multiple mods on same character) | Working |
+| Blender addon (self-contained, Import/Export) | Working |
+| Multi-entry GPK (characters with multiple mesh entries) | Partial — first entry only |
+| Multi-mod animation merging | Not yet — v3.1 |
 
-## Limitations
+## Known Limitations
 
+- **Multi-entry characters** (e.g. Hecate with `HecateBattle_Mesh` + `HecateHub_Mesh`) — only the first mesh entry is patched. Other entries show the unmodified model. Fix planned for v3.1.
+- **Multi-mod animation merge** — when multiple mods target the same character, only the first mod's animations are kept. Fix planned for v3.1.
 - **65,535 vertices max per mesh** — the engine uses uint16 index buffers.
 - **Adding/removing bones** is not supported — the skeleton is read-only.
-- **mesh_replace / mesh_patch CC-free distribution** requires a diff format (planned for v3.1).
 - **Animation export is slow** — characters have 600-850 clips. Use `--anim-filter` and `--anim-workers` to limit scope.
 - **Extreme deformations** may cause frustum culling artifacts despite OBB recomputation.
+- **Requires H2M patches** — `rom.data.add_granny_file` API and GPK exact-match fix (PRs pending).
 
 ## Requirements
 
@@ -67,13 +71,13 @@ Three tabs:
 
 ```bash
 # Build H2M folder structure
-python tools/cg3h_build.py
+python tools/cg3h_build.py <mod_dir>
 
 # Build + create Thunderstore-ready ZIP
-python tools/cg3h_build.py --package
+python tools/cg3h_build.py <mod_dir> --package
 ```
 
-The builder reads `mod.json` from the current directory, auto-detects the game path, and produces an H2M-ready package.
+The builder reads `mod.json` from the specified directory, auto-detects the game path, and produces an H2M-ready package.
 
 ### What the build produces
 
@@ -166,7 +170,7 @@ Normals OFF is important: exporting normals causes Blender to split vertices at 
 
 ```
 blender_addon/
-  cg3h/__init__.py          Blender addon (v3.0, CG3H menu + Import/Export)
+  cg3h/__init__.py          Blender addon (Import/Export + mod packaging)
 tools/
   gr2_to_gltf.py            Exporter: .gpk + .sdb -> .glb (textures + animations)
   gltf_to_gr2.py            Importer: .glb + .gpk + .sdb -> .gpk
@@ -220,7 +224,7 @@ docs/
 1. Read `mod.json` descriptor
 2. Auto-detect textures from GLB (new meshes only)
 3. Build standalone `.pkg` for custom textures (BC7/BC3 compressed with mipmaps)
-4. Strip unchanged meshes from GLB
+4. Strip unchanged meshes from GLB (Thunderstore packaging only)
 5. Generate H2M plugin stub with CG3HBuilder dependency
 6. Optionally create Thunderstore ZIP (`--package`)
 
