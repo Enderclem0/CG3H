@@ -4,24 +4,6 @@ All notable changes to CG3H are documented here.
 
 ---
 
-## v3.0.1
-
-Bug fixes and cleanup.
-
-### Fixed
-
-- **Duplicate ZIP entries** — Thunderstore packaging no longer writes GLB twice to the archive
-- **Biome texture loading** — custom textures now register for all 16 biomes (was only 3)
-- **GLB strip message** — clear feedback when stripping is skipped (no manifest)
-
-### Changed
-
-- **mesh_patch type removed** — folded into mesh_replace (identical behavior, true diff patching planned for v3.3)
-- **Name collision warnings** — merger now logs when a mesh from a second mod is skipped due to duplicate name
-- **mod_merger.py deprecated** — replaced by CG3HBuilder runtime; utility functions kept for tests
-
----
-
 ## v3.0.0
 
 Shared runtime builder, Blender addon, and r2modman integration.
@@ -60,6 +42,8 @@ Shared runtime builder, Blender addon, and r2modman integration.
 - **GitHub Actions** — tag `v*` builds CG3HBuilder ZIP, Blender addon ZIP, and tools ZIP
 - **Shared constants** — `cg3h_constants.py` for Steam paths and dependency versions
 - **PyInstaller specs** — for exporter, importer, and builder executables
+- **Name collision warnings** — merger logs when a mesh from a second mod is skipped due to duplicate name
+- **All biome texture loading** — custom textures register for all 16 biomes
 
 ### Changed
 
@@ -73,6 +57,10 @@ Shared runtime builder, Blender addon, and r2modman integration.
 - Per-mod `cg3h_builder.exe` bundling
 - Backup/restore system (H2M mods are non-destructive)
 - Checksum management (standalone packages bypass validation)
+- Per-mod `main.lua` generation
+- Per-mod `cg3h_builder.exe` bundling
+- `mesh_patch` type — folded into `mesh_replace` (true diff patching planned for v3.3)
+- `mod_merger.py` merge functions — replaced by CG3HBuilder runtime
 - Direct game file modification workflow
 
 ### Known Limitations
