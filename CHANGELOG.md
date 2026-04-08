@@ -4,82 +4,82 @@ All notable changes to CG3H are documented here.
 
 ---
 
+## v3.0.1
+
+Bug fixes and cleanup.
+
+### Fixed
+
+- **Duplicate ZIP entries** — Thunderstore packaging no longer writes GLB twice to the archive
+- **Biome texture loading** — custom textures now register for all 16 biomes (was only 3)
+- **GLB strip message** — clear feedback when stripping is skipped (no manifest)
+
+### Changed
+
+- **mesh_patch type removed** — folded into mesh_replace (identical behavior, true diff patching planned for v3.3)
+- **Name collision warnings** — merger now logs when a mesh from a second mod is skipped due to duplicate name
+- **mod_merger.py deprecated** — replaced by CG3HBuilder runtime; utility functions kept for tests
+
+---
+
 ## v3.0.0
 
-Hell2Modding integration, non-destructive mod distribution, and complete GUI rewrite.
+Shared runtime builder, Blender addon, and r2modman integration.
 
-**This is a major workflow shift.** CG3H is now a mod builder that produces H2M-compatible packages. Zero game files are modified — H2M loads standalone assets at runtime.
+**This is a major workflow shift.** Mods are data-only packages (GLB + textures). The shared CG3HBuilder plugin handles all runtime logic — building GPKs, merging mods, loading textures. Zero game files modified.
 
 ### Added
 
-- **CG3H Mod Builder GUI** — complete rewrite with 3 workflow tabs:
-  - **Create**: pick character, export to mod workspace, auto-generate mod.json
-  - **Build**: build GPK + PKG for H2M, optional Thunderstore ZIP, one-click r2modman install
-  - **Mods**: see installed mods, conflicts, merge order, disable/remove/rebuild
-- **`cg3h build` command** — reads `mod.json` + assets, builds H2M folder structure
-  - `--package` flag creates Thunderstore-ready ZIP
-  - `--check-conflicts` for dry-run conflict detection
-- **Standalone .pkg builder** — creates `.pkg` from scratch with custom textures
-  - H2M's `LoadPackages` API loads them at runtime
-  - No `.pkg_manifest` needed for 3D textures
-- **mod.json specification** — 5 mod types:
-  - `texture_replace`: custom PNG → standalone .pkg (CC-free)
-  - `mesh_add`: append new meshes (CC-free, originals stripped)
-  - `mesh_replace`: swap character meshes
-  - `mesh_patch`: edit vertices in-place
-  - `animation_patch`: edit animations with filter support
-- **Operation-based system** — mods infer operations from assets, support multiple types
-- **Multi-mod merger** — scans mods, groups by character, builds merged GPK + PKG
-  - Sequential merge: each mod applied to previous output
-  - Merged PKG combines all custom textures
-- **Mod priority system** — `cg3h_mod_priority.json` controls merge order
-  - Auto-generated, editable via GUI or by hand
-  - Higher index = applied later = wins conflicts
+- **CG3HBuilder Thunderstore plugin** — shared runtime dependency for all CG3H mods:
+  - Scans `plugins_data/` for installed CG3H mods at game launch
+  - Merges multiple mods targeting the same character into one GLB
+  - Builds GPKs from GLBs + player's local game files (no Python needed)
+  - Registers GPKs via `rom.data.add_granny_file` (no restart needed)
+  - Caches built GPKs, rebuilds when mods change, cleans up on mod removal
+  - Loads custom textures via biome overrides + LoadPackages
+- **Data-only mod packages** — mods contain only assets (GLB, PKG, mod.json)
+  - Minimal `plugins/` stub (H2M manifest with CG3HBuilder dependency)
+  - No executable or Lua code per mod
+- **Auto texture detection** — textures embedded in GLBs are automatically found at build time, extracted, and packaged (only new mesh textures, not original character textures)
+- **Blender addon** — self-contained (bundled exporter/importer/builder exes):
+  - Import: File > Import > Hades II Model (.gpk) with textures and animations
+  - Export: File > Export > Hades II Mod (CG3H) — creates workspace + Thunderstore ZIP
+  - Author saved in addon preferences
+  - Character auto-detected from selected objects on export
+- **GUI overhaul**:
+  - Create tab: searchable character list, export to workspace
+  - Build tab: mod name + author fields, Thunderstore ZIP, one-click r2modman install
+  - Mods tab: CG3HBuilder status, GPK build state, installed mod list
+  - Author name persisted across sessions
+- **r2modman integration** — install registers mods in `mods.yml`, handles nested directory layout, cache icons
 - **Conflict detection** — per-operation analysis:
   - Same texture replaced by multiple mods = conflict
   - Multiple mesh_replace for same character = conflict
   - mesh_add + mesh_add = compatible (merged)
-  - Different animation filters = compatible
-- **Smart data stripping** — Thunderstore ZIPs only contain changed data:
-  - Meshes: compared by vertex/index count against manifest
-  - Textures: compared by PNG hash against manifest
-  - Animations: compared by content hash against manifest
-  - Unchanged assets stripped from distribution
-- **Shared CG3HBuilder Thunderstore plugin** — single shared dependency handles all runtime logic:
-  - Scans installed CG3H mods via `mod.json` discovery at game launch
-  - Builds GPKs from GLBs + player's local game files (no Python needed for end users)
-  - Caches built GPKs, only rebuilds when mods change
-  - Loads custom `.pkg` textures via `rom.game.LoadPackages`
-  - Merges multiple mods targeting the same character into one GPK
-- **Data-only mod packages** — mods contain only assets (GLB, PNG, PKG, mod.json), no executable or Lua code
-  - Minimal `plugins/` stub (H2M manifest only, no `main.lua`)
-  - All runtime logic centralized in CG3HBuilder
-- **Thunderstore packaging** — ZIP ready for upload:
-  - mod.json + stripped GLB + PNG (CC-free for mesh_add + texture_replace)
-  - Standalone .pkg + H2M manifest
-  - `conflicts.json` describing what the mod touches
-- **GitHub Actions** — tag `v*` triggers automated release build
-- **Blender addon v3.0** — textures, animations, topology change, Build for H2M menu
+- **Smart data stripping** — Thunderstore ZIPs strip unchanged meshes/textures vs manifest baseline
+- **GitHub Actions** — tag `v*` builds CG3HBuilder ZIP, Blender addon ZIP, and tools ZIP
+- **Shared constants** — `cg3h_constants.py` for Steam paths and dependency versions
+- **PyInstaller specs** — for exporter, importer, and builder executables
 
 ### Changed
 
-- GUI rewritten from 4 technical tabs to 3 workflow tabs (Create/Build/Mods)
-- Window title: "CG3H Mod Builder"
-- Default output directory: `Documents/CG3H_Mods/`
-- Blender addon version bumped to 3.0.0
+- GUI rewritten from technical tabs to workflow tabs (Create/Build/Mods)
+- Mods no longer bundle `cg3h_builder.exe` or `main.lua` — all runtime logic centralized
+- Build pipeline auto-detects textures from GLB instead of requiring manual listing
 
 ### Removed
 
-- Legacy Import tab (merged into Build)
-- Legacy Install tab (replaced by Mods)
+- Per-mod `main.lua` generation
+- Per-mod `cg3h_builder.exe` bundling
 - Backup/restore system (H2M mods are non-destructive)
 - Checksum management (standalone packages bypass validation)
-- Mod registry (_mods.json) — replaced by r2modman scanning
-- Direct game file modification is no longer the primary workflow
+- Direct game file modification workflow
 
-### Known Issues
+### Known Limitations
 
-- `mesh_replace` and `mesh_patch` types still require distributing copyrighted geometry; v3.1 will add a diff format for CC-free distribution
+- **Multi-entry characters** (e.g. Hecate) — only the first mesh entry is patched (v3.1)
+- **Multi-mod animation merge** — only first mod's animations survive (v3.2)
+- **Requires H2M patches** — `rom.data.add_granny_file` API and GPK exact-match fix (PRs pending)
 
 ---
 
