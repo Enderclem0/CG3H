@@ -220,6 +220,20 @@ class CG3H_OT_Import(bpy.types.Operator, ImportHelper):
         except OSError:
             pass
 
+        # Auto-load mesh entries for the CG3H panel
+        entries = _read_gpk_entries(name)
+        if entries:
+            context.scene.cg3h_entries = ",".join(entries)
+            context.scene.cg3h_character = name
+            # Store imported mesh names so the panel can hide checkboxes for them
+            imported_names = [obj.name for obj in context.selected_objects if obj.type == 'MESH']
+            context.scene.cg3h_original_meshes = ",".join(imported_names)
+            # Init default entry assignments for all imported meshes
+            for obj in context.selected_objects:
+                if obj.type == 'MESH':
+                    for entry in entries:
+                        obj[f"cg3h_entry_{entry}"] = True
+
         self.report({'INFO'}, f"Imported {name} ({len(context.selected_objects)} objects)")
         return {'FINISHED'}
 
@@ -303,8 +317,41 @@ class CG3H_OT_Export(bpy.types.Operator):
             self.report({'ERROR'}, "glTF export produced no file. Select meshes + armature first.")
             return {'CANCELLED'}
 
-        # Generate mod.json
+        # Build mesh entry list and per-mesh routing from CG3H panel properties
         import json
+        entries_str = context.scene.get("cg3h_entries", "")
+        all_entries = entries_str.split(",") if entries_str else [f"{character}_Mesh"]
+        all_entries = [e for e in all_entries if e]  # filter empties
+
+        original_meshes = set(context.scene.get("cg3h_original_meshes", "").split(","))
+
+        new_mesh_routing = {}
+        for obj in context.selected_objects:
+            if obj.type != 'MESH':
+                continue
+            if obj.name in original_meshes:
+                continue  # Original meshes routed by manifest
+            # Auto-init if no entry properties (mesh added without clicking Init)
+            mesh_entries = []
+            has_props = False
+            for entry in all_entries:
+                prop_name = f"cg3h_entry_{entry}"
+                if prop_name not in obj:
+                    obj[prop_name] = True  # default: all entries
+                has_props = True
+                if obj[prop_name]:
+                    mesh_entries.append(entry)
+            # Only add routing if not all entries are checked (partial assignment)
+            if has_props and mesh_entries and set(mesh_entries) != set(all_entries):
+                new_mesh_routing[obj.name] = mesh_entries
+
+        target = {
+            "character": character,
+            "mesh_entries": all_entries,
+        }
+        if new_mesh_routing:
+            target["new_mesh_routing"] = new_mesh_routing
+
         mod_json = {
             "format": "cg3h-mod/1.0",
             "metadata": {
@@ -314,10 +361,7 @@ class CG3H_OT_Export(bpy.types.Operator):
                 "description": f"{mod_name} for {character}",
             },
             "type": "mesh_replace",
-            "target": {
-                "character": character,
-                "mesh_entries": [f"{character}_Mesh"],
-            },
+            "target": target,
             "assets": {
                 "glb": f"{character}.glb",
             },
@@ -350,7 +394,8 @@ class CG3H_OT_Export(bpy.types.Operator):
                     cmd, capture_output=True, text=True, timeout=120,
                     cwd=os.path.join(_prefs().game_path, "Ship"),
                 )
-                manifest_src = os.path.splitext(manifest_glb)[0] + "_manifest.json"
+                # Exporter writes manifest.json in the same dir as the output GLB
+                manifest_src = os.path.join(os.path.dirname(manifest_glb), "manifest.json")
                 if os.path.isfile(manifest_src):
                     import shutil
                     shutil.copy2(manifest_src, os.path.join(workspace, "manifest.json"))
@@ -361,32 +406,126 @@ class CG3H_OT_Export(bpy.types.Operator):
                 if os.path.isfile(manifest_glb):
                     os.unlink(manifest_glb)
 
-        # Build Thunderstore ZIP via cg3h_build
-        builder_exe = _exe_path("cg3h_importer.exe")
-        # cg3h_importer is gltf_to_gr2 — we need cg3h_build for packaging
-        # Use the bundled exporter's Python to call cg3h_build if available,
-        # otherwise just create the workspace and let the user build manually
+        # Build mod package (PKG + Thunderstore ZIP)
+        # Run cg3h_build.py as subprocess with system Python since Blender's
+        # Python doesn't have etcpak/Pillow needed for texture compression.
         zip_path = None
-        try:
-            import sys as _sys
-            addon = _addon_dir()
-            if addon not in _sys.path:
-                _sys.path.insert(0, addon)
-            import cg3h_build
-            game_dir = _prefs().game_path
-            cg3h_build.build_mod(workspace, game_dir=game_dir)
-            cg3h_build.package_thunderstore(workspace)
-            mod_id = f"{author}-{mod_name}".replace(" ", "")
-            zip_name = f"{mod_id}-1.0.0.zip"
-            zip_path = os.path.join(workspace, zip_name)
-        except Exception as build_err:
-            pass
+        build_script = os.path.join(_addon_dir(), "cg3h_build.py")
+        if os.path.isfile(build_script):
+            import shutil
+            system_python = shutil.which("python") or shutil.which("python3") or shutil.which("py")
+            if system_python:
+                try:
+                    result = subprocess.run(
+                        [system_python, build_script, workspace, "--package"],
+                        capture_output=True, text=True, timeout=120,
+                    )
+                    if result.returncode == 0:
+                        mod_id = f"{author}-{mod_name}".replace(" ", "")
+                        zip_name = f"{mod_id}-1.0.0.zip"
+                        zip_path = os.path.join(workspace, zip_name)
+                    else:
+                        print(f"CG3H build failed:\n{result.stderr or result.stdout}")
+                except Exception as build_err:
+                    print(f"CG3H build error: {build_err}")
 
         if zip_path and os.path.isfile(zip_path):
             self.report({'INFO'}, f"Mod ready: {zip_path}")
         else:
             self.report({'INFO'}, f"Workspace created: {workspace} (build manually with CG3H GUI)")
         return {'FINISHED'}
+
+
+# ── Mesh Entry Assignment Panel ───────────────────────────────────────────────
+
+def _read_gpk_entries(character):
+    """Read mesh entry names from a character's GPK file."""
+    gpk_dir = os.path.join(_prefs().game_path, "Content", "GR2", "_Optimized")
+    gpk_path = os.path.join(gpk_dir, f"{character}.gpk")
+    if not os.path.isfile(gpk_path):
+        return []
+    import struct
+    with open(gpk_path, 'rb') as f:
+        data = f.read()
+    count = struct.unpack_from('<I', data, 4)[0]
+    pos = 8
+    entries = []
+    for i in range(count):
+        nl = data[pos]; pos += 1
+        name = data[pos:pos+nl].decode(); pos += nl
+        cs = struct.unpack_from('<I', data, pos)[0]; pos += 4
+        if name.endswith('_Mesh'):
+            entries.append(name)
+        pos += cs
+    return entries
+
+
+class CG3H_OT_InitMeshEntries(bpy.types.Operator):
+    """Initialize entry checkboxes for the active mesh"""
+    bl_idname = "cg3h.init_mesh_entries"
+    bl_label = "Enable Entry Selection"
+
+    def execute(self, context):
+        obj = context.active_object
+        entries_str = context.scene.get("cg3h_entries", "")
+        if not obj or obj.type != 'MESH' or not entries_str:
+            return {'CANCELLED'}
+        for entry in entries_str.split(","):
+            if f"cg3h_entry_{entry}" not in obj:
+                obj[f"cg3h_entry_{entry}"] = True
+        return {'FINISHED'}
+
+
+class CG3H_PT_MeshEntries(bpy.types.Panel):
+    """Panel in the 3D View sidebar for assigning meshes to GPK entries"""
+    bl_label = "CG3H Entry Assignment"
+    bl_idname = "CG3H_PT_mesh_entries"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'CG3H'
+
+    def draw(self, context):
+        layout = self.layout
+
+        entries_str = context.scene.get("cg3h_entries", "")
+        character = context.scene.get("cg3h_character", "")
+
+        if not entries_str:
+            layout.label(text="Import a character to see entries")
+            return
+
+        entries = entries_str.split(",")
+        if len(entries) <= 1:
+            layout.label(text=f"Single entry: {entries[0]}")
+            return
+
+        layout.label(text=f"Character: {character} ({len(entries)} entries)")
+        layout.separator()
+
+        obj = context.active_object
+        if not obj or obj.type != 'MESH':
+            layout.label(text="Select a mesh to assign entries")
+            return
+
+        # Check if this is an original (imported) mesh
+        original_meshes = context.scene.get("cg3h_original_meshes", "").split(",")
+        if obj.name in original_meshes:
+            layout.label(text=f"{obj.name}", icon='MESH_DATA')
+            layout.label(text="Original mesh — routed via manifest", icon='INFO')
+            return
+
+        layout.label(text=f"{obj.name}", icon='MESH_DATA')
+
+        # Check if entry properties exist on this mesh
+        first_prop = f"cg3h_entry_{entries[0]}"
+        if first_prop not in obj:
+            layout.operator("cg3h.init_mesh_entries", text="Enable Entry Selection", icon='CHECKMARK')
+            return
+
+        for entry in entries:
+            prop_name = f"cg3h_entry_{entry}"
+            if prop_name in obj:
+                layout.prop(obj, f'["{prop_name}"]', text=entry)
 
 
 # ── Registration ──────────────────────────────────────────────────────────────
@@ -403,6 +542,8 @@ classes = [
     CG3HPreferences,
     CG3H_OT_Import,
     CG3H_OT_Export,
+    CG3H_OT_InitMeshEntries,
+    CG3H_PT_MeshEntries,
 ]
 
 
@@ -411,10 +552,16 @@ def register():
         bpy.utils.register_class(cls)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export)
+    bpy.types.Scene.cg3h_entries = StringProperty(default="")
+    bpy.types.Scene.cg3h_character = StringProperty(default="")
+    bpy.types.Scene.cg3h_original_meshes = StringProperty(default="")
 
 
 def unregister():
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
+    for prop in ("cg3h_entries", "cg3h_character", "cg3h_original_meshes"):
+        if hasattr(bpy.types.Scene, prop):
+            delattr(bpy.types.Scene, prop)
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)

@@ -1569,20 +1569,9 @@ def patch_vertex_data(
                 continue
 
             # Use first existing mesh as template + get bone names from its bindings
-            # Pick template: prefer body mesh over outline (outline uses a
-            # different material/shader that renders behind the character)
-            template = None
-            for _gm in gr2_mesh_list:
-                if 'Outline' not in _gm['name'] and 'Shadow' not in _gm['name']:
-                    template = _gm
-                    break
-            if template is None:
-                template = gr2_mesh_list[0] if gr2_mesh_list else None
-            if template is None:
+            if not gr2_mesh_list:
                 print(f"  ERROR: No existing mesh to use as template — cannot add new meshes")
                 continue
-
-            skel_bones = template.get('bb_names', [])
 
             # Collect existing texture names from GR2 materials for comparison
             existing_tex_names = set()
@@ -1597,12 +1586,30 @@ def patch_vertex_data(
                     pass
 
             for glb_m in glb_group:
+                # Pick template: find the existing mesh whose BoneBindings
+                # contain the bones this new mesh is weighted to.
+                # Among matches, pick the one with the most bindings.
+                glb_bones = set(glb_m.get('bone_palette', []) or [])
+                template = None
+                best_score = -1
+                for _gm in gr2_mesh_list:
+                    if 'Outline' in _gm['name'] or 'Shadow' in _gm['name']:
+                        continue
+                    bb_names = set(_gm.get('bb_names', []))
+                    # Score: how many of the new mesh's bones are in this template
+                    overlap = len(glb_bones & bb_names)
+                    bb_count = len(bb_names)
+                    if overlap > best_score or (overlap == best_score and bb_count > len(template.get('bb_names', [])) if template else 0):
+                        best_score = overlap
+                        template = _gm
+                if template is None:
+                    template = gr2_mesh_list[0]
+                skel_bones = template.get('bb_names', [])
+
                 # Check if this mesh needs a custom material
                 custom_mat_ptr = None
                 glb_tex = glb_m.get('texture_name')
                 if glb_tex and glb_tex not in existing_tex_names:
-                    # New texture — create a new material chain
-                    # Use a synthetic path; the basename is what matters for the game's hash lookup
                     tex_filename = f"D:/mod/{glb_tex}.png"
                     custom_mat_ptr = _create_granny_material_chain(
                         dll, glb_m['name'].split(':')[-1], tex_filename)
