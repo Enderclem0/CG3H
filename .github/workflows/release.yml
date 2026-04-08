@@ -33,12 +33,13 @@ jobs:
       - name: Create Thunderstore package
         run: |
           $version = "${{ github.ref_name }}".TrimStart("v")
-          $manifest = Get-Content .github/thunderstore/manifest.json | ConvertFrom-Json
-          $manifest.version_number = $version
-          $manifest | ConvertTo-Json | Set-Content thunderstore/manifest.json
 
           New-Item -ItemType Directory -Force -Path thunderstore/plugins/CG3HBuilder
           New-Item -ItemType Directory -Force -Path thunderstore/plugins_data/CG3HBuilder
+
+          $manifest = Get-Content .github/thunderstore/manifest.json | ConvertFrom-Json
+          $manifest.version_number = $version
+          $manifest | ConvertTo-Json | Set-Content thunderstore/manifest.json
 
           Copy-Item dist/builder/cg3h_builder.exe thunderstore/plugins_data/CG3HBuilder/
           Copy-Item .github/thunderstore/README.md thunderstore/
