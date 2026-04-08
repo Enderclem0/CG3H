@@ -182,14 +182,12 @@ class App:
         ttk.Label(anim_row, text="e.g. Idle, Attack  (blank = all)",
                   foreground="#888", font=("", 8)).pack(side=tk.LEFT)
 
-        mesh_row = ttk.Frame(opt_frame)
-        mesh_row.pack(fill=tk.X, pady=(0, 2))
-        ttk.Label(mesh_row, text="Mesh entries:", foreground="#555").pack(side=tk.LEFT)
-        self._create_mesh_entry = tk.StringVar()
-        ttk.Entry(mesh_row, textvariable=self._create_mesh_entry, width=28).pack(
-            side=tk.LEFT, padx=4)
-        ttk.Label(mesh_row, text="blank = all, comma-sep to filter",
-                  foreground="#888", font=("", 8)).pack(side=tk.LEFT)
+        # Mesh entry checkboxes (populated when character is selected)
+        self._create_entries_frame = ttk.LabelFrame(opt_frame, text="Mesh entries", padding=4)
+        self._create_entries_frame.pack(fill=tk.X, pady=(0, 2))
+        self._create_entry_vars = {}  # {entry_name: BooleanVar}
+        ttk.Label(self._create_entries_frame, text="Select a character to see entries",
+                  foreground="#888").pack(anchor=tk.W)
 
         # Output directory
         out_row = ttk.Frame(top)
@@ -263,9 +261,11 @@ class App:
             anim_filter = self._create_anim_filter.get().strip()
             if anim_filter:
                 cmd += ["--anim-filter", anim_filter]
-        mesh_entry = self._create_mesh_entry.get().strip()
-        if mesh_entry:
-            cmd += ["--mesh-entry", mesh_entry]
+        # Pass selected mesh entries (if checkboxes exist and not all checked)
+        selected_entries = [e for e, v in self._create_entry_vars.items() if v.get()]
+        all_entries = list(self._create_entry_vars.keys())
+        if selected_entries and selected_entries != all_entries:
+            cmd += ["--mesh-entry", ",".join(selected_entries)]
 
         self._log_write_ui(self._create_log,
                            f"Exporting {character} to {workspace}...\n\n")
@@ -292,8 +292,10 @@ class App:
 
         # Step 2: Generate mod.json
         try:
-            mesh_entries = [e.strip() for e in mesh_entry.split(",") if e.strip()] \
-                if mesh_entry else [f"{character}_Mesh"]
+            if selected_entries:
+                mesh_entries = selected_entries
+            else:
+                mesh_entries = [f"{character}_Mesh"]
 
             saved_author = self._config.get("author", "Modder")
             mod_json = {
@@ -980,10 +982,58 @@ class App:
             self._create_char_lb.see(0)
 
     def _on_char_select(self, event=None):
-        """Set character entry from listbox selection."""
+        """Set character entry from listbox selection and populate entry checkboxes."""
         sel = self._create_char_lb.curselection()
-        if sel:
-            self._create_char.set(self._create_char_lb.get(sel[0]))
+        if not sel:
+            return
+        character = self._create_char_lb.get(sel[0])
+        self._create_char.set(character)
+        self._populate_entry_checkboxes(character)
+
+    def _populate_entry_checkboxes(self, character):
+        """Populate mesh entry checkboxes for the selected character."""
+        # Clear existing checkboxes
+        for w in self._create_entries_frame.winfo_children():
+            w.destroy()
+        self._create_entry_vars.clear()
+
+        # Find mesh entries from the GPK
+        gpk_dir = self._gpk_dir()
+        gpk_path = os.path.join(gpk_dir, f"{character}.gpk")
+        if not os.path.isfile(gpk_path):
+            ttk.Label(self._create_entries_frame, text="GPK not found",
+                      foreground="#a00").pack(anchor=tk.W)
+            return
+
+        try:
+            import struct
+            with open(gpk_path, 'rb') as f:
+                data = f.read()
+            count = struct.unpack_from('<I', data, 4)[0]
+            pos = 8
+            mesh_entries = []
+            for i in range(count):
+                nl = data[pos]; pos += 1
+                name = data[pos:pos+nl].decode(); pos += nl
+                cs = struct.unpack_from('<I', data, pos)[0]; pos += 4
+                if name.endswith('_Mesh'):
+                    mesh_entries.append(name)
+                pos += cs
+        except Exception:
+            ttk.Label(self._create_entries_frame, text="Could not read GPK",
+                      foreground="#a00").pack(anchor=tk.W)
+            return
+
+        if len(mesh_entries) <= 1:
+            ttk.Label(self._create_entries_frame, text=f"Single entry: {mesh_entries[0] if mesh_entries else 'none'}",
+                      foreground="#555").pack(anchor=tk.W)
+            return
+
+        for entry in mesh_entries:
+            var = tk.BooleanVar(value=True)
+            self._create_entry_vars[entry] = var
+            ttk.Checkbutton(self._create_entries_frame, text=entry,
+                            variable=var).pack(anchor=tk.W)
 
     # -- Browse dialogs -------------------------------------------------------
 
