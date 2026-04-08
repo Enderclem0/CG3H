@@ -183,7 +183,7 @@ def _strip_unchanged_data(glb_path, mod_dir):
 def _infer_operations(mod):
     """
     Infer what operations a mod performs from its assets.
-    Returns a set of operations: {'adds_meshes', 'replaces_meshes', 'patches_meshes',
+    Returns a set of operations: {'adds_meshes', 'replaces_meshes',
                                    'replaces_textures', 'adds_textures',
                                    'patches_animations'}
     """
@@ -198,13 +198,13 @@ def _infer_operations(mod):
         for t in mod_type:
             if t == 'mesh_add': ops.add('adds_meshes')
             elif t == 'mesh_replace': ops.add('replaces_meshes')
-            elif t == 'mesh_patch': ops.add('patches_meshes')
+            elif t == 'mesh_patch': ops.add('replaces_meshes')  # mesh_patch treated as mesh_replace
             elif t == 'texture_replace': ops.add('replaces_textures')
             elif t == 'animation_patch': ops.add('patches_animations')
     elif mod_type:
         if mod_type == 'mesh_add': ops.add('adds_meshes')
         elif mod_type == 'mesh_replace': ops.add('replaces_meshes')
-        elif mod_type == 'mesh_patch': ops.add('patches_meshes')
+        elif mod_type == 'mesh_patch': ops.add('replaces_meshes')  # mesh_patch treated as mesh_replace
         elif mod_type == 'texture_replace': ops.add('replaces_textures')
         elif mod_type == 'animation_patch': ops.add('patches_animations')
 
@@ -217,7 +217,7 @@ def _infer_operations(mod):
             ops.add('replaces_meshes')
         if has_new or not meshes:
             # GLB with no explicit mesh declarations = could be add or replace
-            if 'replaces_meshes' not in ops and 'patches_meshes' not in ops:
+            if 'replaces_meshes' not in ops:
                 ops.add('adds_meshes')
 
     for tex in textures:
@@ -571,7 +571,7 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
     glb_path = os.path.join(mod_dir, glb_name)
 
     has_anim_ops = 'patches_animations' in ops
-    has_mesh_ops = ops & {'adds_meshes', 'replaces_meshes', 'patches_meshes'}
+    has_mesh_ops = ops & {'adds_meshes', 'replaces_meshes'}
     has_mesh_or_anim_ops = has_mesh_ops or has_anim_ops
     if has_mesh_or_anim_ops and os.path.isfile(glb_path):
         import shutil
@@ -750,34 +750,34 @@ def package_thunderstore(mod_dir):
         else:
             zf.writestr('README.md', f'# {name}\n\n{meta.get("description", "")}\n')
 
+        # Include GLB in plugins_data/ (stripped if possible)
+        pd_prefix = f'plugins_data/{mod_id}'
+        assets_cfg = mod.get('assets', {})
+        glb = assets_cfg.get('glb', '')
+        glb_arc_path = None
+        if glb:
+            glb_full = os.path.join(mod_dir, glb)
+            if os.path.isfile(glb_full):
+                glb_arc_path = f'{pd_prefix}/{glb}'
+                stripped = _strip_unchanged_data(glb_full, mod_dir)
+                if stripped:
+                    zf.writestr(glb_arc_path, stripped)
+                    print(f"  Packaged GLB: unchanged data stripped")
+                else:
+                    zf.write(glb_full, glb_arc_path)
+                    print(f"  Packaged GLB: full (no manifest for stripping)")
+
         # Build output — exclude .gpk files (contain original game data)
+        # and skip any file already added above (stripped GLB)
         for root, dirs, files in os.walk(build_dir):
             for f in files:
                 if f.endswith('.gpk'):
                     continue  # CC content — must be built on user's machine
                 full = os.path.join(root, f)
                 arc = os.path.relpath(full, build_dir)
+                if glb_arc_path and arc.replace('\\', '/') == glb_arc_path:
+                    continue  # already added (possibly stripped)
                 zf.write(full, arc)
-
-        # Include GLB in plugins_data/ (stripped if possible)
-        pd_prefix = f'plugins_data/{mod_id}'
-        assets_cfg = mod.get('assets', {})
-        glb = assets_cfg.get('glb', '')
-        if glb:
-            glb_full = os.path.join(mod_dir, glb)
-            if os.path.isfile(glb_full):
-                stripped = _strip_unchanged_data(glb_full, mod_dir)
-                if stripped:
-                    zf.writestr(f'{pd_prefix}/{glb}', stripped)
-                    print(f"  Packaged GLB: unchanged data stripped")
-                else:
-                    zf.write(glb_full, f'{pd_prefix}/{glb}')
-                    print(f"  WARNING: Could not strip unchanged data")
-
-        # Include export manifest if present (for mesh routing)
-        manifest_file = os.path.join(mod_dir, 'manifest.json')
-        if os.path.isfile(manifest_file):
-            zf.write(manifest_file, f'{pd_prefix}/manifest.json')
 
     print(f"\n  Thunderstore package: {zip_path}.zip")
     return True

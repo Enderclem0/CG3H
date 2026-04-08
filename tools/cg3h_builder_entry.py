@@ -81,6 +81,8 @@ def _merge_glbs(char_mods, output_dir, character):
         # Now copy new meshes with correct material remapping
         for mesh in other_gltf.meshes:
             if mesh.name in base_mesh_names:
+                print(f"    WARNING: mesh '{mesh.name}' from {mod_info['id']} "
+                      f"already exists, skipping (first mod wins)")
                 continue
 
             bv_offset_map = {}

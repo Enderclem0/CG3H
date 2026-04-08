@@ -1,17 +1,12 @@
 """
-CG3H Mod Merger — Merges multiple mods targeting the same character into
-a single GPK + PKG for H2M.
+DEPRECATED — Use cg3h_builder_entry.py (CG3HBuilder runtime) instead.
 
-When two mesh_add mods both target Melinoe, we can't have two Melinoe.gpk
-files. The merger:
-1. Scans installed CG3H mods (plugins_data + plugins)
-2. Loads mod_priority.json for merge order (generates default if missing)
-3. Groups by target character
-4. For each character with multiple mods: builds a merged GPK + merged PKG
-5. Places the merged files in a shared location H2M can find
+This module uses sequential convert() calls which break custom MaterialBindings
+(double-serialize corruption). The CG3HBuilder runtime uses single-pass GLB
+merging via _merge_glbs() followed by one convert() call.
 
-Usage:
-    python mod_merger.py <r2_plugins_dir> [--game-dir DIR]
+Kept for scan_cg3h_mods(), group_by_character(), and check_conflicts() which
+are still used by the GUI and tests.
 """
 import argparse
 import json

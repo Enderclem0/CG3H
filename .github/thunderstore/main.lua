@@ -101,8 +101,15 @@ for _, mod in ipairs(mods) do
     local pkg_file = pkg_path .. ".pkg"
     if mod.has_textures and rom.path.exists(pkg_file) then
         -- Method A: biome overrides (for NEW texture names)
+        -- Register for ALL known biomes so custom textures load in every area.
         local pkg_hash = rom.data.get_hash_guid_from_string(pkg_name)
-        for _, biome in ipairs({mod.character, "BiomeHub", "BiomeF", "BiomeIHouse"}) do
+        local all_biomes = {
+            mod.character,
+            "BiomeB", "BiomeC", "BiomeChaos", "BiomeF", "BiomeG", "BiomeH",
+            "BiomeHub", "BiomeI", "BiomeIHouse", "BiomeMap", "BiomeN",
+            "BiomeO", "BiomeOBoss", "BiomeP", "BiomeQ", "BiomeQEnding",
+        }
+        for _, biome in ipairs(all_biomes) do
             local biome_hash = rom.data.get_hash_guid_from_string(biome)
             rom.data.load_package_overrides_set(biome_hash, {pkg_hash, biome_hash})
         end
