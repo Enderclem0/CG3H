@@ -1328,13 +1328,20 @@ def _read_mesh_texture_map(fi, debug=False):
     return mesh_tex, unique_textures
 
 
+_TEXTURE_DECODE_WARNING_SHOWN = False
+
 def _decode_texture_to_png(pixel_data, tw, th, fmt):
     """Decode raw pixel data to PNG bytes. Returns PNG bytes or None."""
+    global _TEXTURE_DECODE_WARNING_SHOWN
     import io
     try:
         import texture2ddecoder
         from PIL import Image
     except ImportError:
+        if not _TEXTURE_DECODE_WARNING_SHOWN:
+            _TEXTURE_DECODE_WARNING_SHOWN = True
+            print("  ERROR: texture2ddecoder or Pillow not installed.")
+            print("  Run: pip install texture2ddecoder Pillow")
         return None
 
     img = None
