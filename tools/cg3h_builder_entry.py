@@ -72,8 +72,10 @@ def _merge_glbs(char_mods, output_dir, character):
 
         # Copy images/textures/materials FIRST so we know the material offset
         mat_offset = len(base_gltf.materials or [])
+        img_offset = len(base_gltf.images or [])
+        tex_offset = len(base_gltf.textures or [])
+
         if other_gltf.images:
-            img_offset = len(base_gltf.images or [])
             for img in other_gltf.images:
                 if img.bufferView is not None:
                     bv = other_gltf.bufferViews[img.bufferView]
@@ -89,22 +91,22 @@ def _merge_glbs(char_mods, output_dir, character):
                     base_gltf.images = []
                 base_gltf.images.append(new_img)
 
-            tex_offset = len(base_gltf.textures or [])
             for tex in (other_gltf.textures or []):
                 new_tex = pygltflib.Texture(source=tex.source + img_offset if tex.source is not None else None)
                 if base_gltf.textures is None:
                     base_gltf.textures = []
                 base_gltf.textures.append(new_tex)
 
-            for mat in (other_gltf.materials or []):
-                new_mat = pygltflib.Material(name=mat.name)
-                if mat.pbrMetallicRoughness and mat.pbrMetallicRoughness.baseColorTexture:
-                    new_mat.pbrMetallicRoughness = pygltflib.PbrMetallicRoughness(
-                        baseColorTexture=pygltflib.TextureInfo(
-                            index=mat.pbrMetallicRoughness.baseColorTexture.index + tex_offset))
-                if base_gltf.materials is None:
-                    base_gltf.materials = []
-                base_gltf.materials.append(new_mat)
+        # Materials copied outside the images block — untextured materials are valid
+        for mat in (other_gltf.materials or []):
+            new_mat = pygltflib.Material(name=mat.name)
+            if mat.pbrMetallicRoughness and mat.pbrMetallicRoughness.baseColorTexture:
+                new_mat.pbrMetallicRoughness = pygltflib.PbrMetallicRoughness(
+                    baseColorTexture=pygltflib.TextureInfo(
+                        index=mat.pbrMetallicRoughness.baseColorTexture.index + tex_offset))
+            if base_gltf.materials is None:
+                base_gltf.materials = []
+            base_gltf.materials.append(new_mat)
 
         # Now copy new meshes with correct material remapping
         for mesh in other_gltf.meshes:
@@ -407,9 +409,14 @@ def scan_and_build_all(plugins_data_dir, game_dir=None):
         # Merge all GLBs into one temp GLB, then build once.
         # This avoids the double-serialize problem where custom MaterialBindings
         # get lost across multiple convert() calls.
-        merged_glb = _merge_glbs(char_mods, builder_dir, character)
+        try:
+            merged_glb = _merge_glbs(char_mods, builder_dir, character)
+        except Exception as e:
+            print(f"  {character}: ERROR — GLB merge failed: {e}")
+            failed += 1
+            continue
         if not merged_glb:
-            print(f"  {character}: ERROR — GLB merge failed")
+            print(f"  {character}: ERROR — GLB merge returned no output")
             failed += 1
             continue
 
