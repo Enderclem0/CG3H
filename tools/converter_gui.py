@@ -33,14 +33,9 @@ IMPORTER   = os.path.join(SCRIPT_DIR, "gltf_to_gr2.py")
 
 DEFAULT_OUTPUT = os.path.join(os.path.expanduser("~"), "Documents", "CG3H_Mods")
 
-from cg3h_constants import STEAM_PATHS, CG3H_BUILDER_DEPENDENCY
+from cg3h_constants import STEAM_PATHS, CG3H_BUILDER_DEPENDENCY, find_game_path
 
 
-def find_game_path():
-    for p in STEAM_PATHS:
-        if os.path.isdir(p):
-            return p
-    return ""
 
 
 # -- App ----------------------------------------------------------------------

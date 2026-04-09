@@ -19,7 +19,7 @@ if _dir not in sys.path:
 if sys.stdout and sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
-from cg3h_constants import STEAM_PATHS
+from cg3h_constants import STEAM_PATHS, find_game_path as _find_game_path
 
 
 def _merge_manifests(char_mods):
@@ -200,10 +200,7 @@ def _merge_glbs(char_mods, output_dir, character):
 
 
 def find_game_dir():
-    for p in STEAM_PATHS:
-        if os.path.isdir(p):
-            return p
-    return None
+    return _find_game_path() or None
 
 
 def build_gpk(mod_dir, game_dir=None):

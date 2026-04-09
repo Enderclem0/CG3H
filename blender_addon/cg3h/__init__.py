@@ -29,17 +29,47 @@ from bpy_extras.io_utils import ExportHelper, ImportHelper
 
 # ── Default paths ─────────────────────────────────────────────────────────────
 
-_STEAM_PATHS = [
-    r"C:\Program Files (x86)\Steam\steamapps\common\Hades II",
-    r"C:\Program Files\Steam\steamapps\common\Hades II",
-    r"D:\Steam\steamapps\common\Hades II",
-    r"D:\SteamLibrary\steamapps\common\Hades II",
-    r"E:\SteamLibrary\steamapps\common\Hades II",
-]
-
-
 def _find_game_path():
-    for p in _STEAM_PATHS:
+    """Find Hades II via Steam registry + libraryfolders.vdf, then fallback paths."""
+    import re
+    # Try Steam registry
+    try:
+        import winreg
+        for hive, subkey in [
+            (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Valve\Steam"),
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam"),
+        ]:
+            try:
+                key = winreg.OpenKey(hive, subkey)
+                for val in ("SteamPath", "InstallPath"):
+                    try:
+                        steam_root, _ = winreg.QueryValueEx(key, val)
+                        if steam_root and os.path.isdir(steam_root):
+                            # Parse libraryfolders.vdf
+                            vdf = os.path.join(steam_root, "steamapps", "libraryfolders.vdf")
+                            libraries = [steam_root]
+                            if os.path.isfile(vdf):
+                                with open(vdf, encoding="utf-8", errors="replace") as f:
+                                    for m in re.finditer(r'"path"\s+"([^"]+)"', f.read()):
+                                        p = m.group(1).replace("\\\\", "\\")
+                                        if os.path.isdir(p) and p not in libraries:
+                                            libraries.append(p)
+                            for lib in libraries:
+                                game = os.path.join(lib, "steamapps", "common", "Hades II")
+                                if os.path.isdir(game):
+                                    return game
+                    except OSError:
+                        continue
+            except OSError:
+                continue
+    except ImportError:
+        pass
+    # Fallback
+    for p in [
+        r"C:\Program Files (x86)\Steam\steamapps\common\Hades II",
+        r"C:\Program Files\Steam\steamapps\common\Hades II",
+        r"D:\SteamLibrary\steamapps\common\Hades II",
+    ]:
         if os.path.isdir(p):
             return p
     return ""
