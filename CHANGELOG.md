@@ -4,6 +4,39 @@ All notable changes to CG3H are documented here.
 
 ---
 
+## v3.2.0
+
+Multi-mod robustness: name deduplication, animation merge, and conflict detection.
+
+### Added
+
+- **Name deduplication** — when two `mesh_add` mods use the same mesh name, both are kept with `{mod_id}_` prefix (e.g. "ModA_Crown" and "ModB_Crown"). Transparent to mod creators.
+- **Animation merge** — `_merge_glbs()` copies animations from all mods with name-based node remapping. Previously only the first mod's animations survived.
+- **Animation dedup** — same animation name in multiple mods: last mod wins with warning printed.
+- **Mesh name conflict warnings** — `check_conflicts()` warns about shared mesh names across `mesh_add` mods (informational, not blocking).
+- **`_copy_accessor()` helper** — shared function for copying binary accessor data between GLBs, used by both mesh and animation merge.
+- **Ruff linter** — `pyproject.toml` with ruff config for code quality. Zero warnings on all core files.
+
+### Changed
+
+- `_merge_glbs()` returns `(merged_path, collisions)` instead of just `merged_path`. Collisions set propagated to manifest merge and routing.
+- `_merge_manifests()` accepts `collisions` set instead of flat rename map, derives prefixed names per-mod.
+- `patch_animation_entries()` filter is now optional (was required). Builder no longer passes filter — GLB contents are sole authority on what gets patched. CLI `--anim-patch-filter` still works as optional pre-filter.
+- Routing keys updated per-mod when collisions exist (not a flat rename after the fact).
+
+### Removed
+
+- Import-side animation filter in builder — was redundant with export-side filter.
+- Unused variables caught by ruff: `needs_reserialize`, `dim`, `first_id`, `idx_path`.
+- Unused import: `STEAM_PATHS` from `cg3h_constants`.
+
+### Known Limitations
+
+- Name deduplication covers meshes only (not textures/images in PKGs — planned for future).
+- New mesh bone bindings limited to template mesh's bindings (v4.0).
+
+---
+
 ## v3.1.0
 
 Multi-entry character support and improved game path detection.
@@ -35,7 +68,6 @@ Multi-entry character support and improved game path detection.
 
 ### Known Limitations
 
-- Multi-mod animation merge not yet implemented (v3.2)
 - New mesh bone bindings limited to template mesh's bindings (v4.0)
 
 ---
@@ -101,8 +133,6 @@ Shared runtime builder, Blender addon, and r2modman integration.
 
 ### Known Limitations
 
-- **Multi-entry characters** (e.g. Hecate) — only the first mesh entry is patched (v3.1)
-- **Multi-mod animation merge** — only first mod's animations survive (v3.2)
 - **Requires H2M patches** — `rom.data.add_granny_file` API and GPK exact-match fix (PRs pending)
 
 ---

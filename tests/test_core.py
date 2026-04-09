@@ -6,7 +6,12 @@ Usage:
     python -m pytest tests/test_core.py -v
     python tests/test_core.py              # standalone
 """
-import sys, os, struct, json, tempfile, shutil
+import sys
+import os
+import struct
+import json
+import tempfile
+import shutil
 import numpy as np
 
 # Add tools/ to path
@@ -433,7 +438,7 @@ def test_texture_index_roundtrip():
             f.write(pkg_data)
 
         # Build and save index
-        idx_path = save_texture_index(tmpdir, os.path.join(tmpdir, '_texture_index.json'))
+        save_texture_index(tmpdir, os.path.join(tmpdir, '_texture_index.json'))
 
         # Load it back
         index = load_texture_index(tmpdir)
@@ -702,6 +707,439 @@ def test_merge_manifests_no_duplicates():
         assert len(merged['mesh_entries']) == 1
     finally:
         shutil.rmtree(tmpdir)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 8. GLB merge helpers
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _make_glb(mesh_names, bone_names=None, animations=None, mod_id='TestMod'):
+    """Build a minimal GLB with named meshes, optional skeleton, and animations.
+
+    mesh_names: list of str
+    bone_names: list of str (skeleton nodes)
+    animations: list of (anim_name, [(bone_name, path, times, values), ...])
+    Returns path to temp GLB file.
+    """
+    import pygltflib
+
+    blob = bytearray()
+    nodes = []
+    meshes = []
+    accessors = []
+    buffer_views = []
+    scene_nodes = []
+
+    # Create mesh nodes with minimal geometry (a single triangle)
+    tri_pos = struct.pack('<9f', 0,0,0, 1,0,0, 0,1,0)
+    tri_idx = struct.pack('<3H', 0, 1, 2)
+
+    for i, mname in enumerate(mesh_names):
+        # Position accessor
+        pos_bv_offset = len(blob)
+        blob.extend(tri_pos)
+        bv_pos = pygltflib.BufferView(buffer=0, byteOffset=pos_bv_offset, byteLength=len(tri_pos))
+        bv_pos_idx = len(buffer_views)
+        buffer_views.append(bv_pos)
+
+        acc_pos = pygltflib.Accessor(
+            bufferView=bv_pos_idx, byteOffset=0,
+            componentType=pygltflib.FLOAT, count=3, type='VEC3',
+            max=[1,1,0], min=[0,0,0])
+        acc_pos_idx = len(accessors)
+        accessors.append(acc_pos)
+
+        # Index accessor
+        idx_bv_offset = len(blob)
+        blob.extend(tri_idx)
+        bv_idx = pygltflib.BufferView(buffer=0, byteOffset=idx_bv_offset, byteLength=len(tri_idx))
+        bv_idx_idx = len(buffer_views)
+        buffer_views.append(bv_idx)
+
+        acc_idx = pygltflib.Accessor(
+            bufferView=bv_idx_idx, byteOffset=0,
+            componentType=pygltflib.UNSIGNED_SHORT, count=3, type='SCALAR')
+        acc_idx_idx = len(accessors)
+        accessors.append(acc_idx)
+
+        prim = pygltflib.Primitive(
+            attributes=pygltflib.Attributes(POSITION=acc_pos_idx),
+            indices=acc_idx_idx)
+        mesh = pygltflib.Mesh(name=mname, primitives=[prim])
+        mesh_idx = len(meshes)
+        meshes.append(mesh)
+
+        node = pygltflib.Node(name=mname, mesh=mesh_idx)
+        node_idx = len(nodes)
+        nodes.append(node)
+        scene_nodes.append(node_idx)
+
+    # Create bone nodes (skeleton)
+    bone_node_indices = {}
+    if bone_names:
+        for bname in bone_names:
+            node = pygltflib.Node(name=bname)
+            idx = len(nodes)
+            nodes.append(node)
+            bone_node_indices[bname] = idx
+
+    # Create animations
+    gltf_animations = []
+    if animations and bone_node_indices:
+        for anim_name, tracks in animations:
+            channels = []
+            samplers = []
+            for bone_name, path, times, values in tracks:
+                if bone_name not in bone_node_indices:
+                    continue
+                target_node = bone_node_indices[bone_name]
+
+                # Time accessor
+                time_bytes = struct.pack(f'<{len(times)}f', *times)
+                t_bv_off = len(blob)
+                blob.extend(time_bytes)
+                bv_t = pygltflib.BufferView(buffer=0, byteOffset=t_bv_off, byteLength=len(time_bytes))
+                bv_t_idx = len(buffer_views)
+                buffer_views.append(bv_t)
+                acc_t = pygltflib.Accessor(
+                    bufferView=bv_t_idx, byteOffset=0,
+                    componentType=pygltflib.FLOAT, count=len(times), type='SCALAR',
+                    max=[max(times)], min=[min(times)])
+                acc_t_idx = len(accessors)
+                accessors.append(acc_t)
+
+                # Value accessor
+                val_bytes = struct.pack(f'<{len(values)}f', *values)
+                v_bv_off = len(blob)
+                blob.extend(val_bytes)
+                bv_v = pygltflib.BufferView(buffer=0, byteOffset=v_bv_off, byteLength=len(val_bytes))
+                bv_v_idx = len(buffer_views)
+                buffer_views.append(bv_v)
+
+                n_values = len(values)
+                if path == 'rotation':
+                    vec_type, count = 'VEC4', n_values // 4
+                elif path in ('translation', 'scale'):
+                    vec_type, count = 'VEC3', n_values // 3
+                else:
+                    vec_type, count = 'SCALAR', n_values
+
+                acc_v = pygltflib.Accessor(
+                    bufferView=bv_v_idx, byteOffset=0,
+                    componentType=pygltflib.FLOAT, count=count, type=vec_type)
+                acc_v_idx = len(accessors)
+                accessors.append(acc_v)
+
+                sampler_idx = len(samplers)
+                samplers.append(pygltflib.AnimationSampler(
+                    input=acc_t_idx, output=acc_v_idx, interpolation='LINEAR'))
+                channels.append(pygltflib.AnimationChannel(
+                    sampler=sampler_idx,
+                    target=pygltflib.AnimationChannelTarget(
+                        node=target_node, path=path)))
+
+            if channels:
+                gltf_animations.append(pygltflib.Animation(
+                    name=anim_name, channels=channels, samplers=samplers))
+
+    # Build skin if we have bones
+    skins = []
+    if bone_names:
+        joints = [bone_node_indices[b] for b in bone_names]
+        skins = [pygltflib.Skin(joints=joints)]
+        # Assign skin to mesh nodes
+        for ni in scene_nodes:
+            nodes[ni].skin = 0
+
+    gltf = pygltflib.GLTF2(
+        scene=0,
+        scenes=[pygltflib.Scene(nodes=scene_nodes)],
+        nodes=nodes,
+        meshes=meshes,
+        accessors=accessors,
+        bufferViews=buffer_views,
+        buffers=[pygltflib.Buffer(byteLength=len(blob))],
+        skins=skins or None,
+        animations=gltf_animations or None,
+    )
+    gltf.set_binary_blob(bytes(blob))
+
+    tmpdir = tempfile.mkdtemp()
+    path = os.path.join(tmpdir, f'{mod_id}.glb')
+    gltf.save(path)
+    return path, tmpdir
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 9. Animation filter union tests
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def test_anim_filter_union():
+    """Union of multiple filter patterns matches entries matching ANY pattern."""
+    # Simulate the filter logic from patch_animation_entries
+    entries = {
+        'Idle_01': 'data1',
+        'Run_01': 'data2',
+        'Attack_01': 'data3',
+        'Idle_02': 'data4',
+    }
+    filters = ['idle', 'run']
+    patterns = [p.lower() for p in filters]
+    result = {k: v for k, v in entries.items()
+              if any(p in k.lower() for p in patterns)}
+    assert len(result) == 3, f"Expected 3 matches, got {len(result)}"
+    assert 'Idle_01' in result
+    assert 'Run_01' in result
+    assert 'Idle_02' in result
+    assert 'Attack_01' not in result
+
+
+def test_anim_filter_single_string_compat():
+    """Single string filter works the same as before (backward compat)."""
+    entries = {
+        'Idle_01': 'data1',
+        'Run_01': 'data2',
+        'Idle_02': 'data3',
+    }
+    filt = 'idle'
+    # Same logic as updated patch_animation_entries
+    if isinstance(filt, str):
+        patterns = [filt.lower()]
+    else:
+        patterns = [p.lower() for p in filt]
+    result = {k: v for k, v in entries.items()
+              if any(p in k.lower() for p in patterns)}
+    assert len(result) == 2
+    assert 'Run_01' not in result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 10. Name deduplication tests
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def test_merge_glbs_no_collision():
+    """Unique mesh names across mods stay unchanged."""
+    from cg3h_builder_entry import _merge_glbs
+    import pygltflib
+
+    glb1, tmp1 = _make_glb(['MeshA'], bone_names=['bone0'], mod_id='ModA')
+    glb2, tmp2 = _make_glb(['MeshB'], bone_names=['bone0'], mod_id='ModB')
+    out = tempfile.mkdtemp()
+    try:
+        char_mods = [
+            {'id': 'ModA', 'glb_path': glb1},
+            {'id': 'ModB', 'glb_path': glb2},
+        ]
+        merged_path, collisions = _merge_glbs(char_mods, out, 'TestChar')
+        gltf = pygltflib.GLTF2().load(merged_path)
+        names = [m.name for m in gltf.meshes]
+        assert 'MeshA' in names, f"MeshA missing: {names}"
+        assert 'MeshB' in names, f"MeshB missing: {names}"
+        assert len(collisions) == 0, f"No collisions expected: {collisions}"
+    finally:
+        shutil.rmtree(tmp1)
+        shutil.rmtree(tmp2)
+        shutil.rmtree(out)
+
+
+def test_merge_glbs_name_collision():
+    """Duplicate mesh names get prefixed with mod id."""
+    from cg3h_builder_entry import _merge_glbs
+    import pygltflib
+
+    glb1, tmp1 = _make_glb(['Crown'], bone_names=['bone0'], mod_id='ModA')
+    glb2, tmp2 = _make_glb(['Crown'], bone_names=['bone0'], mod_id='ModB')
+    out = tempfile.mkdtemp()
+    try:
+        char_mods = [
+            {'id': 'ModA', 'glb_path': glb1},
+            {'id': 'ModB', 'glb_path': glb2},
+        ]
+        merged_path, collisions = _merge_glbs(char_mods, out, 'TestChar')
+        gltf = pygltflib.GLTF2().load(merged_path)
+        names = [m.name for m in gltf.meshes]
+        assert 'ModA_Crown' in names, f"ModA_Crown missing: {names}"
+        assert 'ModB_Crown' in names, f"ModB_Crown missing: {names}"
+        assert len(names) == 2, f"Expected 2 meshes: {names}"
+        assert 'Crown' in collisions, f"Crown should be in collisions: {collisions}"
+    finally:
+        shutil.rmtree(tmp1)
+        shutil.rmtree(tmp2)
+        shutil.rmtree(out)
+
+
+def test_merge_glbs_single_mod():
+    """Single mod has no renames (backward compat)."""
+    from cg3h_builder_entry import _merge_glbs
+    import pygltflib
+
+    glb1, tmp1 = _make_glb(['Crown', 'Belt'], bone_names=['bone0'], mod_id='ModA')
+    out = tempfile.mkdtemp()
+    try:
+        char_mods = [{'id': 'ModA', 'glb_path': glb1}]
+        merged_path, collisions = _merge_glbs(char_mods, out, 'TestChar')
+        gltf = pygltflib.GLTF2().load(merged_path)
+        names = [m.name for m in gltf.meshes]
+        assert 'Crown' in names
+        assert 'Belt' in names
+        assert len(collisions) == 0
+    finally:
+        shutil.rmtree(tmp1)
+        shutil.rmtree(out)
+
+
+def test_merge_manifests_with_collisions():
+    """Manifest mesh names prefixed per-mod when collisions exist."""
+    from cg3h_builder_entry import _merge_manifests
+
+    tmpdir = tempfile.mkdtemp()
+    try:
+        m1_path = os.path.join(tmpdir, 'mod1', 'manifest.json')
+        m2_path = os.path.join(tmpdir, 'mod2', 'manifest.json')
+        os.makedirs(os.path.dirname(m1_path))
+        os.makedirs(os.path.dirname(m2_path))
+
+        with open(m1_path, 'w') as f:
+            json.dump({'mesh_entries': ['Body_Mesh'], 'meshes': [
+                {'name': 'Crown', 'entry': 'Body_Mesh', 'gr2_index': 0}
+            ]}, f)
+        with open(m2_path, 'w') as f:
+            json.dump({'mesh_entries': ['Body_Mesh'], 'meshes': [
+                {'name': 'Crown', 'entry': 'Body_Mesh', 'gr2_index': 1}
+            ]}, f)
+
+        collisions = {'Crown'}
+        merged = _merge_manifests([
+            {'id': 'ModA', 'manifest_path': m1_path},
+            {'id': 'ModB', 'manifest_path': m2_path},
+        ], collisions=collisions)
+
+        mesh_names = [m['name'] for m in merged['meshes']]
+        assert 'ModA_Crown' in mesh_names, f"ModA_Crown missing: {mesh_names}"
+        assert 'ModB_Crown' in mesh_names, f"ModB_Crown missing: {mesh_names}"
+        assert len(merged['meshes']) == 2, f"Expected 2 meshes: {mesh_names}"
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 11. Animation merge tests
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def test_merge_glbs_animation_copy():
+    """Animations from second GLB are copied into merged GLB."""
+    from cg3h_builder_entry import _merge_glbs
+    import pygltflib
+
+    bones = ['hip', 'spine']
+    anim1 = ('IdleAnim', [
+        ('hip', 'translation', [0.0, 1.0], [0,0,0, 1,1,1]),
+    ])
+    anim2 = ('RunAnim', [
+        ('spine', 'translation', [0.0, 1.0], [0,0,0, 2,2,2]),
+    ])
+
+    glb1, tmp1 = _make_glb(['MeshA'], bone_names=bones, animations=[anim1], mod_id='ModA')
+    glb2, tmp2 = _make_glb(['MeshB'], bone_names=bones, animations=[anim2], mod_id='ModB')
+    out = tempfile.mkdtemp()
+    try:
+        char_mods = [
+            {'id': 'ModA', 'glb_path': glb1},
+            {'id': 'ModB', 'glb_path': glb2},
+        ]
+        merged_path, _collisions = _merge_glbs(char_mods, out, 'TestChar')
+        gltf = pygltflib.GLTF2().load(merged_path)
+        anim_names = [a.name for a in gltf.animations]
+        assert 'IdleAnim' in anim_names, f"IdleAnim missing: {anim_names}"
+        assert 'RunAnim' in anim_names, f"RunAnim missing: {anim_names}"
+        assert len(gltf.animations) == 2
+    finally:
+        shutil.rmtree(tmp1)
+        shutil.rmtree(tmp2)
+        shutil.rmtree(out)
+
+
+def test_merge_glbs_animation_node_remap():
+    """Animation channels remap to correct bone nodes in merged GLB."""
+    from cg3h_builder_entry import _merge_glbs
+    import pygltflib
+
+    # Mod A: MeshA node at 0, then bones hip(1), spine(2)
+    # Mod B: MeshB node at 0, then bones hip(1), spine(2)
+    # Merged: MeshA(0), MeshB(1), hip(2), spine(3)
+    # Animation from ModB targeting hip should point to node 2 in merged
+    bones = ['hip', 'spine']
+    anim_b = ('WalkAnim', [
+        ('hip', 'translation', [0.0, 0.5], [0,0,0, 1,0,0]),
+    ])
+
+    glb1, tmp1 = _make_glb(['MeshA'], bone_names=bones, mod_id='ModA')
+    glb2, tmp2 = _make_glb(['MeshB'], bone_names=bones, animations=[anim_b], mod_id='ModB')
+    out = tempfile.mkdtemp()
+    try:
+        char_mods = [
+            {'id': 'ModA', 'glb_path': glb1},
+            {'id': 'ModB', 'glb_path': glb2},
+        ]
+        merged_path, _collisions = _merge_glbs(char_mods, out, 'TestChar')
+        gltf = pygltflib.GLTF2().load(merged_path)
+
+        # Find the hip node index in merged GLB
+        hip_idx = None
+        for i, node in enumerate(gltf.nodes):
+            if node.name == 'hip':
+                hip_idx = i
+                break
+        assert hip_idx is not None, "hip node not found in merged GLB"
+
+        # The animation channel should point to hip_idx
+        walk_anim = [a for a in gltf.animations if a.name == 'WalkAnim'][0]
+        assert walk_anim.channels[0].target.node == hip_idx, \
+            f"Expected node {hip_idx}, got {walk_anim.channels[0].target.node}"
+    finally:
+        shutil.rmtree(tmp1)
+        shutil.rmtree(tmp2)
+        shutil.rmtree(out)
+
+
+def test_merge_glbs_animation_dedup():
+    """Same animation name in two mods: last wins."""
+    from cg3h_builder_entry import _merge_glbs
+    import pygltflib
+
+    bones = ['hip']
+    anim1 = ('SharedAnim', [
+        ('hip', 'translation', [0.0, 1.0], [0,0,0, 1,1,1]),
+    ])
+    anim2 = ('SharedAnim', [
+        ('hip', 'translation', [0.0, 1.0], [0,0,0, 9,9,9]),
+    ])
+
+    glb1, tmp1 = _make_glb(['MeshA'], bone_names=bones, animations=[anim1], mod_id='ModA')
+    glb2, tmp2 = _make_glb(['MeshB'], bone_names=bones, animations=[anim2], mod_id='ModB')
+    out = tempfile.mkdtemp()
+    try:
+        char_mods = [
+            {'id': 'ModA', 'glb_path': glb1},
+            {'id': 'ModB', 'glb_path': glb2},
+        ]
+        merged_path, _collisions = _merge_glbs(char_mods, out, 'TestChar')
+        gltf = pygltflib.GLTF2().load(merged_path)
+        shared = [a for a in gltf.animations if a.name == 'SharedAnim']
+        assert len(shared) == 1, f"Expected 1 SharedAnim, got {len(shared)}"
+        # Verify it's the last mod's version (values 9,9,9)
+        ch = shared[0].channels[0]
+        sampler = shared[0].samplers[ch.sampler]
+        acc = gltf.accessors[sampler.output]
+        bv = gltf.bufferViews[acc.bufferView]
+        blob = gltf.binary_blob()
+        data = struct.unpack_from(f'<{acc.count * 3}f', blob, bv.byteOffset + acc.byteOffset)
+        # Last 3 values should be 9,9,9
+        assert data[-3:] == (9.0, 9.0, 9.0), f"Expected (9,9,9), got {data[-3:]}"
+    finally:
+        shutil.rmtree(tmp1)
+        shutil.rmtree(tmp2)
+        shutil.rmtree(out)
 
 
 if __name__ == '__main__':

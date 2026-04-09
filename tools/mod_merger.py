@@ -11,7 +11,6 @@ are still used by the GUI and tests.
 import argparse
 import json
 import os
-import shutil
 import sys
 
 STEAM_PATHS = [
@@ -178,6 +177,28 @@ def check_conflicts(group):
         if len(mod_names) > 1:
             errors.append(f"CONFLICT: texture '{tex_name}' modified by: {', '.join(mod_names)}")
 
+    # mesh_add mods with shared mesh names — auto-prefixed at merge time
+    adders = [m for m, ops in zip(group, all_ops) if 'adds_meshes' in ops]
+    if len(adders) > 1:
+        mesh_names_by_mod = {}
+        for m in adders:
+            glb_name = m['mod'].get('assets', {}).get('glb', '')
+            if glb_name:
+                glb_path = os.path.join(m.get('mod_dir', ''), glb_name)
+                if os.path.isfile(glb_path):
+                    try:
+                        import pygltflib
+                        gltf = pygltflib.GLTF2().load(glb_path)
+                        for mesh in gltf.meshes:
+                            mesh_names_by_mod.setdefault(mesh.name, []).append(
+                                m['mod'].get('metadata', {}).get('name', m['id']))
+                    except Exception as e:
+                        warnings.append(f"WARNING: could not load {glb_path}: {e}")
+        for mname, mods_list in mesh_names_by_mod.items():
+            if len(mods_list) > 1:
+                warnings.append(f"INFO: mesh '{mname}' used by {', '.join(mods_list)} "
+                                f"— will be auto-prefixed at merge time")
+
     return warnings, errors
 
 
@@ -208,7 +229,7 @@ def merge_character_mods(character, mods, game_dir, output_dir):
         print(f"  {e}")
 
     if errors:
-        print(f"  Skipping merge due to conflicts")
+        print("  Skipping merge due to conflicts")
         return False
 
     ship_dir = os.path.join(game_dir, "Ship")
@@ -300,8 +321,6 @@ def merge_character_mods(character, mods, game_dir, output_dir):
     if custom_textures:
         from pkg_texture import build_standalone_pkg
 
-        # Determine merged pkg name from first mod
-        first_id = mods[0]['id']
         merged_pkg_name = f"CG3H-Merged-{character}"
         pkg_path = os.path.join(output_dir, f"{merged_pkg_name}.pkg")
 
@@ -331,21 +350,21 @@ def merge_character_mods(character, mods, game_dir, output_dir):
     lua_lines = [
         f'-- CG3H Merged: {character}',
         f'-- Mods: {", ".join(mod_names)}',
-        f'',
+        '',
     ]
     if custom_textures:
         merged_pkg_name = f"CG3H-Merged-{character}"
         lua_lines.extend([
-            f'local _loaded = false',
-            f'rom.on_import.post(function(script_name)',
-            f'    if _loaded then return end',
-            f'    if script_name == "Main.lua" then',
-            f'        _loaded = true',
+            'local _loaded = false',
+            'rom.on_import.post(function(script_name)',
+            '    if _loaded then return end',
+            '    if script_name == "Main.lua" then',
+            '        _loaded = true',
             f'        local pkg_path = rom.path.combine(_PLUGIN.plugins_data_mod_folder_path, "{merged_pkg_name}")',
-            f'        rom.game.LoadPackages{{Name = pkg_path}}',
+            '        rom.game.LoadPackages{Name = pkg_path}',
             f'        rom.log.info("[CG3H] Loaded merged package for {character}")',
-            f'    end',
-            f'end)',
+            '    end',
+            'end)',
         ])
     lua_lines.append(f'rom.log.info("[CG3H] Merged: {character} ({len(mods)} mods)")')
 

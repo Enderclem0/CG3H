@@ -1,0 +1,42 @@
+[tool.ruff]
+target-version = "py39"
+line-length = 120
+
+[tool.ruff.lint]
+# Focus on correctness, not style
+select = [
+    "F",      # Pyflakes — undefined names, unused imports, redefined vars
+    "E",      # pycodestyle errors — syntax issues, whitespace problems
+    "W",      # pycodestyle warnings
+    "UP",     # pyupgrade — outdated syntax
+    "B",      # flake8-bugbear — common bugs and design problems
+    "SIM",    # flake8-simplify — unnecessary complexity
+    "RUF",    # Ruff-specific rules
+]
+ignore = [
+    "E402",   # import not at top — unavoidable with sys.path manipulation
+    "E501",   # line too long — not enforcing
+    "E741",   # ambiguous variable name (l, O, I) — used in math/binary code
+    "B006",   # mutable default argument — false positives with numpy
+    "B007",   # unused loop variable — too noisy
+    "B023",   # function binding loop variable — too noisy in this codebase
+    "B904",   # raise from in except — not enforcing
+    "SIM102", # nested if — readability preference
+    "SIM108", # ternary instead of if/else — readability preference
+    "SIM110", # use any() instead of for loop — readability preference
+    "SIM115", # use context manager for open — too noisy
+    "UP015",  # unnecessary open mode — not enforcing
+    "RUF002", # ambiguous unicode in docstring — intentional × symbol
+    "RUF003", # ambiguous unicode in comment — intentional × symbol
+    "RUF012", # mutable class variable — no typing in this project
+    "RUF013", # implicit Optional — no typing enforcement
+    "RUF015", # prefer next() over [0] — readability preference
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests use assert, star imports, etc.
+"tests/*" = ["F401", "F811", "B011"]
+# Blender addon has its own conventions
+"blender_addon/*" = ["F401"]
+# Debug tools are throwaway scripts
+"tools/debug/*" = ["F401", "F541", "F841", "E701", "RUF001"]

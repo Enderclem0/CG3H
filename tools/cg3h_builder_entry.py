@@ -19,14 +19,15 @@ if _dir not in sys.path:
 if sys.stdout and sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
-from cg3h_constants import STEAM_PATHS, find_game_path as _find_game_path
+from cg3h_constants import find_game_path as _find_game_path
 
 
-def _merge_manifests(char_mods):
+def _merge_manifests(char_mods, collisions=None):
     """Merge manifest.json from all mods targeting the same character.
 
     Returns combined manifest dict with union of mesh entries and mesh mappings,
-    or None if no manifests exist.
+    or None if no manifests exist.  If collisions is provided (set of mesh names
+    that appear in multiple mods), mesh names are prefixed with the mod id.
     """
     merged = {'meshes': [], 'mesh_entries': []}
     seen_meshes = set()
@@ -43,32 +44,173 @@ def _merge_manifests(char_mods):
                 merged['mesh_entries'].append(entry)
                 seen_entries.add(entry)
         for mesh in m.get('meshes', []):
-            if mesh['name'] not in seen_meshes:
+            name = mesh['name']
+            if collisions and name in collisions:
+                mesh = dict(mesh)
+                mesh['name'] = f"{mod_info['id']}_{name}"
+                name = mesh['name']
+            if name not in seen_meshes:
                 merged['meshes'].append(mesh)
-                seen_meshes.add(mesh['name'])
+                seen_meshes.add(name)
 
     return merged if merged['meshes'] else None
 
 
-def _merge_glbs(char_mods, output_dir, character):
-    """Merge meshes from multiple GLBs into one combined GLB.
+def _copy_accessor(base_gltf, base_blob, other_gltf, other_blob,
+                   acc_idx, bv_offset_map, acc_offset_map):
+    """Copy a single accessor (and its BufferView data) from other into base.
 
-    Takes the first mod's GLB as the base (it has existing character meshes
-    + skeleton), then appends NEW meshes from subsequent mods. Existing
-    character meshes are only included once (from the first mod).
+    Returns the new accessor index in base_gltf.  Reuses already-copied
+    BufferViews/Accessors via the offset maps (mutated in place).
     """
     import pygltflib
 
+    if acc_idx in acc_offset_map:
+        return acc_offset_map[acc_idx]
+
+    acc = other_gltf.accessors[acc_idx]
+    bv_idx = acc.bufferView
+    if bv_idx not in bv_offset_map:
+        bv = other_gltf.bufferViews[bv_idx]
+        new_offset = len(base_blob)
+        base_blob.extend(other_blob[bv.byteOffset:bv.byteOffset + bv.byteLength])
+        new_bv = pygltflib.BufferView(
+            buffer=0, byteOffset=new_offset, byteLength=bv.byteLength,
+            byteStride=bv.byteStride, target=bv.target)
+        new_bv_idx = len(base_gltf.bufferViews)
+        base_gltf.bufferViews.append(new_bv)
+        bv_offset_map[bv_idx] = new_bv_idx
+
+    new_acc = pygltflib.Accessor(
+        bufferView=bv_offset_map[bv_idx],
+        byteOffset=acc.byteOffset,
+        componentType=acc.componentType,
+        count=acc.count,
+        type=acc.type,
+        max=acc.max, min=acc.min)
+    new_acc_idx = len(base_gltf.accessors)
+    base_gltf.accessors.append(new_acc)
+    acc_offset_map[acc_idx] = new_acc_idx
+    return new_acc_idx
+
+
+def _merge_animations(base_gltf, base_blob, other_gltf, other_blob,
+                      bv_offset_map, acc_offset_map, mod_id):
+    """Copy animations from other_gltf into base_gltf with node remapping."""
+    import pygltflib
+
+    if not other_gltf.animations:
+        return
+
+    # Build name→index map for the current merged node list
+    bone_map = {node.name: i for i, node in enumerate(base_gltf.nodes)}
+
+    # Track existing animation names for dedup
+    existing_names = {}
+    if base_gltf.animations:
+        for i, a in enumerate(base_gltf.animations):
+            existing_names[a.name] = i
+
+    for anim in other_gltf.animations:
+        channels = []
+        samplers = []
+
+        for ch in anim.channels:
+            if ch.target.node is None or ch.target.node >= len(other_gltf.nodes):
+                continue
+            bone_name = other_gltf.nodes[ch.target.node].name
+            new_node_idx = bone_map.get(bone_name)
+            if new_node_idx is None:
+                print(f"    WARNING: animation '{anim.name}' targets bone "
+                      f"'{bone_name}' not found in merged skeleton, skipping channel")
+                continue
+
+            # Copy sampler data
+            old_sampler = anim.samplers[ch.sampler]
+            new_input = _copy_accessor(base_gltf, base_blob, other_gltf, other_blob,
+                                       old_sampler.input, bv_offset_map, acc_offset_map)
+            new_output = _copy_accessor(base_gltf, base_blob, other_gltf, other_blob,
+                                        old_sampler.output, bv_offset_map, acc_offset_map)
+            sampler_idx = len(samplers)
+            samplers.append(pygltflib.AnimationSampler(
+                input=new_input, output=new_output,
+                interpolation=old_sampler.interpolation))
+            channels.append(pygltflib.AnimationChannel(
+                sampler=sampler_idx,
+                target=pygltflib.AnimationChannelTarget(
+                    node=new_node_idx, path=ch.target.path)))
+
+        if not channels:
+            continue
+
+        new_anim = pygltflib.Animation(
+            name=anim.name, channels=channels, samplers=samplers,
+            extras=anim.extras)
+
+        # Dedup: overwrite existing animation with same name (last wins)
+        if anim.name in existing_names:
+            idx = existing_names[anim.name]
+            print(f"    WARNING: animation '{anim.name}' from {mod_id} "
+                  f"overwrites existing (last mod wins)")
+            base_gltf.animations[idx] = new_anim
+        else:
+            if base_gltf.animations is None:
+                base_gltf.animations = []
+            existing_names[anim.name] = len(base_gltf.animations)
+            base_gltf.animations.append(new_anim)
+
+
+def _merge_glbs(char_mods, output_dir, character):
+    """Merge meshes, materials, textures, and animations from multiple GLBs.
+
+    Takes the first mod's GLB as the base, then appends NEW meshes and
+    animations from subsequent mods.  When two mods use the same mesh name,
+    both are kept with a ``{mod_id}_`` prefix (collision-only deduplication).
+
+    Returns (merged_path, collisions) where collisions is a set of original
+    mesh names that appeared in multiple mods and were prefixed.
+    """
+    import pygltflib
+
+    # ── Pre-scan: detect mesh name collisions across all mods ──
+    name_to_mods = {}
+    for mod_info in char_mods:
+        gltf = pygltflib.GLTF2().load(mod_info['glb_path'])
+        for mesh in gltf.meshes:
+            name_to_mods.setdefault(mesh.name, []).append(mod_info['id'])
+    collisions = {name for name, mods in name_to_mods.items() if len(mods) > 1}
+
+    if collisions:
+        for name in sorted(collisions):
+            mods_list = name_to_mods[name]
+            print(f"    WARNING: mesh '{name}' used by {', '.join(mods_list)} "
+                  f"— renaming to avoid collision")
+
+    # ── Load base GLB ──
     base_mod = char_mods[0]
     base_gltf = pygltflib.GLTF2().load(base_mod['glb_path'])
 
-    # Collect mesh names already in the base
+    # Retroactive rename of base mod's colliding meshes
+    if collisions:
+        for i, mesh in enumerate(base_gltf.meshes):
+            if mesh.name in collisions:
+                new_name = f"{base_mod['id']}_{mesh.name}"
+                mesh.name = new_name
+                for node in base_gltf.nodes:
+                    if node.mesh == i:
+                        node.name = new_name
+                        break
+
     base_mesh_names = {m.name for m in base_gltf.meshes}
 
+    # ── Merge each subsequent mod ──
     for mod_info in char_mods[1:]:
         other_gltf = pygltflib.GLTF2().load(mod_info['glb_path'])
         other_blob = other_gltf.binary_blob()
         base_blob = bytearray(base_gltf.binary_blob())
+
+        bv_offset_map = {}
+        acc_offset_map = {}
 
         # Copy images/textures/materials FIRST so we know the material offset
         mat_offset = len(base_gltf.materials or [])
@@ -108,15 +250,17 @@ def _merge_glbs(char_mods, output_dir, character):
                 base_gltf.materials = []
             base_gltf.materials.append(new_mat)
 
-        # Now copy new meshes with correct material remapping
+        # Copy new meshes with correct material remapping
         for mesh in other_gltf.meshes:
-            if mesh.name in base_mesh_names:
-                print(f"    WARNING: mesh '{mesh.name}' from {mod_info['id']} "
-                      f"already exists, skipping (first mod wins)")
-                continue
+            original_name = mesh.name
+            merge_name = original_name
+            if original_name in collisions:
+                merge_name = f"{mod_info['id']}_{original_name}"
 
-            bv_offset_map = {}
-            acc_offset_map = {}
+            if merge_name in base_mesh_names:
+                # Shouldn't happen after dedup, but guard against it
+                print(f"    WARNING: mesh '{merge_name}' already exists, skipping")
+                continue
 
             for prim in mesh.primitives:
                 acc_indices = []
@@ -134,31 +278,8 @@ def _merge_glbs(char_mods, output_dir, character):
                     acc_indices.append(prim.indices)
 
                 for acc_idx in acc_indices:
-                    if acc_idx in acc_offset_map:
-                        continue
-                    acc = other_gltf.accessors[acc_idx]
-                    bv_idx = acc.bufferView
-                    if bv_idx not in bv_offset_map:
-                        bv = other_gltf.bufferViews[bv_idx]
-                        new_offset = len(base_blob)
-                        base_blob.extend(other_blob[bv.byteOffset:bv.byteOffset + bv.byteLength])
-                        new_bv = pygltflib.BufferView(
-                            buffer=0, byteOffset=new_offset, byteLength=bv.byteLength,
-                            byteStride=bv.byteStride, target=bv.target)
-                        new_bv_idx = len(base_gltf.bufferViews)
-                        base_gltf.bufferViews.append(new_bv)
-                        bv_offset_map[bv_idx] = new_bv_idx
-
-                    new_acc = pygltflib.Accessor(
-                        bufferView=bv_offset_map[bv_idx],
-                        byteOffset=acc.byteOffset,
-                        componentType=acc.componentType,
-                        count=acc.count,
-                        type=acc.type,
-                        max=acc.max, min=acc.min)
-                    new_acc_idx = len(base_gltf.accessors)
-                    base_gltf.accessors.append(new_acc)
-                    acc_offset_map[acc_idx] = new_acc_idx
+                    _copy_accessor(base_gltf, base_blob, other_gltf, other_blob,
+                                   acc_idx, bv_offset_map, acc_offset_map)
 
             # Build all primitives with remapped accessors and materials
             new_prims = []
@@ -178,17 +299,21 @@ def _merge_glbs(char_mods, output_dir, character):
                     material=new_mat_idx,
                 ))
 
-            new_mesh = pygltflib.Mesh(name=mesh.name, primitives=new_prims)
+            new_mesh = pygltflib.Mesh(name=merge_name, primitives=new_prims)
             new_mesh_idx = len(base_gltf.meshes)
             base_gltf.meshes.append(new_mesh)
-            base_mesh_names.add(mesh.name)
+            base_mesh_names.add(merge_name)
 
-            new_node = pygltflib.Node(name=mesh.name, mesh=new_mesh_idx)
+            new_node = pygltflib.Node(name=merge_name, mesh=new_mesh_idx)
             if base_gltf.skins:
                 new_node.skin = 0
             base_gltf.nodes.append(new_node)
             if base_gltf.scenes:
                 base_gltf.scenes[0].nodes.append(len(base_gltf.nodes) - 1)
+
+        # Merge animations from this mod
+        _merge_animations(base_gltf, base_blob, other_gltf, other_blob,
+                          bv_offset_map, acc_offset_map, mod_info['id'])
 
         # Update buffer size
         base_gltf.set_binary_blob(bytes(base_blob))
@@ -198,7 +323,7 @@ def _merge_glbs(char_mods, output_dir, character):
     merged_path = os.path.join(output_dir, f"{character}_merged.glb")
     base_gltf.save(merged_path)
     print(f"    Merged {len(base_gltf.meshes)} meshes into {merged_path}")
-    return merged_path
+    return merged_path, collisions
 
 
 def find_game_dir():
@@ -217,7 +342,7 @@ def build_gpk(mod_dir, game_dir=None):
 
     character = mod.get('target', {}).get('character', '')
     if not character:
-        print(f"ERROR: No target.character in mod.json")
+        print("ERROR: No target.character in mod.json")
         return False
 
     glb_name = mod.get('assets', {}).get('glb', '')
@@ -229,7 +354,7 @@ def build_gpk(mod_dir, game_dir=None):
     if not game_dir:
         game_dir = find_game_dir()
     if not game_dir:
-        print(f"ERROR: Hades II game directory not found")
+        print("ERROR: Hades II game directory not found")
         return False
 
     gpk_path = os.path.join(game_dir, "Content", "GR2", "_Optimized", f"{character}.gpk")
@@ -249,8 +374,6 @@ def build_gpk(mod_dir, game_dir=None):
     types = mod_type if isinstance(mod_type, list) else [mod_type] if mod_type else []
     allow_topo = any(t in ('mesh_add', 'mesh_replace') for t in types)
     patch_anims = 'animation_patch' in types
-    anim_cfg = mod.get('assets', {}).get('animations', {})
-    anim_filter = anim_cfg.get('filter') if isinstance(anim_cfg, dict) else None
     new_mesh_routing = mod.get('target', {}).get('new_mesh_routing')
 
     print(f"Building GPK: {character}")
@@ -268,7 +391,6 @@ def build_gpk(mod_dir, game_dir=None):
             manifest_path=manifest_path if os.path.isfile(manifest_path) else None,
             allow_topology_change=allow_topo,
             patch_animations=patch_anims,
-            anim_patch_filter=anim_filter,
             new_mesh_routing=new_mesh_routing,
         )
         print(f"  Output: {output_gpk}")
@@ -410,7 +532,7 @@ def scan_and_build_all(plugins_data_dir, game_dir=None):
         # This avoids the double-serialize problem where custom MaterialBindings
         # get lost across multiple convert() calls.
         try:
-            merged_glb = _merge_glbs(char_mods, builder_dir, character)
+            merged_glb, collisions = _merge_glbs(char_mods, builder_dir, character)
         except Exception as e:
             print(f"  {character}: ERROR — GLB merge failed: {e}")
             failed += 1
@@ -420,13 +542,9 @@ def scan_and_build_all(plugins_data_dir, game_dir=None):
             failed += 1
             continue
 
-        # Use first mod's manifest (for mesh name routing)
-        manifest = char_mods[0]['manifest_path']
-
         # Collect operations and routing from all mods
         allow_topo = False
         patch_anims = False
-        anim_filter = None
         merged_routing = {}
         for mod_info in char_mods:
             mod = mod_info['mod']
@@ -436,16 +554,14 @@ def scan_and_build_all(plugins_data_dir, game_dir=None):
                 allow_topo = True
             if 'animation_patch' in types:
                 patch_anims = True
-                anim_cfg = mod.get('assets', {}).get('animations', {})
-                if isinstance(anim_cfg, dict) and anim_cfg.get('filter'):
-                    anim_filter = anim_cfg['filter']
-            # Merge new_mesh_routing from all mods
+            # Merge new_mesh_routing from all mods (apply dedup renames per-mod)
             routing = mod.get('target', {}).get('new_mesh_routing', {})
             for mesh_name, entries in routing.items():
-                merged_routing[mesh_name] = entries
+                key = f"{mod_info['id']}_{mesh_name}" if collisions and mesh_name in collisions else mesh_name
+                merged_routing[key] = entries
 
-        # Phase 4: merge manifests from all mods
-        merged_manifest = _merge_manifests(char_mods)
+        # Merge manifests from all mods (with collision renames applied per-mod)
+        merged_manifest = _merge_manifests(char_mods, collisions=collisions or None)
 
         for mi in char_mods:
             print(f"    - {mi['id']}")
@@ -460,7 +576,6 @@ def scan_and_build_all(plugins_data_dir, game_dir=None):
                 manifest_dict=merged_manifest,
                 allow_topology_change=allow_topo,
                 patch_animations=patch_anims,
-                anim_patch_filter=anim_filter,
                 new_mesh_routing=merged_routing or None,
             )
             ok = True

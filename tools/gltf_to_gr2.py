@@ -45,7 +45,7 @@ import tempfile
 import numpy as np
 
 try:
-    import lz4.block
+    import lz4.block  # noqa: F401 — availability check
 except ImportError:
     sys.exit("ERROR: lz4 not installed. Run: pip install lz4")
 try:
@@ -58,9 +58,7 @@ if _tools_dir not in sys.path:
     sys.path.insert(0, _tools_dir)
 
 from granny_types import (
-    build_type_map, get_struct_stride, get_vertex_layout,
-    get_transform_field_offsets, setup_dll_types, _type_sym_addr,
-    MTYPE_UINT8, MTYPE_NORMAL_U8,
+    build_type_map, get_struct_stride, get_transform_field_offsets, setup_dll_types, _type_sym_addr,
 )
 from gpk_pack import extract_gpk, pack_gpk
 
@@ -394,12 +392,9 @@ def patch_animation_entries(dll, gpk_entries, sdb_bytes, glb_animations,
                             anim_patch_filter=None):
     """
     Patch animation entries in the GPK using data from glTF animations.
-    Only patches entries matching anim_patch_filter (required — prevents
-    accidental re-encoding of all animations which causes rendering corruption).
+    Only patches GPK entries that have a matching animation in the GLB.
+    Optional anim_patch_filter pre-filters GPK entries by substring.
     """
-    if anim_patch_filter is None:
-        print("  WARNING: --anim-patch-filter required to specify which animations to patch")
-        return 0
     if not glb_animations:
         return 0
 
@@ -420,10 +415,17 @@ def patch_animation_entries(dll, gpk_entries, sdb_bytes, glb_animations,
     patched = 0
     anim_entries = {k: v for k, v in gpk_entries.items() if not k.endswith('_Mesh')}
 
-    # Filter entries to only those matching the patch filter
-    pattern = anim_patch_filter.lower()
-    anim_entries = {k: v for k, v in anim_entries.items() if pattern in k.lower()}
-    print(f"  {len(anim_entries)} entries match filter '{anim_patch_filter}'", flush=True)
+    # Optional pre-filter (only used by CLI --anim-patch-filter, not by builder)
+    if anim_patch_filter:
+        if isinstance(anim_patch_filter, str):
+            patterns = [anim_patch_filter.lower()]
+        else:
+            patterns = [p.lower() for p in anim_patch_filter]
+        anim_entries = {k: v for k, v in anim_entries.items()
+                        if any(p in k.lower() for p in patterns)}
+        print(f"  {len(anim_entries)} entries match filter(s) {patterns}", flush=True)
+    else:
+        print(f"  {len(anim_entries)} animation entries to check", flush=True)
 
     # Build lookup tables for matching GLB animation names to GPK entries.
     # Primary: exact match by GPK entry name (from our exporter).
@@ -488,7 +490,6 @@ def patch_animation_entries(dll, gpk_entries, sdb_bytes, glb_animations,
             continue
 
         tracks_modified = 0
-        needs_reserialize = False
 
         for ti in range(tt_count):
             t_base = tt_ptr + ti * ANIM_TRACK_STRIDE
@@ -516,7 +517,6 @@ def patch_animation_entries(dll, gpk_entries, sdb_bytes, glb_animations,
                     mat_values[:, 4] = values[:, 1]
                     mat_values[:, 8] = values[:, 2]
                     values = mat_values
-                    dim = 9
 
                 if path == 'rotation' and values.shape[-1] == 4:
                     _fixup_quat_signs(values)
@@ -537,7 +537,6 @@ def patch_animation_entries(dll, gpk_entries, sdb_bytes, glb_animations,
                 struct.pack_into('<Q', (ctypes.c_uint8 * 8).from_address(t_base + coff + 8),
                                  0, ctypes.addressof(data_buf))
                 tracks_modified += 1
-                needs_reserialize = True
 
         if tracks_modified > 0:
             # Only re-serialize if we used DaK32fC32f fallback (changed format).
@@ -1267,7 +1266,6 @@ def _create_granny_texture(dll, filename):
     Create a granny_texture struct in Python memory with the given FromFileName.
     Returns pointer (int).
     """
-    from granny_types import _type_sym_addr
     tex_size = dll.GrannyGetTotalObjectSize(
         ctypes.c_void_p(_type_sym_addr(dll, 'GrannyTextureType')))
     tex_buf = (ctypes.c_uint8 * tex_size)()
@@ -1289,7 +1287,6 @@ def _create_granny_material_chain(dll, mesh_name, texture_filename):
 
     Returns outer material pointer (int).
     """
-    from granny_types import _type_sym_addr
 
     mat_size = dll.GrannyGetTotalObjectSize(
         ctypes.c_void_p(_type_sym_addr(dll, 'GrannyMaterialType')))
@@ -1302,7 +1299,7 @@ def _create_granny_material_chain(dll, mesh_name, texture_filename):
     # 2. Create inner material (holds the texture reference)
     inner_mat = (ctypes.c_uint8 * mat_size)()
     _keepalive.append(inner_mat)
-    inner_name = f"mod_texture_{mesh_name}".encode('utf-8') + b'\x00'
+    inner_name = f"mod_texture_{mesh_name}".encode() + b'\x00'
     inner_name_buf = (ctypes.c_uint8 * len(inner_name))(*inner_name)
     _keepalive.append(inner_name_buf)
     struct.pack_into('<Q', inner_mat, 0x00, ctypes.addressof(inner_name_buf))  # Name
@@ -1320,7 +1317,7 @@ def _create_granny_material_chain(dll, mesh_name, texture_filename):
     # 4. Create outer material: Name="Mat_<mesh>", Maps={count=1, ptr}
     outer_mat = (ctypes.c_uint8 * mat_size)()
     _keepalive.append(outer_mat)
-    outer_name = f"Mat_{mesh_name}".encode('utf-8') + b'\x00'
+    outer_name = f"Mat_{mesh_name}".encode() + b'\x00'
     outer_name_buf = (ctypes.c_uint8 * len(outer_name))(*outer_name)
     _keepalive.append(outer_name_buf)
     struct.pack_into('<Q', outer_mat, 0x00, ctypes.addressof(outer_name_buf))  # Name
@@ -1353,7 +1350,6 @@ def _create_new_mesh(dll, fi, glb_m, skeleton_bones, template_mesh, material_ptr
 
     # ── Clone the template mesh struct ──
     # Use GrannyGetTotalObjectSize for correct struct sizes
-    from granny_types import _type_sym_addr
     mesh_size = dll.GrannyGetTotalObjectSize(ctypes.c_void_p(
         _type_sym_addr(dll, 'GrannyMeshType')))
     vd_size = dll.GrannyGetTotalObjectSize(ctypes.c_void_p(
@@ -1573,7 +1569,7 @@ def patch_vertex_data(
 
             # Use first existing mesh as template + get bone names from its bindings
             if not gr2_mesh_list:
-                print(f"  ERROR: No existing mesh to use as template — cannot add new meshes")
+                print("  ERROR: No existing mesh to use as template — cannot add new meshes")
                 continue
 
             # Collect existing texture names from GR2 materials for comparison
@@ -1789,7 +1785,7 @@ def convert(
     positional: bool = False,
     allow_topology_change: bool = False,
     patch_animations: bool = False,
-    anim_patch_filter: str = None,
+    anim_patch_filter=None,
     new_mesh_routing: dict = None,
 ) -> None:
     print(f"[1/6] Parsing GLB: {glb_path}")
@@ -1848,7 +1844,7 @@ def convert(
     with open(sdb_path, 'rb') as f:
         sdb_bytes = f.read()
 
-    print(f"[4/6] Loading Granny DLL + type map")
+    print("[4/6] Loading Granny DLL + type map")
     dll = setup_granny(dll_path)
 
     # Load SDB once, shared across all entries
@@ -1885,7 +1881,7 @@ def convert(
             gpk_entries[entry_key] = new_gr2_bytes
             print(f"  Serialized: {len(new_gr2_bytes):,} bytes")
         else:
-            print(f"  No changes to this entry")
+            print("  No changes to this entry")
 
         gr2_files_to_free.append(gr2_file)
 
@@ -1911,7 +1907,7 @@ def convert(
     # Patch animation entries if requested
     n_anim_patched = 0
     if glb_animations:
-        print(f"[6/6] Patching animation entries")
+        print("[6/6] Patching animation entries")
         n_anim_patched = patch_animation_entries(dll, gpk_entries, sdb_bytes, glb_animations,
                                                     anim_patch_filter=anim_patch_filter)
         print(f"  {n_anim_patched} animation(s) patched")

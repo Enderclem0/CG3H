@@ -277,10 +277,10 @@ Two mods cannot each ship their own `Melinoe.gpk` — the merger resolves this.
 4. **Conflict check** — per-operation analysis before merging:
    - Multiple `mesh_replace` for the same character → hard conflict (blocked)
    - Same texture replaced by multiple mods → hard conflict (blocked)
-   - `mesh_add` + `mesh_add` → compatible (both appended)
+   - `mesh_add` + `mesh_add` → compatible (both appended; same mesh names auto-prefixed with mod id)
    - `mesh_add` + `mesh_replace` → warning (may not interact well)
    - Different animation filters → compatible
-5. **Single-pass merge** — uses `_merge_glbs` to fuse all mods' GLBs into one merged GLB per character, then a single `convert()` call builds the final GPK (no intermediate GPKs or chaining)
+5. **Single-pass merge** — uses `_merge_glbs` to fuse all mods' GLBs into one merged GLB per character (meshes, materials, textures, and animations), then a single `convert()` call builds the final GPK. Animations are merged with name-based node remapping; same animation name across mods: last mod wins.
 6. **PKG merge** — collects all custom textures from all mods and builds a single `CG3H-Merged-<Character>.pkg`
 
 **Output:** `plugins_data/CG3H-Merged-<Character>/` containing the merged GPK, merged PKG, and merged Lua companion. H2M loads this as a single mod.

@@ -119,9 +119,9 @@ Replace or modify specific animation curves on a character.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `patch` | bool | yes | Must be `true` to enable animation patching |
-| `filter` | string | no | Substring filter selecting which animations to patch. If omitted, all animations in the GLB are patched. |
+| `filter` | string | no | Substring filter for **export** — reduces GLB size by only exporting matching animations. At build time, the GLB contents are the sole authority on which animations are patched (no import-side filtering). |
 
-**Build**: Loads original GPK, matches GLB animations to GR2 animations (filtered if set), patches curve data, outputs modified GPK.
+**Build**: Loads original GPK, matches GLB animations to GR2 animations by name, patches curve data, outputs modified GPK. Only animations present in the GLB are patched — no filter needed at build time.
 
 **CC-free**: Only the GLB (containing modified curves) is shipped.
 
@@ -235,7 +235,7 @@ When multiple mods target the same character, CG3H detects conflicts per-operati
 | Mod A | Mod B | Conflict? | Resolution |
 |-------|-------|-----------|------------|
 | texture_replace (same texture) | texture_replace (same texture) | Yes | Priority order; higher wins |
-| mesh_add | mesh_add | No | Both appended |
+| mesh_add | mesh_add | No | Both appended (same names auto-prefixed with mod id) |
 | mesh_replace | mesh_replace (same meshes) | Yes | Mutually exclusive |
 | mesh_replace | mesh_add | Maybe | May need manual adjustment |
 | mesh_patch | texture_replace | No | Independent operations |

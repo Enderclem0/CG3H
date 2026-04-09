@@ -27,11 +27,10 @@ Build non-destructive mod packages for [Hell2Modding (H2M)](https://github.com/S
 | Multi-entry GPK (characters with multiple mesh entries) | Working |
 | Per-entry mesh routing (battle-only / hub-only meshes) | Working |
 | Skeleton merge across entries | Working |
-| Multi-mod animation merging | Not yet — v3.2 |
+| Multi-mod animation merging | Working |
 
 ## Known Limitations
 
-- **Multi-mod animation merge** — when multiple mods target the same character, only the first mod's animations are kept. Fix planned for v3.2.
 - **New mesh bone bindings** — new meshes inherit bone bindings from the best-matching existing mesh. If your mesh uses bones not in any existing mesh's bindings, weights fall back to root. Bone binding expansion planned for v4.0.
 - **65,535 vertices max per mesh** — the engine uses uint16 index buffers.
 - **Adding/removing bones** is not supported — the skeleton is read-only.
