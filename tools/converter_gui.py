@@ -394,6 +394,10 @@ class App:
         ttk.Checkbutton(top, text="Install to r2modman after build",
                         variable=self._build_install_r2).pack(anchor=tk.W, pady=(0, 6))
 
+        # New mesh entry routing (populated when mod workspace is scanned)
+        self._build_routing_frame = ttk.LabelFrame(top, text="New Mesh Entry Routing", padding=4)
+        self._build_routing_vars = {}  # {mesh_name: {entry_name: BooleanVar}}
+
         # Build button + status
         btn_row = ttk.Frame(top)
         btn_row.pack(fill=tk.X, pady=(4, 0))
@@ -462,6 +466,46 @@ class App:
         if not self._build_running:
             self._build_btn.config(state=tk.NORMAL)
 
+        # Detect new meshes for entry routing
+        self._build_routing_frame.pack_forget()
+        for w in self._build_routing_frame.winfo_children():
+            w.destroy()
+        self._build_routing_vars.clear()
+
+        manifest_path = os.path.join(p, "manifest.json")
+        glb_name = m.get("assets", {}).get("glb", "")
+        glb_path = os.path.join(p, glb_name) if glb_name else ""
+        mesh_entries = m.get("target", {}).get("mesh_entries", [])
+
+        if len(mesh_entries) > 1 and os.path.isfile(manifest_path) and os.path.isfile(glb_path):
+            try:
+                with open(manifest_path) as f:
+                    manifest = json.load(f)
+                manifest_mesh_names = {mm["name"] for mm in manifest.get("meshes", [])}
+
+                import pygltflib
+                gltf = pygltflib.GLTF2().load(glb_path)
+                new_meshes = [m.name for m in gltf.meshes if m.name not in manifest_mesh_names]
+
+                if new_meshes:
+                    self._build_routing_frame.pack(fill=tk.X, pady=(4, 0))
+                    # Load existing routing from mod.json
+                    existing_routing = m.get("target", {}).get("new_mesh_routing", {})
+
+                    for mesh_name in new_meshes:
+                        mesh_frame = ttk.LabelFrame(self._build_routing_frame,
+                                                     text=mesh_name, padding=2)
+                        mesh_frame.pack(fill=tk.X, pady=(0, 2))
+                        self._build_routing_vars[mesh_name] = {}
+                        existing = existing_routing.get(mesh_name, mesh_entries)
+                        for entry in mesh_entries:
+                            var = tk.BooleanVar(value=(entry in existing))
+                            self._build_routing_vars[mesh_name][entry] = var
+                            ttk.Checkbutton(mesh_frame, text=entry,
+                                            variable=var).pack(side=tk.LEFT, padx=4)
+            except Exception:
+                pass
+
     def _build_mod(self):
         if cg3h_build is None:
             messagebox.showerror(
@@ -484,20 +528,33 @@ class App:
         self._config["author"] = author
         self._save_config()
 
-        # Update mod.json with current mod name + author before building
+        # Update mod.json with current mod name, author, and routing before building
         mod_name = self._build_mod_name.get().strip()
-        if mod_name or author:
-            try:
-                mod_json_path = os.path.join(mod_dir, "mod.json")
-                with open(mod_json_path) as f:
-                    m = json.load(f)
-                if mod_name:
-                    m.setdefault("metadata", {})["name"] = mod_name
-                m.setdefault("metadata", {})["author"] = author
-                with open(mod_json_path, 'w') as f:
-                    json.dump(m, f, indent=2)
-            except Exception:
-                pass
+        try:
+            mod_json_path = os.path.join(mod_dir, "mod.json")
+            with open(mod_json_path) as f:
+                m = json.load(f)
+            if mod_name:
+                m.setdefault("metadata", {})["name"] = mod_name
+            m.setdefault("metadata", {})["author"] = author
+
+            # Write new_mesh_routing from GUI checkboxes
+            if self._build_routing_vars:
+                mesh_entries = m.get("target", {}).get("mesh_entries", [])
+                routing = {}
+                for mesh_name, entry_vars in self._build_routing_vars.items():
+                    selected = [e for e, v in entry_vars.items() if v.get()]
+                    if selected and set(selected) != set(mesh_entries):
+                        routing[mesh_name] = selected
+                if routing:
+                    m.setdefault("target", {})["new_mesh_routing"] = routing
+                elif "new_mesh_routing" in m.get("target", {}):
+                    del m["target"]["new_mesh_routing"]
+
+            with open(mod_json_path, 'w') as f:
+                json.dump(m, f, indent=2)
+        except Exception:
+            pass
 
         self._log_clear(self._build_log)
         self._build_running = True
