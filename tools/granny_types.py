@@ -30,7 +30,10 @@ import sys
 # Low-level memory helpers
 # ---------------------------------------------------------------------------
 
-_kernel32 = ctypes.windll.kernel32
+try:
+    _kernel32 = ctypes.windll.kernel32
+except AttributeError:
+    _kernel32 = None
 
 
 def _valid_ptr(p):

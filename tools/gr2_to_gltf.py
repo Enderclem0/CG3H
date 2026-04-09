@@ -142,7 +142,10 @@ def load_gr2(dll, gr2_bytes, sdb_bytes):
 
 # ─────────────────────────── Struct reading helpers ──────────────────────────
 
-_kernel32 = ctypes.windll.kernel32
+try:
+    _kernel32 = ctypes.windll.kernel32
+except AttributeError:
+    _kernel32 = None
 
 def _valid_ptr(p):
     return isinstance(p, int) and 0x10000 <= p <= 0x7FFFFFFFFFFF
@@ -1473,6 +1476,63 @@ def _extract_all_textures(pkg_dir, texture_names):
                     print(f"  Found: {t['name']} ({t['width']}x{t['height']} "
                           f"fmt=0x{t['format']:X} {src}) in {', '.join(all_pkgs)}")
 
+    # Fallback: if textures still missing and we used an index, try full scan
+    if remaining and tex_index is not None:
+        print(f"  Index miss — scanning all .pkg files for: {list(remaining.keys())}")
+        fallback_targets = {}
+        pkg_files = sorted(os.path.join(pkg_dir, f) for f in os.listdir(pkg_dir)
+                          if f.endswith('.pkg') and os.path.isfile(os.path.join(pkg_dir, f)))
+        for p in pkg_files:
+            fallback_targets.setdefault(p, set()).update(remaining.keys())
+
+        remaining_before = set(remaining.keys())
+        for pkg_path, search_names in fallback_targets.items():
+            if not remaining:
+                break
+            try:
+                chunks, _, _ = read_pkg_chunks(pkg_path)
+            except Exception:
+                continue
+            all_textures = scan_textures(chunks)
+            for t in all_textures:
+                if not remaining:
+                    break
+                fn_lower = t['name'].lower().replace('\\', '/').split('/')[-1]
+                fn_base = fn_lower.rsplit('.', 1)[0] if '.' in fn_lower else fn_lower
+                matched_key = None
+                for sn in search_names:
+                    if sn in remaining and fn_base == sn:
+                        matched_key = sn
+                        break
+                if matched_key:
+                    ci = t['chunk_idx']
+                    chunk = chunks[ci][0]
+                    pixel_data = chunk[t['data_offset']:t['data_offset'] + t['pixel_size']]
+                    dds_header = build_dds_header(t['width'], t['height'], t['format'], t['pixel_size'])
+                    png_bytes = _decode_texture_to_png(pixel_data, t['width'], t['height'], t['format'])
+                    if png_bytes:
+                        orig_name = remaining.pop(matched_key)
+                        pkg_name = os.path.basename(pkg_path)
+                        results[orig_name] = {
+                            'png': png_bytes, 'dds': dds_header + pixel_data,
+                            'pkg': pkg_name, 'pkgs': [pkg_name],
+                            'pkg_entry_name': t['name'], 'format': t['format'],
+                            'format_name': t.get('format_name', ''),
+                            'width': t['width'], 'height': t['height'],
+                            'pixel_size': t['pixel_size'], 'mip_count': t.get('mip_count', 1),
+                        }
+                        print(f"  Found (fallback): {t['name']} in {pkg_name}")
+
+        # Delete stale index if fallback found textures the index missed
+        if remaining_before - set(remaining.keys()):
+            idx_path = os.path.join(pkg_dir, '_texture_index.json')
+            if os.path.isfile(idx_path):
+                print(f"  Removing stale texture index")
+                try:
+                    os.remove(idx_path)
+                except OSError:
+                    pass
+
     return results
 
 
@@ -1793,8 +1853,7 @@ def main():
         print(f"[*] Extracting 3D model textures", flush=True)
         pkg_dir = args.pkg_dir
         if pkg_dir is None:
-            gpk_dir_clean = args.gpk_dir.rstrip("/\\")
-            content_dir = os.path.dirname(os.path.dirname(gpk_dir_clean))
+            content_dir = os.path.dirname(os.path.dirname(os.path.abspath(args.gpk_dir)))
             pkg_dir = os.path.join(content_dir, "Packages", "1080p")
 
         if os.path.isdir(pkg_dir):

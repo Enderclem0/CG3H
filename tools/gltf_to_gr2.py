@@ -594,7 +594,10 @@ def build_vertex_buffer_40(m: dict, fallback_normals: np.ndarray = None) -> byte
 
 # ── Granny DLL setup ──────────────────────────────────────────────────────────
 
-_kernel32 = ctypes.windll.kernel32
+try:
+    _kernel32 = ctypes.windll.kernel32
+except AttributeError:
+    _kernel32 = None
 
 
 def _valid_ptr(p):
