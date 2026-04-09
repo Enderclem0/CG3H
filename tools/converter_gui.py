@@ -443,14 +443,31 @@ class App:
         character = m.get("target", {}).get("character", m.get("character", "?"))
         version = meta.get("version", m.get("version", "?"))
 
-        # Populate mod name and author fields from mod.json
+        # Populate mod name from mod.json, author from saved preference
         if name and name != "?":
             self._build_mod_name.set(name)
-        if author and author != "?":
+        saved_author = self._config.get("author", "")
+        if saved_author:
+            self._build_author.set(saved_author)
+        elif author and author != "?":
             self._build_author.set(author)
 
-        # Detect operations if cg3h_build is available
+        # Detect operations — run auto-detection to get accurate type
+        # (mod.json may have stale type from initial create)
+        if cg3h_build and hasattr(cg3h_build, "_sync_mod_json"):
+            try:
+                cg3h_build._sync_mod_json(p)
+                # Re-read after sync
+                with open(mod_json_path) as f:
+                    m = json.load(f)
+                meta = m.get("metadata", {})
+                mod_type = m.get("type", "?")
+            except Exception:
+                pass
+
         ops_str = mod_type
+        if isinstance(mod_type, list):
+            ops_str = ", ".join(mod_type)
         if cg3h_build and hasattr(cg3h_build, "_infer_operations"):
             try:
                 ops = cg3h_build._infer_operations(m)
@@ -459,8 +476,11 @@ class App:
             except Exception:
                 pass
 
+        # Show what will actually be built
+        display_name = self._build_mod_name.get() or name
+        display_author = self._build_author.get() or author
         self._build_info.config(
-            text=f'"{name}" by {author}  |  {character}  |  {ops_str}  |  v{version}',
+            text=f'"{display_name}" by {display_author}  |  {character}  |  {ops_str}  |  v{version}',
             foreground="#555",
         )
         if not self._build_running:
