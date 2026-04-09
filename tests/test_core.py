@@ -480,5 +480,229 @@ def _run_all():
     return failed
 
 
+# ── v3.1 Multi-entry tests ──────────────────────────────────────────────────
+
+def test_skeleton_merge_unique_bones():
+    """Skeleton merge should add bones not in the base skeleton."""
+    # Simulate the merge logic from gr2_to_gltf.py
+    base_bones = [
+        {'name': 'root', 'parent': -1, 'translation': (0,0,0), 'rotation': (0,0,0,1), 'inv_world': tuple(range(16))},
+        {'name': 'spine', 'parent': 0, 'translation': (0,1,0), 'rotation': (0,0,0,1), 'inv_world': tuple(range(16))},
+        {'name': 'head', 'parent': 1, 'translation': (0,2,0), 'rotation': (0,0,0,1), 'inv_world': tuple(range(16))},
+    ]
+    base_name_to_idx = {b['name']: i for i, b in enumerate(base_bones)}
+
+    entry2_bones = [
+        {'name': 'root', 'parent': -1, 'translation': (0,0,0), 'rotation': (0,0,0,1), 'inv_world': tuple(range(16))},
+        {'name': 'hat_bone', 'parent': 0, 'translation': (0,3,0), 'rotation': (0,0,0,1), 'inv_world': tuple(range(16))},
+    ]
+
+    # Merge (same logic as gr2_to_gltf.py)
+    bones = list(base_bones)
+    bone_name_to_idx = dict(base_name_to_idx)
+    for bone in entry2_bones:
+        if bone['name'] not in bone_name_to_idx:
+            new_parent = -1
+            if bone['parent'] >= 0 and bone['parent'] < len(entry2_bones):
+                parent_name = entry2_bones[bone['parent']]['name']
+                new_parent = bone_name_to_idx.get(parent_name, -1)
+            new_bone = dict(bone, parent=new_parent)
+            bone_name_to_idx[bone['name']] = len(bones)
+            bones.append(new_bone)
+
+    assert len(bones) == 4  # root, spine, head, hat_bone
+    assert bone_name_to_idx['hat_bone'] == 3
+    assert bones[3]['name'] == 'hat_bone'
+    assert bones[3]['parent'] == 0  # root remapped to index 0
+
+
+def test_skeleton_merge_no_duplicates():
+    """Skeleton merge should not duplicate existing bones."""
+    base_bones = [
+        {'name': 'root', 'parent': -1, 'translation': (0,0,0), 'rotation': (0,0,0,1), 'inv_world': tuple(range(16))},
+        {'name': 'spine', 'parent': 0, 'translation': (0,1,0), 'rotation': (0,0,0,1), 'inv_world': tuple(range(16))},
+    ]
+    base_name_to_idx = {b['name']: i for i, b in enumerate(base_bones)}
+
+    # Same bones in second entry
+    entry2_bones = [
+        {'name': 'root', 'parent': -1, 'translation': (0,0,0), 'rotation': (0,0,0,1), 'inv_world': tuple(range(16))},
+        {'name': 'spine', 'parent': 0, 'translation': (0,1,0), 'rotation': (0,0,0,1), 'inv_world': tuple(range(16))},
+    ]
+
+    bones = list(base_bones)
+    bone_name_to_idx = dict(base_name_to_idx)
+    for bone in entry2_bones:
+        if bone['name'] not in bone_name_to_idx:
+            bone_name_to_idx[bone['name']] = len(bones)
+            bones.append(bone)
+
+    assert len(bones) == 2  # No duplicates added
+
+
+def test_skeleton_merge_parent_remap():
+    """Skeleton merge should remap parent indices to the merged list."""
+    base_bones = [
+        {'name': 'root', 'parent': -1, 'translation': (0,0,0), 'rotation': (0,0,0,1), 'inv_world': tuple(range(16))},
+    ]
+    base_name_to_idx = {'root': 0}
+
+    # Entry2 has a chain: root -> arm -> hand (but root already in base)
+    entry2_bones = [
+        {'name': 'root', 'parent': -1, 'translation': (0,0,0), 'rotation': (0,0,0,1), 'inv_world': tuple(range(16))},
+        {'name': 'arm', 'parent': 0, 'translation': (1,0,0), 'rotation': (0,0,0,1), 'inv_world': tuple(range(16))},
+        {'name': 'hand', 'parent': 1, 'translation': (2,0,0), 'rotation': (0,0,0,1), 'inv_world': tuple(range(16))},
+    ]
+
+    bones = list(base_bones)
+    bone_name_to_idx = dict(base_name_to_idx)
+    for bone in entry2_bones:
+        if bone['name'] not in bone_name_to_idx:
+            new_parent = -1
+            if bone['parent'] >= 0 and bone['parent'] < len(entry2_bones):
+                parent_name = entry2_bones[bone['parent']]['name']
+                new_parent = bone_name_to_idx.get(parent_name, -1)
+            new_bone = dict(bone, parent=new_parent)
+            bone_name_to_idx[bone['name']] = len(bones)
+            bones.append(new_bone)
+
+    assert len(bones) == 3  # root, arm, hand
+    assert bones[1]['name'] == 'arm'
+    assert bones[1]['parent'] == 0  # root is at index 0 in merged
+    assert bones[2]['name'] == 'hand'
+    assert bones[2]['parent'] == 1  # arm is at index 1 in merged
+
+
+def test_routing_with_manifest():
+    """Manifest routes meshes to their source entries."""
+    from gltf_to_gr2 import _build_entry_routing
+
+    manifest = {
+        'meshes': [
+            {'name': 'BattleMesh', 'entry': 'Battle_Mesh'},
+            {'name': 'HubMesh', 'entry': 'Hub_Mesh'},
+        ]
+    }
+    glb_meshes = [
+        {'name': 'BattleMesh'},
+        {'name': 'HubMesh'},
+    ]
+    entries = ['Battle_Mesh', 'Hub_Mesh']
+    routing = _build_entry_routing(manifest, glb_meshes, entries)
+
+    assert len(routing['Battle_Mesh']) == 1
+    assert routing['Battle_Mesh'][0]['name'] == 'BattleMesh'
+    assert len(routing['Hub_Mesh']) == 1
+    assert routing['Hub_Mesh'][0]['name'] == 'HubMesh'
+
+
+def test_routing_without_manifest():
+    """Without manifest, all meshes go to first entry."""
+    from gltf_to_gr2 import _build_entry_routing
+
+    glb_meshes = [{'name': 'A'}, {'name': 'B'}]
+    entries = ['First_Mesh', 'Second_Mesh']
+    routing = _build_entry_routing(None, glb_meshes, entries)
+
+    assert len(routing['First_Mesh']) == 2
+    assert len(routing['Second_Mesh']) == 0
+
+
+def test_routing_new_mesh_all_entries():
+    """New meshes (not in manifest) go to all entries by default."""
+    from gltf_to_gr2 import _build_entry_routing
+
+    manifest = {
+        'meshes': [
+            {'name': 'Existing', 'entry': 'Battle_Mesh'},
+        ]
+    }
+    glb_meshes = [
+        {'name': 'Existing'},
+        {'name': 'NewGlasses'},
+    ]
+    entries = ['Battle_Mesh', 'Hub_Mesh']
+    routing = _build_entry_routing(manifest, glb_meshes, entries)
+
+    assert len(routing['Battle_Mesh']) == 2  # Existing + NewGlasses
+    assert len(routing['Hub_Mesh']) == 1     # NewGlasses only
+    assert routing['Hub_Mesh'][0]['name'] == 'NewGlasses'
+
+
+def test_routing_new_mesh_targeted():
+    """New meshes with routing go to specified entries only."""
+    from gltf_to_gr2 import _build_entry_routing
+
+    manifest = {'meshes': []}
+    glb_meshes = [{'name': 'Glasses'}]
+    entries = ['Battle_Mesh', 'Hub_Mesh']
+    routing = _build_entry_routing(manifest, glb_meshes, entries,
+                                   new_mesh_routing={'Glasses': ['Battle_Mesh']})
+
+    assert len(routing['Battle_Mesh']) == 1
+    assert len(routing['Hub_Mesh']) == 0
+
+
+def test_merge_manifests_union():
+    """Merged manifest contains union of entries and meshes."""
+    from cg3h_builder_entry import _merge_manifests
+
+    tmpdir = tempfile.mkdtemp()
+    try:
+        m1_path = os.path.join(tmpdir, 'mod1', 'manifest.json')
+        m2_path = os.path.join(tmpdir, 'mod2', 'manifest.json')
+        os.makedirs(os.path.dirname(m1_path))
+        os.makedirs(os.path.dirname(m2_path))
+
+        with open(m1_path, 'w') as f:
+            json.dump({'mesh_entries': ['Battle_Mesh'], 'meshes': [
+                {'name': 'BattleMesh', 'entry': 'Battle_Mesh', 'gr2_index': 0}
+            ]}, f)
+        with open(m2_path, 'w') as f:
+            json.dump({'mesh_entries': ['Hub_Mesh'], 'meshes': [
+                {'name': 'HubMesh', 'entry': 'Hub_Mesh', 'gr2_index': 0}
+            ]}, f)
+
+        char_mods = [
+            {'manifest_path': m1_path},
+            {'manifest_path': m2_path},
+        ]
+        merged = _merge_manifests(char_mods)
+
+        assert merged is not None
+        assert set(merged['mesh_entries']) == {'Battle_Mesh', 'Hub_Mesh'}
+        assert len(merged['meshes']) == 2
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_merge_manifests_no_duplicates():
+    """Same mesh from two manifests appears only once."""
+    from cg3h_builder_entry import _merge_manifests
+
+    tmpdir = tempfile.mkdtemp()
+    try:
+        m1_path = os.path.join(tmpdir, 'mod1', 'manifest.json')
+        m2_path = os.path.join(tmpdir, 'mod2', 'manifest.json')
+        os.makedirs(os.path.dirname(m1_path))
+        os.makedirs(os.path.dirname(m2_path))
+
+        mesh = {'name': 'SharedMesh', 'entry': 'Body_Mesh', 'gr2_index': 0}
+        with open(m1_path, 'w') as f:
+            json.dump({'mesh_entries': ['Body_Mesh'], 'meshes': [mesh]}, f)
+        with open(m2_path, 'w') as f:
+            json.dump({'mesh_entries': ['Body_Mesh'], 'meshes': [mesh]}, f)
+
+        merged = _merge_manifests([
+            {'manifest_path': m1_path},
+            {'manifest_path': m2_path},
+        ])
+
+        assert len(merged['meshes']) == 1
+        assert len(merged['mesh_entries']) == 1
+    finally:
+        shutil.rmtree(tmpdir)
+
+
 if __name__ == '__main__':
     sys.exit(_run_all())

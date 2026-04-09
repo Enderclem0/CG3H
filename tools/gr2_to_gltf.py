@@ -142,7 +142,10 @@ def load_gr2(dll, gr2_bytes, sdb_bytes):
 
 # ─────────────────────────── Struct reading helpers ──────────────────────────
 
-_kernel32 = ctypes.windll.kernel32
+try:
+    _kernel32 = ctypes.windll.kernel32
+except AttributeError:
+    _kernel32 = None
 
 def _valid_ptr(p):
     return isinstance(p, int) and 0x10000 <= p <= 0x7FFFFFFFFFFF
@@ -1328,13 +1331,20 @@ def _read_mesh_texture_map(fi, debug=False):
     return mesh_tex, unique_textures
 
 
+_TEXTURE_DECODE_WARNING_SHOWN = False
+
 def _decode_texture_to_png(pixel_data, tw, th, fmt):
     """Decode raw pixel data to PNG bytes. Returns PNG bytes or None."""
+    global _TEXTURE_DECODE_WARNING_SHOWN
     import io
     try:
         import texture2ddecoder
         from PIL import Image
     except ImportError:
+        if not _TEXTURE_DECODE_WARNING_SHOWN:
+            _TEXTURE_DECODE_WARNING_SHOWN = True
+            print("  ERROR: texture2ddecoder or Pillow not installed.")
+            print("  Run: pip install texture2ddecoder Pillow")
         return None
 
     img = None
@@ -1465,6 +1475,63 @@ def _extract_all_textures(pkg_dir, texture_names):
                     src = "atlas" if t.get('atlas') else "tex2d"
                     print(f"  Found: {t['name']} ({t['width']}x{t['height']} "
                           f"fmt=0x{t['format']:X} {src}) in {', '.join(all_pkgs)}")
+
+    # Fallback: if textures still missing and we used an index, try full scan
+    if remaining and tex_index is not None:
+        print(f"  Index miss — scanning all .pkg files for: {list(remaining.keys())}")
+        fallback_targets = {}
+        pkg_files = sorted(os.path.join(pkg_dir, f) for f in os.listdir(pkg_dir)
+                          if f.endswith('.pkg') and os.path.isfile(os.path.join(pkg_dir, f)))
+        for p in pkg_files:
+            fallback_targets.setdefault(p, set()).update(remaining.keys())
+
+        remaining_before = set(remaining.keys())
+        for pkg_path, search_names in fallback_targets.items():
+            if not remaining:
+                break
+            try:
+                chunks, _, _ = read_pkg_chunks(pkg_path)
+            except Exception:
+                continue
+            all_textures = scan_textures(chunks)
+            for t in all_textures:
+                if not remaining:
+                    break
+                fn_lower = t['name'].lower().replace('\\', '/').split('/')[-1]
+                fn_base = fn_lower.rsplit('.', 1)[0] if '.' in fn_lower else fn_lower
+                matched_key = None
+                for sn in search_names:
+                    if sn in remaining and fn_base == sn:
+                        matched_key = sn
+                        break
+                if matched_key:
+                    ci = t['chunk_idx']
+                    chunk = chunks[ci][0]
+                    pixel_data = chunk[t['data_offset']:t['data_offset'] + t['pixel_size']]
+                    dds_header = build_dds_header(t['width'], t['height'], t['format'], t['pixel_size'])
+                    png_bytes = _decode_texture_to_png(pixel_data, t['width'], t['height'], t['format'])
+                    if png_bytes:
+                        orig_name = remaining.pop(matched_key)
+                        pkg_name = os.path.basename(pkg_path)
+                        results[orig_name] = {
+                            'png': png_bytes, 'dds': dds_header + pixel_data,
+                            'pkg': pkg_name, 'pkgs': [pkg_name],
+                            'pkg_entry_name': t['name'], 'format': t['format'],
+                            'format_name': t.get('format_name', ''),
+                            'width': t['width'], 'height': t['height'],
+                            'pixel_size': t['pixel_size'], 'mip_count': t.get('mip_count', 1),
+                        }
+                        print(f"  Found (fallback): {t['name']} in {pkg_name}")
+
+        # Delete stale index if fallback found textures the index missed
+        if remaining_before - set(remaining.keys()):
+            idx_path = os.path.join(pkg_dir, '_texture_index.json')
+            if os.path.isfile(idx_path):
+                print(f"  Removing stale texture index")
+                try:
+                    os.remove(idx_path)
+                except OSError:
+                    pass
 
     return results
 
@@ -1667,9 +1734,8 @@ def main():
             print(f"  {k} ({len(v):,} bytes){tag}")
         sys.exit(0)
 
-    # Select mesh entry to export.
-    # Default: body entry ({Character}_Mesh).  Multi-entry export is available
-    # via --mesh-entry but the importer currently only patches the body entry.
+    # Select mesh entries to export.
+    # Default: all _Mesh entries.  Use --mesh-entry to filter to specific entries.
     if not all_mesh_keys:
         print(f"ERROR: No _Mesh entry found. Available: {list(entries.keys())[:10]}")
         sys.exit(1)
@@ -1690,17 +1756,10 @@ def main():
             print(f"ERROR: No matching mesh entries. Available: {all_mesh_keys}")
             sys.exit(1)
     else:
-        # Default: body entry only ({Character}_Mesh)
-        char_name = os.path.splitext(os.path.basename(gpk_path))[0]
-        body_entry = f"{char_name}_Mesh"
-        if body_entry in all_mesh_keys:
-            mesh_keys = [body_entry]
-        else:
-            mesh_keys = [all_mesh_keys[0]]
-        if len(all_mesh_keys) > 1:
-            print(f"  Multi-entry GPK: {all_mesh_keys}")
-            print(f"  Exporting body entry only: {mesh_keys[0]}")
-            print(f"  Use --mesh-entry to export other entries")
+        # Default: all mesh entries
+        mesh_keys = list(all_mesh_keys)
+        if len(mesh_keys) > 1:
+            print(f"  Multi-entry GPK: {mesh_keys}")
 
     print(f"[2/5] Loading SDB: {sdb_path}")
     with open(sdb_path, 'rb') as f:
@@ -1725,10 +1784,27 @@ def main():
         gr2_file, sdb_file, cur_fi, _keep = load_gr2(dll, gr2_bytes, sdb_bytes)
         _all_keeps.append((gr2_file, sdb_file, _keep))
 
-        # Read skeleton from first entry only
+        # Merge skeleton: first entry provides base, subsequent entries add missing bones
+        entry_bones, entry_name_to_idx = read_skeleton(cur_fi)
         if bones is None:
-            bones, bone_name_to_idx = read_skeleton(cur_fi)
+            bones = list(entry_bones)
+            bone_name_to_idx = dict(entry_name_to_idx)
             print(f"  Skeleton: {len(bones)} bones")
+        else:
+            added = 0
+            for bone in entry_bones:
+                if bone['name'] not in bone_name_to_idx:
+                    # Remap parent index to the merged list
+                    new_parent = -1
+                    if bone['parent'] >= 0 and bone['parent'] < len(entry_bones):
+                        parent_name = entry_bones[bone['parent']]['name']
+                        new_parent = bone_name_to_idx.get(parent_name, -1)
+                    new_bone = dict(bone, parent=new_parent)
+                    bone_name_to_idx[bone['name']] = len(bones)
+                    bones.append(new_bone)
+                    added += 1
+            if added:
+                print(f"  Merged {added} new bone(s) from {mesh_key} (total: {len(bones)})")
 
         # Get per-mesh texture map for THIS entry
         entry_tex_map, _ = _read_mesh_texture_map(cur_fi, debug=args.debug)
@@ -1777,7 +1853,7 @@ def main():
         print(f"[*] Extracting 3D model textures", flush=True)
         pkg_dir = args.pkg_dir
         if pkg_dir is None:
-            content_dir = os.path.dirname(os.path.dirname(args.gpk_dir))
+            content_dir = os.path.dirname(os.path.dirname(os.path.abspath(args.gpk_dir)))
             pkg_dir = os.path.join(content_dir, "Packages", "1080p")
 
         if os.path.isdir(pkg_dir):

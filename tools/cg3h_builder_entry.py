@@ -19,7 +19,35 @@ if _dir not in sys.path:
 if sys.stdout and sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
-from cg3h_constants import STEAM_PATHS
+from cg3h_constants import STEAM_PATHS, find_game_path as _find_game_path
+
+
+def _merge_manifests(char_mods):
+    """Merge manifest.json from all mods targeting the same character.
+
+    Returns combined manifest dict with union of mesh entries and mesh mappings,
+    or None if no manifests exist.
+    """
+    merged = {'meshes': [], 'mesh_entries': []}
+    seen_meshes = set()
+    seen_entries = set()
+
+    for mod_info in char_mods:
+        mp = mod_info.get('manifest_path', '')
+        if not mp or not os.path.isfile(mp):
+            continue
+        with open(mp) as f:
+            m = json.load(f)
+        for entry in m.get('mesh_entries', []):
+            if entry not in seen_entries:
+                merged['mesh_entries'].append(entry)
+                seen_entries.add(entry)
+        for mesh in m.get('meshes', []):
+            if mesh['name'] not in seen_meshes:
+                merged['meshes'].append(mesh)
+                seen_meshes.add(mesh['name'])
+
+    return merged if merged['meshes'] else None
 
 
 def _merge_glbs(char_mods, output_dir, character):
@@ -44,8 +72,10 @@ def _merge_glbs(char_mods, output_dir, character):
 
         # Copy images/textures/materials FIRST so we know the material offset
         mat_offset = len(base_gltf.materials or [])
+        img_offset = len(base_gltf.images or [])
+        tex_offset = len(base_gltf.textures or [])
+
         if other_gltf.images:
-            img_offset = len(base_gltf.images or [])
             for img in other_gltf.images:
                 if img.bufferView is not None:
                     bv = other_gltf.bufferViews[img.bufferView]
@@ -61,22 +91,22 @@ def _merge_glbs(char_mods, output_dir, character):
                     base_gltf.images = []
                 base_gltf.images.append(new_img)
 
-            tex_offset = len(base_gltf.textures or [])
             for tex in (other_gltf.textures or []):
                 new_tex = pygltflib.Texture(source=tex.source + img_offset if tex.source is not None else None)
                 if base_gltf.textures is None:
                     base_gltf.textures = []
                 base_gltf.textures.append(new_tex)
 
-            for mat in (other_gltf.materials or []):
-                new_mat = pygltflib.Material(name=mat.name)
-                if mat.pbrMetallicRoughness and mat.pbrMetallicRoughness.baseColorTexture:
-                    new_mat.pbrMetallicRoughness = pygltflib.PbrMetallicRoughness(
-                        baseColorTexture=pygltflib.TextureInfo(
-                            index=mat.pbrMetallicRoughness.baseColorTexture.index + tex_offset))
-                if base_gltf.materials is None:
-                    base_gltf.materials = []
-                base_gltf.materials.append(new_mat)
+        # Materials copied outside the images block — untextured materials are valid
+        for mat in (other_gltf.materials or []):
+            new_mat = pygltflib.Material(name=mat.name)
+            if mat.pbrMetallicRoughness and mat.pbrMetallicRoughness.baseColorTexture:
+                new_mat.pbrMetallicRoughness = pygltflib.PbrMetallicRoughness(
+                    baseColorTexture=pygltflib.TextureInfo(
+                        index=mat.pbrMetallicRoughness.baseColorTexture.index + tex_offset))
+            if base_gltf.materials is None:
+                base_gltf.materials = []
+            base_gltf.materials.append(new_mat)
 
         # Now copy new meshes with correct material remapping
         for mesh in other_gltf.meshes:
@@ -172,10 +202,7 @@ def _merge_glbs(char_mods, output_dir, character):
 
 
 def find_game_dir():
-    for p in STEAM_PATHS:
-        if os.path.isdir(p):
-            return p
-    return None
+    return _find_game_path() or None
 
 
 def build_gpk(mod_dir, game_dir=None):
@@ -224,6 +251,7 @@ def build_gpk(mod_dir, game_dir=None):
     patch_anims = 'animation_patch' in types
     anim_cfg = mod.get('assets', {}).get('animations', {})
     anim_filter = anim_cfg.get('filter') if isinstance(anim_cfg, dict) else None
+    new_mesh_routing = mod.get('target', {}).get('new_mesh_routing')
 
     print(f"Building GPK: {character}")
     print(f"  GLB: {glb_path}")
@@ -241,6 +269,7 @@ def build_gpk(mod_dir, game_dir=None):
             allow_topology_change=allow_topo,
             patch_animations=patch_anims,
             anim_patch_filter=anim_filter,
+            new_mesh_routing=new_mesh_routing,
         )
         print(f"  Output: {output_gpk}")
         return True
@@ -380,19 +409,25 @@ def scan_and_build_all(plugins_data_dir, game_dir=None):
         # Merge all GLBs into one temp GLB, then build once.
         # This avoids the double-serialize problem where custom MaterialBindings
         # get lost across multiple convert() calls.
-        merged_glb = _merge_glbs(char_mods, builder_dir, character)
+        try:
+            merged_glb = _merge_glbs(char_mods, builder_dir, character)
+        except Exception as e:
+            print(f"  {character}: ERROR — GLB merge failed: {e}")
+            failed += 1
+            continue
         if not merged_glb:
-            print(f"  {character}: ERROR — GLB merge failed")
+            print(f"  {character}: ERROR — GLB merge returned no output")
             failed += 1
             continue
 
         # Use first mod's manifest (for mesh name routing)
         manifest = char_mods[0]['manifest_path']
 
-        # Collect operations from all mods
+        # Collect operations and routing from all mods
         allow_topo = False
         patch_anims = False
         anim_filter = None
+        merged_routing = {}
         for mod_info in char_mods:
             mod = mod_info['mod']
             mod_type = mod.get('type', '')
@@ -404,6 +439,13 @@ def scan_and_build_all(plugins_data_dir, game_dir=None):
                 anim_cfg = mod.get('assets', {}).get('animations', {})
                 if isinstance(anim_cfg, dict) and anim_cfg.get('filter'):
                     anim_filter = anim_cfg['filter']
+            # Merge new_mesh_routing from all mods
+            routing = mod.get('target', {}).get('new_mesh_routing', {})
+            for mesh_name, entries in routing.items():
+                merged_routing[mesh_name] = entries
+
+        # Phase 4: merge manifests from all mods
+        merged_manifest = _merge_manifests(char_mods)
 
         for mi in char_mods:
             print(f"    - {mi['id']}")
@@ -415,10 +457,11 @@ def scan_and_build_all(plugins_data_dir, game_dir=None):
                 sdb_path=sdb_path,
                 dll_path=dll_path,
                 output_gpk=output_gpk,
-                manifest_path=manifest if os.path.isfile(manifest) else None,
+                manifest_dict=merged_manifest,
                 allow_topology_change=allow_topo,
                 patch_animations=patch_anims,
                 anim_patch_filter=anim_filter,
+                new_mesh_routing=merged_routing or None,
             )
             ok = True
         except Exception as e:

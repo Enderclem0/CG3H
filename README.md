@@ -24,13 +24,15 @@ Build non-destructive mod packages for [Hell2Modding (H2M)](https://github.com/S
 | Runtime GPK building (no copyrighted data distributed) | Working |
 | Multi-mod merging (multiple mods on same character) | Working |
 | Blender addon (self-contained, Import/Export) | Working |
-| Multi-entry GPK (characters with multiple mesh entries) | Partial — first entry only |
-| Multi-mod animation merging | Not yet — v3.1 |
+| Multi-entry GPK (characters with multiple mesh entries) | Working |
+| Per-entry mesh routing (battle-only / hub-only meshes) | Working |
+| Skeleton merge across entries | Working |
+| Multi-mod animation merging | Not yet — v3.2 |
 
 ## Known Limitations
 
-- **Multi-entry characters** (e.g. Hecate with `HecateBattle_Mesh` + `HecateHub_Mesh`) — only the first mesh entry is patched. Other entries show the unmodified model. Fix planned for v3.1.
-- **Multi-mod animation merge** — when multiple mods target the same character, only the first mod's animations are kept. Fix planned for v3.1.
+- **Multi-mod animation merge** — when multiple mods target the same character, only the first mod's animations are kept. Fix planned for v3.2.
+- **New mesh bone bindings** — new meshes inherit bone bindings from the best-matching existing mesh. If your mesh uses bones not in any existing mesh's bindings, weights fall back to root. Bone binding expansion planned for v4.0.
 - **65,535 vertices max per mesh** — the engine uses uint16 index buffers.
 - **Adding/removing bones** is not supported — the skeleton is read-only.
 - **Animation export is slow** — characters have 600-850 clips. Use `--anim-filter` and `--anim-workers` to limit scope.
@@ -42,11 +44,11 @@ Build non-destructive mod packages for [Hell2Modding (H2M)](https://github.com/S
 For development / CLI usage:
 
 ```
-pip install numpy pygltflib lz4 Pillow etcpak xxhash
-pip install pyinstaller  # only needed to build cg3h_builder.exe
+pip install -r requirements.txt
+pip install pyinstaller  # only needed to build executables
 ```
 
-The game's `granny2_x64.dll` is required (auto-detected from Steam path).
+The game's `granny2_x64.dll` is required (auto-detected from Steam registry + `libraryfolders.vdf`).
 
 For end users: **no Python needed** — install the [CG3HBuilder](https://thunderstore.io/c/hades-ii/p/Enderclem/CG3HBuilder/) plugin via r2modman, which handles GPK building and texture loading at runtime.
 
@@ -63,8 +65,8 @@ python tools/converter_gui.py
 
 Three tabs:
 
-- **Create** — Pick a character, export to a mod workspace (GLB + textures + `mod.json`).
-- **Build** — Build a Thunderstore package (GLB + .pkg + manifest). One-click r2modman install.
+- **Create** — Pick a character, select mesh entries (checkboxes for multi-entry characters), export to a mod workspace.
+- **Build** — Set mod name + author, build Thunderstore package (GLB + .pkg + manifest). One-click r2modman install.
 - **Mods** — View installed CG3H mods, CG3HBuilder status, GPK build state.
 
 ### Building a mod from the CLI
@@ -114,8 +116,10 @@ Self-contained addon (55MB ZIP) — no Python dependencies needed.
 4. Set the game path in addon preferences
 
 Features:
-- **File > Import > Hades II Model (.gpk)** — import meshes, textures, and animations
-- **File > Export > Hades II Mod (CG3H)** — export as a complete mod (GLB + mod.json + Thunderstore ZIP)
+- **File > Import > Hades II Model (.gpk)** — import all mesh entries, textures, and animations
+- **File > Export > Hades II Mod (CG3H)** — export as a complete mod (GLB + mod.json + PKG + Thunderstore ZIP)
+- **CG3H sidebar panel** — assign new meshes to specific entries (e.g. battle-only, hub-only) for multi-entry characters
+- Game path auto-detected from Steam registry
 
 ## CLI Tools
 
@@ -200,24 +204,25 @@ docs/
 
 ### Export Pipeline
 
-1. LZ4-decompress `.gpk` entries to raw `.gr2` bytes
+1. LZ4-decompress all `_Mesh` entries from `.gpk`
 2. Load `.sdb`, remap strings via `GrannyRemapFileStrings`
 3. Walk Granny type definitions at runtime to discover struct offsets
-4. Apply 40-byte physical GPU stride (engine invariant)
-5. Walk material chains to find per-mesh texture names
-6. Extract textures from `.pkg` files as DDS; embed decoded PNG in GLB
-7. Pack geometry + skeleton + textures into glTF 2.0 binary
-8. Write `manifest.json` with entry mapping and texture metadata
+4. Merge skeletons across entries (union of all unique bones)
+5. Apply 40-byte physical GPU stride (engine invariant)
+6. Walk material chains to find per-mesh texture names
+7. Extract textures from `.pkg` files as DDS; embed decoded PNG in GLB (with stale cache fallback)
+8. Pack geometry + skeleton + textures into glTF 2.0 binary
+9. Write `manifest.json` with per-mesh entry mapping and texture metadata
 
 ### Import Pipeline
 
 1. Parse edited `.glb` (positions, normals, UVs, bone weights, indices)
-2. Load original `.gpk` + `.sdb` via the Granny DLL
-3. Match GLB meshes to GR2 meshes by name; route to correct entry via manifest
-4. Remap bone weights from GLB joint order to GR2 BoneBinding order
-5. Patch vertex/index buffers in DLL memory
+2. Load original `.gpk` + `.sdb` via the Granny DLL (SDB loaded once, shared across entries)
+3. Route GLB meshes to GR2 entries via manifest; new meshes routed via `new_mesh_routing` in mod.json
+4. For each entry: load GR2, patch vertex data, select template by bone overlap, serialize
+5. Remap bone weights from GLB joint order to GR2 BoneBinding order
 6. Recompute per-bone OBB for frustum culling
-7. Serialize via Granny write API, LZ4-compress into output `.gpk`
+7. LZ4-compress all entries into output `.gpk`
 
 ### Build Pipeline (`cg3h_build.py`)
 

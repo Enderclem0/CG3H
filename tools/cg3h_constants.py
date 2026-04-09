@@ -1,6 +1,14 @@
 """Shared constants for CG3H tools."""
+import os
+import re
 
-STEAM_PATHS = [
+CG3H_BUILDER_DEPENDENCY = "Enderclem-CG3HBuilder-3.0.0"
+H2M_DEPENDENCY = "Hell2Modding-Hell2Modding-0.2.0"
+
+HADES2_APP_ID = "1145350"
+
+# Hardcoded fallback paths (checked last)
+_FALLBACK_PATHS = [
     r"C:\Program Files (x86)\Steam\steamapps\common\Hades II",
     r"C:\Program Files\Steam\steamapps\common\Hades II",
     r"D:\Steam\steamapps\common\Hades II",
@@ -8,5 +16,83 @@ STEAM_PATHS = [
     r"E:\SteamLibrary\steamapps\common\Hades II",
 ]
 
-CG3H_BUILDER_DEPENDENCY = "Enderclem-CG3HBuilder-3.0.0"
-H2M_DEPENDENCY = "Hell2Modding-Hell2Modding-0.2.0"
+
+def _find_steam_root():
+    """Find Steam install path from the Windows registry."""
+    try:
+        import winreg
+        for hive, subkey in [
+            (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Valve\Steam"),
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam"),
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Valve\Steam"),
+        ]:
+            try:
+                key = winreg.OpenKey(hive, subkey)
+                for val_name in ("SteamPath", "InstallPath"):
+                    try:
+                        path, _ = winreg.QueryValueEx(key, val_name)
+                        if path and os.path.isdir(path):
+                            return path
+                    except OSError:
+                        continue
+            except OSError:
+                continue
+    except ImportError:
+        pass  # Not on Windows
+    return None
+
+
+def _parse_library_folders(steam_root):
+    """Parse libraryfolders.vdf to find all Steam library paths."""
+    vdf_path = os.path.join(steam_root, "steamapps", "libraryfolders.vdf")
+    if not os.path.isfile(vdf_path):
+        return [steam_root]
+
+    libraries = [steam_root]
+    try:
+        with open(vdf_path, encoding="utf-8", errors="replace") as f:
+            content = f.read()
+        # Match "path" values in the VDF
+        for match in re.finditer(r'"path"\s+"([^"]+)"', content):
+            path = match.group(1).replace("\\\\", "\\")
+            if os.path.isdir(path) and path not in libraries:
+                libraries.append(path)
+    except Exception:
+        pass
+    return libraries
+
+
+def _find_game_in_libraries(libraries):
+    """Search Steam libraries for Hades II."""
+    for lib in libraries:
+        game_path = os.path.join(lib, "steamapps", "common", "Hades II")
+        if os.path.isdir(game_path):
+            return game_path
+    return None
+
+
+def find_game_path():
+    """Find the Hades II game directory.
+
+    Detection order:
+    1. Steam registry → libraryfolders.vdf → scan all libraries
+    2. Hardcoded fallback paths
+    """
+    # Try Steam registry + library scanning
+    steam_root = _find_steam_root()
+    if steam_root:
+        libraries = _parse_library_folders(steam_root)
+        game = _find_game_in_libraries(libraries)
+        if game:
+            return game
+
+    # Fallback: hardcoded paths
+    for p in _FALLBACK_PATHS:
+        if os.path.isdir(p):
+            return p
+
+    return ""
+
+
+# For backward compatibility — modules that import STEAM_PATHS directly
+STEAM_PATHS = _FALLBACK_PATHS

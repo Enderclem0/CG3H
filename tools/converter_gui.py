@@ -33,14 +33,9 @@ IMPORTER   = os.path.join(SCRIPT_DIR, "gltf_to_gr2.py")
 
 DEFAULT_OUTPUT = os.path.join(os.path.expanduser("~"), "Documents", "CG3H_Mods")
 
-from cg3h_constants import STEAM_PATHS, CG3H_BUILDER_DEPENDENCY
+from cg3h_constants import STEAM_PATHS, CG3H_BUILDER_DEPENDENCY, find_game_path
 
 
-def find_game_path():
-    for p in STEAM_PATHS:
-        if os.path.isdir(p):
-            return p
-    return ""
 
 
 # -- App ----------------------------------------------------------------------
@@ -182,14 +177,12 @@ class App:
         ttk.Label(anim_row, text="e.g. Idle, Attack  (blank = all)",
                   foreground="#888", font=("", 8)).pack(side=tk.LEFT)
 
-        mesh_row = ttk.Frame(opt_frame)
-        mesh_row.pack(fill=tk.X, pady=(0, 2))
-        ttk.Label(mesh_row, text="Mesh entries:", foreground="#555").pack(side=tk.LEFT)
-        self._create_mesh_entry = tk.StringVar()
-        ttk.Entry(mesh_row, textvariable=self._create_mesh_entry, width=28).pack(
-            side=tk.LEFT, padx=4)
-        ttk.Label(mesh_row, text="blank = all, comma-sep to filter",
-                  foreground="#888", font=("", 8)).pack(side=tk.LEFT)
+        # Mesh entry checkboxes (populated when character is selected)
+        self._create_entries_frame = ttk.LabelFrame(opt_frame, text="Mesh entries", padding=4)
+        self._create_entries_frame.pack(fill=tk.X, pady=(0, 2))
+        self._create_entry_vars = {}  # {entry_name: BooleanVar}
+        ttk.Label(self._create_entries_frame, text="Select a character to see entries",
+                  foreground="#888").pack(anchor=tk.W)
 
         # Output directory
         out_row = ttk.Frame(top)
@@ -263,9 +256,11 @@ class App:
             anim_filter = self._create_anim_filter.get().strip()
             if anim_filter:
                 cmd += ["--anim-filter", anim_filter]
-        mesh_entry = self._create_mesh_entry.get().strip()
-        if mesh_entry:
-            cmd += ["--mesh-entry", mesh_entry]
+        # Pass selected mesh entries (if checkboxes exist and not all checked)
+        selected_entries = [e for e, v in self._create_entry_vars.items() if v.get()]
+        all_entries = list(self._create_entry_vars.keys())
+        if selected_entries and selected_entries != all_entries:
+            cmd += ["--mesh-entry", ",".join(selected_entries)]
 
         self._log_write_ui(self._create_log,
                            f"Exporting {character} to {workspace}...\n\n")
@@ -292,8 +287,10 @@ class App:
 
         # Step 2: Generate mod.json
         try:
-            mesh_entries = [e.strip() for e in mesh_entry.split(",") if e.strip()] \
-                if mesh_entry else [f"{character}_Mesh"]
+            if selected_entries:
+                mesh_entries = selected_entries
+            else:
+                mesh_entries = [f"{character}_Mesh"]
 
             saved_author = self._config.get("author", "Modder")
             mod_json = {
@@ -397,6 +394,10 @@ class App:
         ttk.Checkbutton(top, text="Install to r2modman after build",
                         variable=self._build_install_r2).pack(anchor=tk.W, pady=(0, 6))
 
+        # New mesh entry routing (populated when mod workspace is scanned)
+        self._build_routing_frame = ttk.LabelFrame(top, text="New Mesh Entry Routing", padding=4)
+        self._build_routing_vars = {}  # {mesh_name: {entry_name: BooleanVar}}
+
         # Build button + status
         btn_row = ttk.Frame(top)
         btn_row.pack(fill=tk.X, pady=(4, 0))
@@ -442,14 +443,31 @@ class App:
         character = m.get("target", {}).get("character", m.get("character", "?"))
         version = meta.get("version", m.get("version", "?"))
 
-        # Populate mod name and author fields from mod.json
+        # Populate mod name from mod.json, author from saved preference
         if name and name != "?":
             self._build_mod_name.set(name)
-        if author and author != "?":
+        saved_author = self._config.get("author", "")
+        if saved_author:
+            self._build_author.set(saved_author)
+        elif author and author != "?":
             self._build_author.set(author)
 
-        # Detect operations if cg3h_build is available
+        # Detect operations — run auto-detection to get accurate type
+        # (mod.json may have stale type from initial create)
+        if cg3h_build and hasattr(cg3h_build, "_sync_mod_json"):
+            try:
+                cg3h_build._sync_mod_json(p)
+                # Re-read after sync
+                with open(mod_json_path) as f:
+                    m = json.load(f)
+                meta = m.get("metadata", {})
+                mod_type = m.get("type", "?")
+            except Exception:
+                pass
+
         ops_str = mod_type
+        if isinstance(mod_type, list):
+            ops_str = ", ".join(mod_type)
         if cg3h_build and hasattr(cg3h_build, "_infer_operations"):
             try:
                 ops = cg3h_build._infer_operations(m)
@@ -458,12 +476,55 @@ class App:
             except Exception:
                 pass
 
+        # Show what will actually be built
+        display_name = self._build_mod_name.get() or name
+        display_author = self._build_author.get() or author
         self._build_info.config(
-            text=f'"{name}" by {author}  |  {character}  |  {ops_str}  |  v{version}',
+            text=f'"{display_name}" by {display_author}  |  {character}  |  {ops_str}  |  v{version}',
             foreground="#555",
         )
         if not self._build_running:
             self._build_btn.config(state=tk.NORMAL)
+
+        # Detect new meshes for entry routing
+        self._build_routing_frame.pack_forget()
+        for w in self._build_routing_frame.winfo_children():
+            w.destroy()
+        self._build_routing_vars.clear()
+
+        manifest_path = os.path.join(p, "manifest.json")
+        glb_name = m.get("assets", {}).get("glb", "")
+        glb_path = os.path.join(p, glb_name) if glb_name else ""
+        mesh_entries = m.get("target", {}).get("mesh_entries", [])
+
+        if len(mesh_entries) > 1 and os.path.isfile(manifest_path) and os.path.isfile(glb_path):
+            try:
+                with open(manifest_path) as f:
+                    manifest = json.load(f)
+                manifest_mesh_names = {mm["name"] for mm in manifest.get("meshes", [])}
+
+                import pygltflib
+                gltf = pygltflib.GLTF2().load(glb_path)
+                new_meshes = [m.name for m in gltf.meshes if m.name not in manifest_mesh_names]
+
+                if new_meshes:
+                    self._build_routing_frame.pack(fill=tk.X, pady=(4, 0))
+                    # Load existing routing from mod.json
+                    existing_routing = m.get("target", {}).get("new_mesh_routing", {})
+
+                    for mesh_name in new_meshes:
+                        mesh_frame = ttk.LabelFrame(self._build_routing_frame,
+                                                     text=mesh_name, padding=2)
+                        mesh_frame.pack(fill=tk.X, pady=(0, 2))
+                        self._build_routing_vars[mesh_name] = {}
+                        existing = existing_routing.get(mesh_name, mesh_entries)
+                        for entry in mesh_entries:
+                            var = tk.BooleanVar(value=(entry in existing))
+                            self._build_routing_vars[mesh_name][entry] = var
+                            ttk.Checkbutton(mesh_frame, text=entry,
+                                            variable=var).pack(side=tk.LEFT, padx=4)
+            except Exception:
+                pass
 
     def _build_mod(self):
         if cg3h_build is None:
@@ -487,20 +548,33 @@ class App:
         self._config["author"] = author
         self._save_config()
 
-        # Update mod.json with current mod name + author before building
+        # Update mod.json with current mod name, author, and routing before building
         mod_name = self._build_mod_name.get().strip()
-        if mod_name or author:
-            try:
-                mod_json_path = os.path.join(mod_dir, "mod.json")
-                with open(mod_json_path) as f:
-                    m = json.load(f)
-                if mod_name:
-                    m.setdefault("metadata", {})["name"] = mod_name
-                m.setdefault("metadata", {})["author"] = author
-                with open(mod_json_path, 'w') as f:
-                    json.dump(m, f, indent=2)
-            except Exception:
-                pass
+        try:
+            mod_json_path = os.path.join(mod_dir, "mod.json")
+            with open(mod_json_path) as f:
+                m = json.load(f)
+            if mod_name:
+                m.setdefault("metadata", {})["name"] = mod_name
+            m.setdefault("metadata", {})["author"] = author
+
+            # Write new_mesh_routing from GUI checkboxes
+            if self._build_routing_vars:
+                mesh_entries = m.get("target", {}).get("mesh_entries", [])
+                routing = {}
+                for mesh_name, entry_vars in self._build_routing_vars.items():
+                    selected = [e for e, v in entry_vars.items() if v.get()]
+                    if selected and set(selected) != set(mesh_entries):
+                        routing[mesh_name] = selected
+                if routing:
+                    m.setdefault("target", {})["new_mesh_routing"] = routing
+                elif "new_mesh_routing" in m.get("target", {}):
+                    del m["target"]["new_mesh_routing"]
+
+            with open(mod_json_path, 'w') as f:
+                json.dump(m, f, indent=2)
+        except Exception:
+            pass
 
         self._log_clear(self._build_log)
         self._build_running = True
@@ -980,10 +1054,58 @@ class App:
             self._create_char_lb.see(0)
 
     def _on_char_select(self, event=None):
-        """Set character entry from listbox selection."""
+        """Set character entry from listbox selection and populate entry checkboxes."""
         sel = self._create_char_lb.curselection()
-        if sel:
-            self._create_char.set(self._create_char_lb.get(sel[0]))
+        if not sel:
+            return
+        character = self._create_char_lb.get(sel[0])
+        self._create_char.set(character)
+        self._populate_entry_checkboxes(character)
+
+    def _populate_entry_checkboxes(self, character):
+        """Populate mesh entry checkboxes for the selected character."""
+        # Clear existing checkboxes
+        for w in self._create_entries_frame.winfo_children():
+            w.destroy()
+        self._create_entry_vars.clear()
+
+        # Find mesh entries from the GPK
+        gpk_dir = self._gpk_dir()
+        gpk_path = os.path.join(gpk_dir, f"{character}.gpk")
+        if not os.path.isfile(gpk_path):
+            ttk.Label(self._create_entries_frame, text="GPK not found",
+                      foreground="#a00").pack(anchor=tk.W)
+            return
+
+        try:
+            import struct
+            with open(gpk_path, 'rb') as f:
+                data = f.read()
+            count = struct.unpack_from('<I', data, 4)[0]
+            pos = 8
+            mesh_entries = []
+            for i in range(count):
+                nl = data[pos]; pos += 1
+                name = data[pos:pos+nl].decode(); pos += nl
+                cs = struct.unpack_from('<I', data, pos)[0]; pos += 4
+                if name.endswith('_Mesh'):
+                    mesh_entries.append(name)
+                pos += cs
+        except Exception:
+            ttk.Label(self._create_entries_frame, text="Could not read GPK",
+                      foreground="#a00").pack(anchor=tk.W)
+            return
+
+        if len(mesh_entries) <= 1:
+            ttk.Label(self._create_entries_frame, text=f"Single entry: {mesh_entries[0] if mesh_entries else 'none'}",
+                      foreground="#555").pack(anchor=tk.W)
+            return
+
+        for entry in mesh_entries:
+            var = tk.BooleanVar(value=True)
+            self._create_entry_vars[entry] = var
+            ttk.Checkbutton(self._create_entries_frame, text=entry,
+                            variable=var).pack(anchor=tk.W)
 
     # -- Browse dialogs -------------------------------------------------------
 

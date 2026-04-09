@@ -1,0 +1,7 @@
+numpy
+pygltflib
+lz4
+Pillow
+etcpak
+xxhash
+texture2ddecoder

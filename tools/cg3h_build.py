@@ -20,7 +20,7 @@ _tools_dir = os.path.dirname(os.path.abspath(__file__))
 if _tools_dir not in sys.path:
     sys.path.insert(0, _tools_dir)
 
-from cg3h_constants import STEAM_PATHS, CG3H_BUILDER_DEPENDENCY, H2M_DEPENDENCY
+from cg3h_constants import STEAM_PATHS, CG3H_BUILDER_DEPENDENCY, H2M_DEPENDENCY, find_game_path
 
 
 def _strip_unchanged_data(glb_path, mod_dir):
@@ -543,10 +543,7 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
 
     # Auto-detect game dir
     if game_dir is None:
-        for p in STEAM_PATHS:
-            if os.path.isdir(p):
-                game_dir = p
-                break
+        game_dir = find_game_path()
     if not game_dir:
         print("ERROR: Game directory not found. Use --game-dir.")
         return False

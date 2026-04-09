@@ -594,7 +594,10 @@ def build_vertex_buffer_40(m: dict, fallback_normals: np.ndarray = None) -> byte
 
 # ── Granny DLL setup ──────────────────────────────────────────────────────────
 
-_kernel32 = ctypes.windll.kernel32
+try:
+    _kernel32 = ctypes.windll.kernel32
+except AttributeError:
+    _kernel32 = None
 
 
 def _valid_ptr(p):
@@ -689,23 +692,12 @@ def setup_granny(dll_path: str):
     return dll
 
 
-def load_gr2(dll, gr2_bytes: bytes, sdb_bytes: bytes):
+def load_sdb(dll, sdb_bytes: bytes):
     """
-    Load a stripped GR2 + SDB pair via the DLL.
-
-    Always calls GrannyRemapFileStrings so string fields become live RAM pointers
-    — required for the Python String Callback path (the DLL walker passes each
-    live pointer to the callback as a char*).
-
-    Also extracts sdb_dict: {string_value: sdb_index} by reading the str_db
-    object directly from memory.  The callback uses this to reverse-map each
-    string back to its SDB array index during serialization.
-
-    Returns (gr2_file, sdb_file, fi, sdb_dict, keep_alive_tuple).
-    keep_alive_tuple must be retained by the caller until GrannyFreeFile() is called.
+    Load SDB once. Returns (sdb_file, str_db, sdb_dict, sdb_crc, sdb_buf).
+    sdb_buf must be retained until all GR2 files using this SDB are freed.
     """
     sdb_buf = ctypes.create_string_buffer(sdb_bytes)
-    gr2_buf = ctypes.create_string_buffer(gr2_bytes)
     sdb_file = dll.GrannyReadEntireFileFromMemory(len(sdb_bytes), sdb_buf)
     if not sdb_file:
         raise RuntimeError("GrannyReadEntireFileFromMemory failed for SDB")
@@ -714,10 +706,6 @@ def load_gr2(dll, gr2_bytes: bytes, sdb_bytes: bytes):
         raise RuntimeError("GrannyGetStringDatabase failed")
 
     # Build reverse-map {string: index} directly from the str_db object.
-    # str_db layout (probed from live DLL memory):
-    #   +0x00  count       uint32   — number of strings in the database
-    #   +0x04  array_ptr   uint64   — pointer to array of char* pointers
-    #          (packed: uint64 immediately follows uint32, misaligned)
     sdb_count     = ctypes.c_uint32.from_address(str_db).value
     sdb_array_ptr = ctypes.c_uint64.from_address(str_db + 4).value
     sdb_dict: dict[str, int] = {}
@@ -727,21 +715,35 @@ def load_gr2(dll, gr2_bytes: bytes, sdb_bytes: bytes):
             s = ctypes.string_at(str_ptr).decode('utf-8', 'replace')
             sdb_dict[s] = i
 
-    # Read the real SDB CRC from str_db at +0x0C.
-    # Decompilation of GrannyRemapFileStrings: iVar1 == *(int *)(param_2 + 0xc)
-    # where param_2 is str_db (GrannyGetStringDatabase result), NOT sdb_file.
-    # str_db layout: [count:u32 +0x00][array_ptr:u64 +0x04][crc:u32 +0x0C]
     sdb_crc = struct.unpack_from('<I', (ctypes.c_uint8 * 4).from_address(str_db + 0x0c), 0)[0]
+    return sdb_file, str_db, sdb_dict, sdb_crc, sdb_buf
 
+
+def load_gr2_entry(dll, gr2_bytes: bytes, str_db):
+    """
+    Load a single GR2 entry with a pre-loaded SDB.
+    Returns (gr2_file, fi, gr2_buf).
+    """
+    gr2_buf = ctypes.create_string_buffer(gr2_bytes)
     gr2_file = dll.GrannyReadEntireFileFromMemory(len(gr2_bytes), gr2_buf)
     if not gr2_file:
         raise RuntimeError("GrannyReadEntireFileFromMemory failed for GR2")
-    # GrannyRemapFileStrings returns False for golden-path files (inline strings,
-    # no SDB indices to remap). This is normal — strings are already live pointers.
     dll.GrannyRemapFileStrings(gr2_file, str_db)
     fi = dll.GrannyGetFileInfo(gr2_file)
     if not fi:
         raise RuntimeError("GrannyGetFileInfo returned null")
+    return gr2_file, fi, gr2_buf
+
+
+def load_gr2(dll, gr2_bytes: bytes, sdb_bytes: bytes):
+    """
+    Load a stripped GR2 + SDB pair via the DLL.
+    Legacy wrapper — calls load_sdb + load_gr2_entry.
+
+    Returns (gr2_file, sdb_file, fi, sdb_dict, sdb_crc, keep_alive_tuple).
+    """
+    sdb_file, str_db, sdb_dict, sdb_crc, sdb_buf = load_sdb(dll, sdb_bytes)
+    gr2_file, fi, gr2_buf = load_gr2_entry(dll, gr2_bytes, str_db)
     return gr2_file, sdb_file, fi, sdb_dict, sdb_crc, (sdb_buf, gr2_buf)
 
 
@@ -1570,20 +1572,9 @@ def patch_vertex_data(
                 continue
 
             # Use first existing mesh as template + get bone names from its bindings
-            # Pick template: prefer body mesh over outline (outline uses a
-            # different material/shader that renders behind the character)
-            template = None
-            for _gm in gr2_mesh_list:
-                if 'Outline' not in _gm['name'] and 'Shadow' not in _gm['name']:
-                    template = _gm
-                    break
-            if template is None:
-                template = gr2_mesh_list[0] if gr2_mesh_list else None
-            if template is None:
+            if not gr2_mesh_list:
                 print(f"  ERROR: No existing mesh to use as template — cannot add new meshes")
                 continue
-
-            skel_bones = template.get('bb_names', [])
 
             # Collect existing texture names from GR2 materials for comparison
             existing_tex_names = set()
@@ -1598,12 +1589,30 @@ def patch_vertex_data(
                     pass
 
             for glb_m in glb_group:
+                # Pick template: find the existing mesh whose BoneBindings
+                # contain the bones this new mesh is weighted to.
+                # Among matches, pick the one with the most bindings.
+                glb_bones = set(glb_m.get('bone_palette', []) or [])
+                template = None
+                best_score = -1
+                for _gm in gr2_mesh_list:
+                    if 'Outline' in _gm['name'] or 'Shadow' in _gm['name']:
+                        continue
+                    bb_names = set(_gm.get('bb_names', []))
+                    # Score: how many of the new mesh's bones are in this template
+                    overlap = len(glb_bones & bb_names)
+                    bb_count = len(bb_names)
+                    if overlap > best_score or (overlap == best_score and bb_count > len(template.get('bb_names', [])) if template else 0):
+                        best_score = overlap
+                        template = _gm
+                if template is None:
+                    template = gr2_mesh_list[0]
+                skel_bones = template.get('bb_names', [])
+
                 # Check if this mesh needs a custom material
                 custom_mat_ptr = None
                 glb_tex = glb_m.get('texture_name')
                 if glb_tex and glb_tex not in existing_tex_names:
-                    # New texture — create a new material chain
-                    # Use a synthetic path; the basename is what matters for the game's hash lookup
                     tex_filename = f"D:/mod/{glb_tex}.png"
                     custom_mat_ptr = _create_granny_material_chain(
                         dll, glb_m['name'].split(':')[-1], tex_filename)
@@ -1725,6 +1734,45 @@ def patch_vertex_data(
 
 
 
+def _build_entry_routing(manifest, glb_meshes, all_mesh_entries, new_mesh_routing=None):
+    """Route GLB meshes to GPK entries using manifest metadata.
+
+    Returns {entry_name: [glb_mesh_dict, ...]}.
+    Existing meshes go to the entry they came from (per manifest).
+    New meshes go to all entries, or a subset if new_mesh_routing specifies.
+    Without manifest, all meshes go to the first entry (v3.0 compat).
+    """
+    routing = {entry: [] for entry in all_mesh_entries}
+
+    if manifest and manifest.get('meshes'):
+        mesh_to_entry = {}
+        for m in manifest['meshes']:
+            mesh_to_entry[m['name']] = m['entry']
+
+        for glb_m in glb_meshes:
+            target = mesh_to_entry.get(glb_m['name'])
+            if target and target in routing:
+                routing[target].append(glb_m)
+            else:
+                # New mesh — check new_mesh_routing or default to all entries
+                targets = None
+                if new_mesh_routing and glb_m['name'] in new_mesh_routing:
+                    targets = new_mesh_routing[glb_m['name']]
+                if targets:
+                    for t in targets:
+                        if t in routing:
+                            routing[t].append(glb_m)
+                else:
+                    for entry in all_mesh_entries:
+                        routing[entry].append(glb_m)
+    else:
+        # No manifest — all meshes go to first entry (v3.0 compat)
+        body_entry = all_mesh_entries[0]
+        routing[body_entry] = list(glb_meshes)
+
+    return routing
+
+
 # ── Main pipeline ─────────────────────────────────────────────────────────────
 
 def convert(
@@ -1736,11 +1784,13 @@ def convert(
     output_gr2=None,
     entry_name=None,
     manifest_path=None,
+    manifest_dict=None,
     strict: bool = False,
     positional: bool = False,
     allow_topology_change: bool = False,
     patch_animations: bool = False,
     anim_patch_filter: str = None,
+    new_mesh_routing: dict = None,
 ) -> None:
     print(f"[1/6] Parsing GLB: {glb_path}")
     glb_meshes = parse_glb(glb_path)
@@ -1754,34 +1804,45 @@ def convert(
     print(f"[2/6] Extracting GPK: {gpk_path}")
     gpk_entries = extract_gpk(gpk_path)
 
-    # Load manifest if available (used for mesh name matching metadata)
-    if manifest_path:
+    # Load manifest (used for routing meshes to correct entries)
+    manifest = manifest_dict
+    if manifest is None and manifest_path:
         import json
         with open(manifest_path) as f:
             manifest = json.load(f)
-        print(f"  Manifest: {len(manifest.get('meshes', []))} meshes")
 
-    # Select the body entry ({Character}_Mesh) for patching.
-    # All GLB meshes (existing + new) go to this single entry and are
-    # serialized in one pass.  Multi-entry support (patching Hat_Mesh,
-    # MelinoeOverlook_Mesh, etc. independently) is planned for v3.1.
     all_mesh_entries = [k for k in gpk_entries if k.endswith('_Mesh')]
     if not all_mesh_entries:
         raise KeyError(f"No _Mesh entries in GPK. Available: {sorted(gpk_entries)}")
 
-    char_name = os.path.splitext(os.path.basename(gpk_path))[0]
+    # If entry_name is set, only process that single entry (legacy/override)
     if entry_name is not None:
         if entry_name not in gpk_entries:
             raise KeyError(f"Entry {entry_name!r} not in GPK. Available: {sorted(gpk_entries)}")
-        body_entry = entry_name
+        entries_to_patch = [entry_name]
     else:
+        entries_to_patch = list(all_mesh_entries)
+
+    # Build routing table
+    routing = _build_entry_routing(manifest, glb_meshes, entries_to_patch, new_mesh_routing)
+    # Skip entries with no routed meshes
+    entries_to_patch = [e for e in entries_to_patch if routing.get(e)]
+
+    if not entries_to_patch:
+        # Fallback: no manifest routing, send all to first entry
+        char_name = os.path.splitext(os.path.basename(gpk_path))[0]
         body_entry = f"{char_name}_Mesh"
-        if body_entry not in gpk_entries:
+        if body_entry not in all_mesh_entries:
             body_entry = all_mesh_entries[0]
+        entries_to_patch = [body_entry]
+        routing[body_entry] = list(glb_meshes)
 
     if len(all_mesh_entries) > 1:
         print(f"  Multi-entry GPK: {all_mesh_entries}")
-        print(f"  Patching body entry only: {body_entry}")
+        print(f"  Patching: {entries_to_patch}")
+
+    if manifest:
+        print(f"  Manifest: {len(manifest.get('meshes', []))} meshes")
 
     print(f"[3/6] Reading SDB: {sdb_path}")
     with open(sdb_path, 'rb') as f:
@@ -1790,49 +1851,75 @@ def convert(
     print(f"[4/6] Loading Granny DLL + type map")
     dll = setup_granny(dll_path)
 
-    gr2_bytes = gpk_entries[body_entry]
-    print(f"\n  --- Entry: {body_entry} ({len(gr2_bytes):,} bytes) ---")
-
-    gr2_file, sdb_file, fi, sdb_dict, sdb_crc, _keep = load_gr2(dll, gr2_bytes, sdb_bytes)
+    # Load SDB once, shared across all entries
+    sdb_file, str_db, sdb_dict, sdb_crc, sdb_buf = load_sdb(dll, sdb_bytes)
+    _keepalive.append(sdb_buf)
     print(f"  SDB: {len(sdb_dict)} strings indexed  CRC=0x{sdb_crc:08X}")
 
-    # All GLB meshes go to the body entry (matched + new)
-    print(f"[5/6] Patching vertex data ({len(glb_meshes)} GLB meshes)")
-    total_patched = patch_vertex_data(
-        dll, fi, glb_meshes, strict=strict, positional=positional,
-        allow_topology_change=allow_topology_change,
-    )
+    # Process each mesh entry
+    total_patched = 0
+    gr2_files_to_free = []
+
+    for entry_idx, entry_key in enumerate(entries_to_patch):
+        entry_meshes = routing[entry_key]
+        gr2_bytes = gpk_entries[entry_key]
+        entry_label = f"[5.{entry_idx+1}/{len(entries_to_patch)}]"
+        print(f"\n  {entry_label} Entry: {entry_key} ({len(gr2_bytes):,} bytes, {len(entry_meshes)} GLB meshes)")
+
+        gr2_file, fi, gr2_buf = load_gr2_entry(dll, gr2_bytes, str_db)
+        _keepalive.append(gr2_buf)
+
+        glb_names = ", ".join(m['name'] for m in entry_meshes[:5])
+        if len(entry_meshes) > 5:
+            glb_names += f"... (+{len(entry_meshes)-5})"
+        print(f"  GLB: {glb_names}")
+
+        n_patched = patch_vertex_data(
+            dll, fi, entry_meshes, strict=strict, positional=positional,
+            allow_topology_change=allow_topology_change,
+        )
+        total_patched += n_patched
+
+        if n_patched > 0:
+            new_gr2_bytes = build_gr2_bytes(dll, fi, gr2_bytes, sdb_dict, sdb_crc)
+            gpk_entries[entry_key] = new_gr2_bytes
+            print(f"  Serialized: {len(new_gr2_bytes):,} bytes")
+        else:
+            print(f"  No changes to this entry")
+
+        gr2_files_to_free.append(gr2_file)
 
     if total_patched == 0:
         _keepalive.clear()
-        dll.GrannyFreeFile(gr2_file)
+        for gf in gr2_files_to_free:
+            dll.GrannyFreeFile(gf)
         dll.GrannyFreeFile(sdb_file)
         raise RuntimeError("No meshes were patched — nothing to write")
 
-    print(f"[6/6] Serializing modified GR2")
-    new_gr2_bytes = build_gr2_bytes(dll, fi, gr2_bytes, sdb_dict, sdb_crc)
-    gpk_entries[body_entry] = new_gr2_bytes
-
-    if output_gr2:
+    if output_gr2 and len(entries_to_patch) == 1:
+        entry_key = entries_to_patch[0]
         with open(output_gr2, 'wb') as f:
-            f.write(new_gr2_bytes)
-        print(f"  GR2 written: {output_gr2!r} ({len(new_gr2_bytes):,} bytes)")
+            f.write(gpk_entries[entry_key])
+        print(f"  GR2 written: {output_gr2!r}")
 
+    # Free all DLL resources AFTER all entries are serialized
     _keepalive.clear()
-    dll.GrannyFreeFile(gr2_file)
+    for gf in gr2_files_to_free:
+        dll.GrannyFreeFile(gf)
     dll.GrannyFreeFile(sdb_file)
 
     # Patch animation entries if requested
     n_anim_patched = 0
     if glb_animations:
-        print(f"[7/7] Patching animation entries")
+        print(f"[6/6] Patching animation entries")
         n_anim_patched = patch_animation_entries(dll, gpk_entries, sdb_bytes, glb_animations,
                                                     anim_patch_filter=anim_patch_filter)
         print(f"  {n_anim_patched} animation(s) patched")
 
     pack_gpk(gpk_entries, output_gpk)
+    entries_msg = f" across {len(entries_to_patch)} entries" if len(entries_to_patch) > 1 else ""
     anim_msg = f", {n_anim_patched} animation(s)" if n_anim_patched else ""
-    print(f"\nDone!  {total_patched} mesh(es){anim_msg} patched -> {output_gpk!r}")
+    print(f"\nDone!  {total_patched} mesh(es){entries_msg}{anim_msg} patched -> {output_gpk!r}")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
