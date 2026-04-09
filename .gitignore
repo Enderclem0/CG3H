@@ -40,3 +40,7 @@ Desktop.ini
 # Claude Code settings (local only)
 .claude/
 dist/
+ROADMAP.md
+
+# Build artifacts (local only)
+.baseline_positions.npz

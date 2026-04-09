@@ -11,7 +11,11 @@ Expects:
     - granny2_x64.dll in cwd (run from the Ship/ directory)
     - ../Content/GR2/_Optimized/<name>.gpk and .sdb
 """
-import struct, ctypes, argparse, os, sys
+import struct
+import ctypes
+import argparse
+import os
+import sys
 if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 import numpy as np
@@ -19,7 +23,7 @@ import lz4.block
 import pygltflib
 from pygltflib import (GLTF2, Scene, Node, Mesh, Primitive, Skin, Accessor, BufferView, Buffer,
                        Animation, AnimationSampler, AnimationChannel, AnimationChannelTarget)
-from pygltflib import FLOAT, UNSIGNED_SHORT, UNSIGNED_BYTE, VEC3, VEC4, SCALAR, MAT4, VEC2
+from pygltflib import FLOAT, UNSIGNED_SHORT, VEC3, VEC4, SCALAR, MAT4, VEC2
 from pygltflib import ARRAY_BUFFER, ELEMENT_ARRAY_BUFFER
 
 # granny_types must be on sys.path — works when run from tools/ or when tools/ is in path
@@ -361,9 +365,9 @@ def read_mesh_data(mesh_ptr, bone_name_to_idx, dll, debug=False):
     # vertex, and output corrupted "spiky" geometry on rigid meshes.
     is_stripped_mesh = (src_stride < 40)
     physical_stride = 40 if is_stripped_mesh else src_stride
-    
+
     raw_verts = np.frombuffer(safe_bytes(vp, vc * physical_stride), dtype=np.uint8).reshape(vc, physical_stride)
-    
+
     if is_stripped_mesh:
         # Force the hardcoded Forge Renderer physical offsets
         positions = np.frombuffer(raw_verts[:, 0:12].tobytes(), dtype='<f4').reshape(vc, 3).copy()
@@ -373,13 +377,13 @@ def read_mesh_data(mesh_ptr, bone_name_to_idx, dll, debug=False):
         # Fully compliant Granny mesh (e.g. 40+ byte skinned meshes where Granny is honest)
         pos_off = real32_3[0][1]
         positions = np.frombuffer(raw_verts[:, pos_off:pos_off+12].tobytes(), dtype='<f4').reshape(vc, 3).copy()
-        
+
         if len(real32_3) >= 2:
             nrm_off = real32_3[1][1]
             normals = np.frombuffer(raw_verts[:, nrm_off:nrm_off+12].tobytes(), dtype='<f4').reshape(vc, 3).copy()
         else:
             normals = np.zeros((vc, 3), dtype=np.float32)
-            
+
         if real32_2:
             uv_off = real32_2[0][1]
             uvs = np.frombuffer(raw_verts[:, uv_off:uv_off+8].tobytes(), dtype='<f4').reshape(vc, 2).copy()
@@ -1187,7 +1191,7 @@ def _resolve_texture_from_material(mat_ptr, debug=False):
     except KeyError:
         maps_off = None
         if debug:
-            print(f"        No 'Maps' field in granny_material type map")
+            print("        No 'Maps' field in granny_material type map")
 
     if maps_off is not None:
         maps_count = ri(mat_ptr, maps_off)
@@ -1270,7 +1274,7 @@ def _resolve_mesh_texture(mesh_ptr, debug=False):
                 print(f"      MaterialBindings fallback from BoneBindings(0x{bb_off:X}): 0x{mb_off:X}")
         except KeyError:
             if debug:
-                print(f"      No MaterialBindings or BoneBindings offset found")
+                print("      No MaterialBindings or BoneBindings offset found")
             return None
 
     mb_count = ri(mesh_ptr, mb_off)
@@ -1527,7 +1531,7 @@ def _extract_all_textures(pkg_dir, texture_names):
         if remaining_before - set(remaining.keys()):
             idx_path = os.path.join(pkg_dir, '_texture_index.json')
             if os.path.isfile(idx_path):
-                print(f"  Removing stale texture index")
+                print("  Removing stale texture index")
                 try:
                     os.remove(idx_path)
                 except OSError:
@@ -1589,7 +1593,7 @@ def _extract_model_texture(pkg_dir, character_name, gr2_texture_names=None):
         if target_pkg:
             pkg_files = [os.path.join(pkg_dir, target_pkg)]
         else:
-            print(f"  No index match, falling back to full scan")
+            print("  No index match, falling back to full scan")
             pkg_files = None  # fall through to full scan
     else:
         pkg_files = None  # no index, full scan
@@ -1765,10 +1769,10 @@ def main():
     with open(sdb_path, 'rb') as f:
         sdb_bytes = f.read()
 
-    print(f"[3/5] Loading Granny DLL and building type map")
+    print("[3/5] Loading Granny DLL and building type map")
     dll = setup_granny(args.dll)
 
-    print(f"[4/5] Reading skeleton and mesh data")
+    print("[4/5] Reading skeleton and mesh data")
     mesh_data_list = []
     mesh_names = []
     exported_gr2_indices = []
@@ -1839,18 +1843,18 @@ def main():
     # ── Animations ──
     anim_data = None
     if args.animations or args.anim_filter:
-        print(f"[5/6] Extracting animations")
+        print("[5/6] Extracting animations")
         anim_data = extract_animations(dll, entries, sdb_bytes,
                                        anim_filter=args.anim_filter, dll_path=args.dll,
                                        anim_workers=args.anim_workers)
     else:
-        print(f"[5/6] Animations: skipped (use --animations to include)")
+        print("[5/6] Animations: skipped (use --animations to include)")
 
     # ── Textures ──
     texture_map = None  # {tex_name: (png_bytes, [mesh_indices])}
     texture_png = None  # legacy single-texture fallback
     if args.textures:
-        print(f"[*] Extracting 3D model textures", flush=True)
+        print("[*] Extracting 3D model textures", flush=True)
         pkg_dir = args.pkg_dir
         if pkg_dir is None:
             content_dir = os.path.dirname(os.path.dirname(os.path.abspath(args.gpk_dir)))
@@ -1960,7 +1964,7 @@ def main():
     gltf = build_gltf(args.name, mesh_data_list, mesh_names, bones,
                        animations=anim_data, texture_png_bytes=texture_png,
                        texture_map=texture_map)
-    print(f"  Saving GLB file...", flush=True)
+    print("  Saving GLB file...", flush=True)
     gltf.save(out_path)
     anim_msg = f", {len(anim_data)} animations" if anim_data else ""
     tex_msg = ", textured" if (texture_map or texture_png) else ""
@@ -1968,14 +1972,17 @@ def main():
 
     # Write manifest for reimport
     import json
+    import hashlib
     manifest = {
         'character': args.name,
         'glb': os.path.basename(out_path),
         'gpk': f"{args.name}.gpk",
         'sdb': f"{args.name}.sdb",
         'mesh_entries': mesh_keys,
-        'meshes': [{'name': mn, 'entry': gi['entry'], 'gr2_index': gi['gr2_index']}
-                   for mn, gi in zip(mesh_names, exported_gr2_indices)],
+        'meshes': [{'name': mn, 'entry': gi['entry'], 'gr2_index': gi['gr2_index'],
+                    'vertex_count': len(md[0]), 'index_count': len(md[5]),
+                    'position_hash': hashlib.md5(md[0].tobytes()).hexdigest()}
+                   for mn, gi, md in zip(mesh_names, exported_gr2_indices, mesh_data_list)],
     }
     if args.textures and 'manifest_textures' in dir():
         manifest['textures'] = manifest_textures
@@ -1988,6 +1995,13 @@ def main():
     with open(manifest_path, 'w') as f:
         json.dump(manifest, f, indent=2)
     print(f"  Manifest: {manifest_path}")
+
+    # Save baseline vertex positions for change detection at build time.
+    # Keyed by mesh name so the build tool can compare per-mesh.
+    baseline = {mn: md[0] for mn, md in zip(mesh_names, mesh_data_list)}
+    baseline_path = os.path.join(os.path.dirname(out_path), '.baseline_positions.npz')
+    np.savez_compressed(baseline_path, **baseline)
+    print(f"  Baseline: {baseline_path}")
 
     for _gf, _sf, _kp in _all_keeps:
         dll.GrannyFreeFile(_gf)

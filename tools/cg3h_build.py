@@ -13,14 +13,85 @@ and outputs to build/ in H2M folder structure.
 import argparse
 import json
 import os
-import shutil
 import sys
 
 _tools_dir = os.path.dirname(os.path.abspath(__file__))
 if _tools_dir not in sys.path:
     sys.path.insert(0, _tools_dir)
 
-from cg3h_constants import STEAM_PATHS, CG3H_BUILDER_DEPENDENCY, H2M_DEPENDENCY, find_game_path
+from cg3h_constants import CG3H_BUILDER_DEPENDENCY, H2M_DEPENDENCY, find_game_path
+
+
+def _is_mesh_changed(gltf, mesh, blob, orig_mesh, baseline_positions=None):
+    """Check whether a GLB mesh differs from the original export.
+
+    Uses baseline position data (from .baseline_positions.npz) for direct
+    comparison with tolerance, absorbing Blender's ~1e-5 float noise while
+    detecting any genuine edit >= 0.001.  Handles Blender's normal-split
+    vertex inflation via unique (UV + coarse position) counting.
+    """
+    import numpy as np
+
+    orig_vc = orig_mesh.get('vertex_count')
+
+    for prim in mesh.primitives:
+        pos_idx = prim.attributes.POSITION
+        if pos_idx is None:
+            continue
+        acc = gltf.accessors[pos_idx]
+        bv = gltf.bufferViews[acc.bufferView]
+        pos_bytes = blob[bv.byteOffset:bv.byteOffset + bv.byteLength]
+        cur_vc = acc.count
+
+        if orig_vc is None:
+            continue  # no manifest data, can't compare
+
+        # Same vertex count — compare positions against baseline
+        if cur_vc == orig_vc:
+            if (baseline_positions is not None
+                    and baseline_positions.shape == (cur_vc, 3)):
+                pos_data = np.frombuffer(pos_bytes, dtype=np.float32).reshape(cur_vc, 3)
+                max_diff = np.max(np.abs(pos_data - baseline_positions))
+                if max_diff > 1e-4:  # well above ~1e-5 noise, catches any visible edit
+                    return True
+            # Check index count as extra signal
+            orig_ic = orig_mesh.get('index_count')
+            if orig_ic is not None and prim.indices is not None:
+                if gltf.accessors[prim.indices].count != orig_ic:
+                    return True
+            continue
+
+        # Fewer vertices — definitely changed
+        if cur_vc < orig_vc:
+            return True
+
+        # More vertices — check if it's just Blender normal splits
+        uv_idx = prim.attributes.TEXCOORD_0
+        if uv_idx is None:
+            return True  # can't verify without UVs
+
+        uv_acc = gltf.accessors[uv_idx]
+        uv_bv = gltf.bufferViews[uv_acc.bufferView]
+        uv_bytes = blob[uv_bv.byteOffset:uv_bv.byteOffset + uv_bv.byteLength]
+
+        # Count unique (exact UV + quantized position) tuples.
+        # Quantized to 0.01 — coarser than Blender noise (~1e-5) so
+        # noise doesn't create false unique entries.
+        pos_data = np.frombuffer(pos_bytes, dtype=np.float32).reshape(cur_vc, 3)
+        uv_data = np.frombuffer(uv_bytes, dtype=np.float32).reshape(cur_vc, 2)
+        pos_q = np.round(pos_data * 100).astype(np.int32)
+
+        unique = set()
+        for vi in range(cur_vc):
+            # Fixed-width fields: 8 bytes UV + 12 bytes pos — no ambiguity
+            unique.add(uv_data[vi].tobytes() + pos_q[vi].tobytes())
+
+        if len(unique) > orig_vc:
+            return True  # genuinely more vertices than original
+
+        # Unique count <= original — just normal splits, mesh unchanged
+
+    return False
 
 
 def _strip_unchanged_data(glb_path, mod_dir):
@@ -33,7 +104,6 @@ def _strip_unchanged_data(glb_path, mod_dir):
     """
     try:
         import pygltflib
-        import numpy as np
         import hashlib
 
         manifest_path = os.path.join(mod_dir, 'manifest.json')
@@ -47,8 +117,14 @@ def _strip_unchanged_data(glb_path, mod_dir):
         gltf = pygltflib.GLTF2().load(glb_path)
         blob = gltf.binary_blob()
 
-        # Build original mesh data hashes from manifest
-        # We hash vertex data to detect changes — if hash matches original, mesh is unmodified
+        # Load baseline positions for direct comparison
+        import numpy as np
+        baseline_path = os.path.join(mod_dir, '.baseline_positions.npz')
+        try:
+            baseline = dict(np.load(baseline_path)) if os.path.isfile(baseline_path) else {}
+        except Exception:
+            baseline = {}
+
         original_png_hashes = {}
         for tex_name, tex_info in manifest.get('textures', {}).items():
             if tex_info.get('png_hash'):
@@ -64,27 +140,16 @@ def _strip_unchanged_data(glb_path, mod_dir):
                 keep_indices.append(i)
                 continue
 
-            # Check if mesh data changed by hashing vertex positions
-            for prim in mesh.primitives:
-                if prim.attributes.POSITION is not None:
-                    acc = gltf.accessors[prim.attributes.POSITION]
-                    bv = gltf.bufferViews[acc.bufferView]
-                    data = blob[bv.byteOffset:bv.byteOffset + bv.byteLength]
-                    # If vertex count changed from export, mesh was edited
-                    orig_mesh = next((m for m in manifest.get('meshes', [])
-                                      if m['name'] == mesh.name), None)
-                    if orig_mesh:
-                        # Can't compare vertex data without the original GLB,
-                        # but vertex count change is a strong signal
-                        if acc.count != orig_mesh.get('vertex_count', acc.count):
-                            keep_indices.append(i)
-                            break
-                    # Check if indices changed (topology)
-                    if prim.indices is not None:
-                        idx_acc = gltf.accessors[prim.indices]
-                        if orig_mesh and idx_acc.count != orig_mesh.get('index_count', idx_acc.count):
-                            keep_indices.append(i)
-                            break
+            orig_mesh = next((m for m in manifest.get('meshes', [])
+                              if m['name'] == mesh.name), None)
+            if not orig_mesh:
+                keep_indices.append(i)
+                continue
+
+            changed = _is_mesh_changed(gltf, mesh, blob, orig_mesh,
+                                       baseline.get(mesh.name))
+            if changed:
+                keep_indices.append(i)
 
         # Also check textures — strip unchanged ones
         images_to_keep = set()
@@ -137,7 +202,7 @@ def _strip_unchanged_data(glb_path, mod_dir):
 
         has_changes = bool(keep_indices) or bool(keep_anims) or bool(images_to_keep)
         if not has_changes:
-            print(f"  No changes detected — nothing to strip")
+            print("  No changes detected — nothing to strip")
             return None
 
         # Rebuild GLB with only kept meshes
@@ -158,9 +223,11 @@ def _strip_unchanged_data(glb_path, mod_dir):
             gltf.animations = [gltf.animations[i] for i in keep_anims]
 
         kept_names = [m.name for m in new_meshes]
+        kept_originals = sum(1 for n in kept_names if n in original_names)
+        stripped_count = len(original_names) - kept_originals
         if kept_names:
             print(f"  Keeping {len(new_meshes)} mesh(es): {', '.join(kept_names[:5])}")
-        print(f"  Stripped {len(original_names) - len(keep_indices)} unchanged mesh(es)")
+        print(f"  Stripped {stripped_count} unchanged mesh(es)")
         if stripped_anims:
             print(f"  Stripped {stripped_anims} unchanged animation(s), "
                   f"keeping {len(keep_anims)}")
@@ -197,14 +264,12 @@ def _infer_operations(mod):
     if isinstance(mod_type, list):
         for t in mod_type:
             if t == 'mesh_add': ops.add('adds_meshes')
-            elif t == 'mesh_replace': ops.add('replaces_meshes')
-            elif t == 'mesh_patch': ops.add('replaces_meshes')  # mesh_patch treated as mesh_replace
+            elif t == 'mesh_replace' or t == 'mesh_patch': ops.add('replaces_meshes')
             elif t == 'texture_replace': ops.add('replaces_textures')
             elif t == 'animation_patch': ops.add('patches_animations')
     elif mod_type:
         if mod_type == 'mesh_add': ops.add('adds_meshes')
-        elif mod_type == 'mesh_replace': ops.add('replaces_meshes')
-        elif mod_type == 'mesh_patch': ops.add('replaces_meshes')  # mesh_patch treated as mesh_replace
+        elif mod_type == 'mesh_replace' or mod_type == 'mesh_patch': ops.add('replaces_meshes')
         elif mod_type == 'texture_replace': ops.add('replaces_textures')
         elif mod_type == 'animation_patch': ops.add('patches_animations')
 
@@ -389,10 +454,16 @@ def _sync_mod_json(mod_dir):
     if manifest_meshes:
         try:
             import pygltflib
-            import hashlib
+            import numpy as np
 
             gltf = pygltflib.GLTF2().load(glb_path)
             blob = gltf.binary_blob()
+
+            baseline_path = os.path.join(mod_dir, '.baseline_positions.npz')
+            try:
+                baseline = dict(np.load(baseline_path)) if os.path.isfile(baseline_path) else {}
+            except Exception:
+                baseline = {}
 
             has_new = False
             has_edited = False
@@ -403,22 +474,8 @@ def _sync_mod_json(mod_dir):
                 if orig is None:
                     has_new = True
                     continue
-                for prim in mesh.primitives:
-                    if prim.attributes.POSITION is not None:
-                        acc = gltf.accessors[prim.attributes.POSITION]
-                        if acc.count != orig.get('vertex_count', acc.count):
-                            has_edited = True
-                        else:
-                            bv = gltf.bufferViews[acc.bufferView]
-                            data = blob[bv.byteOffset:bv.byteOffset + bv.byteLength]
-                            if hashlib.md5(data).hexdigest() != orig.get('position_hash', ''):
-                                has_edited = True
-                    if prim.indices is not None:
-                        idx_acc = gltf.accessors[prim.indices]
-                        if idx_acc.count != orig.get('index_count', idx_acc.count):
-                            has_edited = True
-                    if has_edited:
-                        break
+                if _is_mesh_changed(gltf, mesh, blob, orig, baseline.get(mesh.name)):
+                    has_edited = True
 
             if has_new and 'mesh_add' not in types:
                 types.add('mesh_add')
@@ -644,7 +701,7 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
         # LoadPackages on it (H2M validates the calling plugin's GUID is in the filename)
         pkg_path = os.path.join(plugins_data, f"CG3HBuilder-{mod_id}.pkg")
 
-        from pkg_texture import build_standalone_pkg, png_to_dds, add_manifest_entry
+        from pkg_texture import build_standalone_pkg
 
         print(f"\n  Building standalone PKG: {len(custom_textures)} custom texture(s)")
 
@@ -690,7 +747,7 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
     with open(os.path.join(plugins, 'manifest.json'), 'w') as f:
         json.dump(h2m_manifest, f, indent=2)
 
-    print(f"\n  Build complete!")
+    print("\n  Build complete!")
     print(f"  Output: {build_dir}")
     return build_dir
 
@@ -759,17 +816,17 @@ def package_thunderstore(mod_dir):
                 stripped = _strip_unchanged_data(glb_full, mod_dir)
                 if stripped:
                     zf.writestr(glb_arc_path, stripped)
-                    print(f"  Packaged GLB: unchanged data stripped")
+                    print("  Packaged GLB: unchanged data stripped")
                 else:
                     zf.write(glb_full, glb_arc_path)
-                    print(f"  Packaged GLB: full (no manifest for stripping)")
+                    print("  Packaged GLB: full (no manifest for stripping)")
 
         # Build output — exclude .gpk files (contain original game data)
         # and skip any file already added above (stripped GLB)
         for root, dirs, files in os.walk(build_dir):
             for f in files:
-                if f.endswith('.gpk'):
-                    continue  # CC content — must be built on user's machine
+                if f.endswith('.gpk') or f.startswith('.baseline_'):
+                    continue  # CC content / build artifacts — not distributed
                 full = os.path.join(root, f)
                 arc = os.path.relpath(full, build_dir)
                 if glb_arc_path and arc.replace('\\', '/') == glb_arc_path:

@@ -1142,5 +1142,407 @@ def test_merge_glbs_animation_dedup():
         shutil.rmtree(out)
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# 12. Mesh change detection tests
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _make_glb_with_uvs(mesh_name, positions, uvs, indices, normals=None):
+    """Build a GLB with one mesh that has positions, UVs, optional normals.
+
+    positions: list of (x,y,z) tuples
+    uvs: list of (u,v) tuples
+    indices: list of int (triangle indices)
+    normals: list of (nx,ny,nz) tuples or None
+    Returns (glb_path, tmpdir).
+    """
+    import pygltflib
+
+    blob = bytearray()
+    buffer_views = []
+    accessors = []
+    vc = len(positions)
+
+    # Positions
+    pos_bytes = struct.pack(f'<{vc*3}f', *[c for p in positions for c in p])
+    pos_off = len(blob)
+    blob.extend(pos_bytes)
+    bv_pos = pygltflib.BufferView(buffer=0, byteOffset=pos_off, byteLength=len(pos_bytes))
+    buffer_views.append(bv_pos)
+    acc_pos = pygltflib.Accessor(
+        bufferView=len(buffer_views)-1, byteOffset=0,
+        componentType=pygltflib.FLOAT, count=vc, type='VEC3')
+    accessors.append(acc_pos)
+    pos_acc_idx = len(accessors) - 1
+
+    # UVs
+    uv_bytes = struct.pack(f'<{vc*2}f', *[c for u in uvs for c in u])
+    uv_off = len(blob)
+    blob.extend(uv_bytes)
+    bv_uv = pygltflib.BufferView(buffer=0, byteOffset=uv_off, byteLength=len(uv_bytes))
+    buffer_views.append(bv_uv)
+    acc_uv = pygltflib.Accessor(
+        bufferView=len(buffer_views)-1, byteOffset=0,
+        componentType=pygltflib.FLOAT, count=vc, type='VEC2')
+    accessors.append(acc_uv)
+    uv_acc_idx = len(accessors) - 1
+
+    # Normals (optional)
+    nrm_acc_idx = None
+    if normals:
+        nrm_bytes = struct.pack(f'<{vc*3}f', *[c for n in normals for c in n])
+        nrm_off = len(blob)
+        blob.extend(nrm_bytes)
+        bv_nrm = pygltflib.BufferView(buffer=0, byteOffset=nrm_off, byteLength=len(nrm_bytes))
+        buffer_views.append(bv_nrm)
+        acc_nrm = pygltflib.Accessor(
+            bufferView=len(buffer_views)-1, byteOffset=0,
+            componentType=pygltflib.FLOAT, count=vc, type='VEC3')
+        accessors.append(acc_nrm)
+        nrm_acc_idx = len(accessors) - 1
+
+    # Indices
+    ic = len(indices)
+    idx_bytes = struct.pack(f'<{ic}H', *indices)
+    idx_off = len(blob)
+    blob.extend(idx_bytes)
+    bv_idx = pygltflib.BufferView(buffer=0, byteOffset=idx_off, byteLength=len(idx_bytes))
+    buffer_views.append(bv_idx)
+    acc_idx = pygltflib.Accessor(
+        bufferView=len(buffer_views)-1, byteOffset=0,
+        componentType=pygltflib.UNSIGNED_SHORT, count=ic, type='SCALAR')
+    accessors.append(acc_idx)
+    idx_acc_idx = len(accessors) - 1
+
+    attrs = pygltflib.Attributes(POSITION=pos_acc_idx, TEXCOORD_0=uv_acc_idx)
+    if nrm_acc_idx is not None:
+        attrs.NORMAL = nrm_acc_idx
+    prim = pygltflib.Primitive(attributes=attrs, indices=idx_acc_idx)
+    mesh = pygltflib.Mesh(name=mesh_name, primitives=[prim])
+    node = pygltflib.Node(name=mesh_name, mesh=0)
+
+    gltf = pygltflib.GLTF2(
+        scene=0,
+        scenes=[pygltflib.Scene(nodes=[0])],
+        nodes=[node],
+        meshes=[mesh],
+        accessors=accessors,
+        bufferViews=buffer_views,
+        buffers=[pygltflib.Buffer(byteLength=len(blob))],
+    )
+    gltf.set_binary_blob(bytes(blob))
+
+    tmpdir = tempfile.mkdtemp()
+    path = os.path.join(tmpdir, 'test.glb')
+    gltf.save(path)
+    return path, tmpdir
+
+
+# Base triangle data used by all change detection tests
+_CD_POSITIONS = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+_CD_UVS = [(0, 0), (1, 0), (0, 1)]
+_CD_NORMALS = [(0, 0, 1), (0, 0, 1), (0, 0, 1)]
+_CD_INDICES = [0, 1, 2]
+
+
+def _make_manifest_and_baseline(mesh_name, positions, tmpdir):
+    """Create manifest.json and .baseline_positions.npz for change detection tests."""
+    manifest = {
+        'meshes': [{
+            'name': mesh_name,
+            'entry': 'Body_Mesh',
+            'gr2_index': 0,
+            'vertex_count': len(positions),
+            'index_count': len(_CD_INDICES),
+            'position_hash': 'unused',
+        }]
+    }
+    with open(os.path.join(tmpdir, 'manifest.json'), 'w') as f:
+        json.dump(manifest, f)
+
+    baseline = {mesh_name: np.array(positions, dtype=np.float32)}
+    np.savez_compressed(os.path.join(tmpdir, '.baseline_positions.npz'), **baseline)
+    return manifest
+
+
+def test_change_detect_unchanged_same_count():
+    """Same vertex count, same positions (within noise) → unchanged."""
+    from cg3h_build import _is_mesh_changed
+    import pygltflib
+
+    # Simulate Blender noise: add ~1e-5 to positions
+    noisy_pos = [(p[0] + 1e-5, p[1] - 1e-5, p[2] + 2e-5) for p in _CD_POSITIONS]
+    glb_path, tmpdir = _make_glb_with_uvs('TestMesh', noisy_pos, _CD_UVS, _CD_INDICES)
+    try:
+        manifest = _make_manifest_and_baseline('TestMesh', _CD_POSITIONS, tmpdir)
+        baseline = dict(np.load(os.path.join(tmpdir, '.baseline_positions.npz')))
+
+        gltf = pygltflib.GLTF2().load(glb_path)
+        blob = gltf.binary_blob()
+        orig = manifest['meshes'][0]
+        result = _is_mesh_changed(gltf, gltf.meshes[0], blob, orig, baseline.get('TestMesh'))
+        assert result is False, "Noise-only change should be undetected"
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_change_detect_position_edit():
+    """Same vertex count, position moved by 0.01 → changed."""
+    from cg3h_build import _is_mesh_changed
+    import pygltflib
+
+    edited_pos = [(0.01, 0, 0), (1, 0, 0), (0, 1, 0)]  # first vertex moved
+    glb_path, tmpdir = _make_glb_with_uvs('TestMesh', edited_pos, _CD_UVS, _CD_INDICES)
+    try:
+        manifest = _make_manifest_and_baseline('TestMesh', _CD_POSITIONS, tmpdir)
+        baseline = dict(np.load(os.path.join(tmpdir, '.baseline_positions.npz')))
+
+        gltf = pygltflib.GLTF2().load(glb_path)
+        blob = gltf.binary_blob()
+        result = _is_mesh_changed(gltf, gltf.meshes[0], blob,
+                                  manifest['meshes'][0], baseline.get('TestMesh'))
+        assert result is True, "Position edit should be detected"
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_change_detect_normal_split_unchanged():
+    """More vertices from normal splits but same unique (pos, UV) → unchanged."""
+    from cg3h_build import _is_mesh_changed
+    import pygltflib
+
+    # Simulate Blender normal split: duplicate vertex 0 with different normal
+    split_pos = list(_CD_POSITIONS) + [_CD_POSITIONS[0]]  # 4 verts, dup of v0
+    split_uvs = list(_CD_UVS) + [_CD_UVS[0]]              # same UV
+    split_idx = [0, 1, 2, 3, 1, 2]                         # extra tri using dup
+    split_nrm = list(_CD_NORMALS) + [(0, 1, 0)]            # different normal
+
+    glb_path, tmpdir = _make_glb_with_uvs('TestMesh', split_pos, split_uvs,
+                                          split_idx, normals=split_nrm)
+    try:
+        manifest = _make_manifest_and_baseline('TestMesh', _CD_POSITIONS, tmpdir)
+        baseline = dict(np.load(os.path.join(tmpdir, '.baseline_positions.npz')))
+
+        gltf = pygltflib.GLTF2().load(glb_path)
+        blob = gltf.binary_blob()
+        result = _is_mesh_changed(gltf, gltf.meshes[0], blob,
+                                  manifest['meshes'][0], baseline.get('TestMesh'))
+        assert result is False, "Normal-split inflation should be undetected"
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_change_detect_genuine_new_vertex():
+    """More vertices with genuinely new positions → changed."""
+    from cg3h_build import _is_mesh_changed
+    import pygltflib
+
+    new_pos = list(_CD_POSITIONS) + [(0.5, 0.5, 0)]  # genuinely new vertex
+    new_uvs = list(_CD_UVS) + [(0.5, 0.5)]            # new UV
+    new_idx = [0, 1, 2, 0, 3, 2]
+
+    glb_path, tmpdir = _make_glb_with_uvs('TestMesh', new_pos, new_uvs, new_idx)
+    try:
+        manifest = _make_manifest_and_baseline('TestMesh', _CD_POSITIONS, tmpdir)
+        baseline = dict(np.load(os.path.join(tmpdir, '.baseline_positions.npz')))
+
+        gltf = pygltflib.GLTF2().load(glb_path)
+        blob = gltf.binary_blob()
+        result = _is_mesh_changed(gltf, gltf.meshes[0], blob,
+                                  manifest['meshes'][0], baseline.get('TestMesh'))
+        assert result is True, "Genuine new vertex should be detected"
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_change_detect_fewer_vertices():
+    """Fewer vertices than original → changed."""
+    from cg3h_build import _is_mesh_changed
+    import pygltflib
+
+    fewer_pos = [_CD_POSITIONS[0], _CD_POSITIONS[1]]  # only 2 verts
+    fewer_uvs = [_CD_UVS[0], _CD_UVS[1]]
+    fewer_idx = [0, 1, 0]
+
+    glb_path, tmpdir = _make_glb_with_uvs('TestMesh', fewer_pos, fewer_uvs, fewer_idx)
+    try:
+        manifest = _make_manifest_and_baseline('TestMesh', _CD_POSITIONS, tmpdir)
+        baseline = dict(np.load(os.path.join(tmpdir, '.baseline_positions.npz')))
+
+        gltf = pygltflib.GLTF2().load(glb_path)
+        blob = gltf.binary_blob()
+        result = _is_mesh_changed(gltf, gltf.meshes[0], blob,
+                                  manifest['meshes'][0], baseline.get('TestMesh'))
+        assert result is True, "Fewer vertices should be detected as changed"
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_change_detect_no_baseline_fallback():
+    """Without baseline file, same vertex count → unchanged (graceful fallback)."""
+    from cg3h_build import _is_mesh_changed
+    import pygltflib
+
+    glb_path, tmpdir = _make_glb_with_uvs('TestMesh', _CD_POSITIONS, _CD_UVS, _CD_INDICES)
+    try:
+        manifest = _make_manifest_and_baseline('TestMesh', _CD_POSITIONS, tmpdir)
+
+        gltf = pygltflib.GLTF2().load(glb_path)
+        blob = gltf.binary_blob()
+        # No baseline passed — should fall back to count-based check
+        result = _is_mesh_changed(gltf, gltf.meshes[0], blob,
+                                  manifest['meshes'][0], None)
+        assert result is False, "No baseline + same count should be unchanged"
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_strip_keeps_new_mesh_strips_original():
+    """_strip_unchanged_data keeps new meshes, strips unchanged originals."""
+    from cg3h_build import _strip_unchanged_data
+    import pygltflib
+
+    tmpdir = tempfile.mkdtemp()
+    try:
+        # Create manifest with one original mesh
+        manifest = {
+            'meshes': [{
+                'name': 'OriginalMesh',
+                'entry': 'Body_Mesh',
+                'gr2_index': 0,
+                'vertex_count': 3,
+                'index_count': 3,
+                'position_hash': 'unused',
+            }]
+        }
+        with open(os.path.join(tmpdir, 'manifest.json'), 'w') as f:
+            json.dump(manifest, f)
+
+        # Save baseline for original mesh
+        baseline = {'OriginalMesh': np.array(_CD_POSITIONS, dtype=np.float32)}
+        np.savez_compressed(os.path.join(tmpdir, '.baseline_positions.npz'), **baseline)
+
+        # Build GLB with original mesh (unchanged) + new mesh
+        import pygltflib as pgl
+        blob = bytearray()
+        buffer_views = []
+        accessors = []
+        meshes_list = []
+        nodes_list = []
+
+        for mi, (name, positions) in enumerate([
+            ('OriginalMesh', _CD_POSITIONS),
+            ('NewMesh', [(2, 0, 0), (3, 0, 0), (2, 1, 0)]),
+        ]):
+            vc = len(positions)
+            pos_bytes = struct.pack(f'<{vc*3}f', *[c for p in positions for c in p])
+            pos_off = len(blob)
+            blob.extend(pos_bytes)
+            buffer_views.append(pgl.BufferView(buffer=0, byteOffset=pos_off,
+                                               byteLength=len(pos_bytes)))
+            accessors.append(pgl.Accessor(
+                bufferView=len(buffer_views)-1, byteOffset=0,
+                componentType=pgl.FLOAT, count=vc, type='VEC3'))
+            pos_ai = len(accessors) - 1
+
+            uv_bytes = struct.pack(f'<{vc*2}f', *[c for u in _CD_UVS for c in u])
+            uv_off = len(blob)
+            blob.extend(uv_bytes)
+            buffer_views.append(pgl.BufferView(buffer=0, byteOffset=uv_off,
+                                               byteLength=len(uv_bytes)))
+            accessors.append(pgl.Accessor(
+                bufferView=len(buffer_views)-1, byteOffset=0,
+                componentType=pgl.FLOAT, count=vc, type='VEC2'))
+            uv_ai = len(accessors) - 1
+
+            idx_bytes = struct.pack('<3H', 0, 1, 2)
+            idx_off = len(blob)
+            blob.extend(idx_bytes)
+            buffer_views.append(pgl.BufferView(buffer=0, byteOffset=idx_off,
+                                               byteLength=len(idx_bytes)))
+            accessors.append(pgl.Accessor(
+                bufferView=len(buffer_views)-1, byteOffset=0,
+                componentType=pgl.UNSIGNED_SHORT, count=3, type='SCALAR'))
+            idx_ai = len(accessors) - 1
+
+            prim = pgl.Primitive(
+                attributes=pgl.Attributes(POSITION=pos_ai, TEXCOORD_0=uv_ai),
+                indices=idx_ai)
+            meshes_list.append(pgl.Mesh(name=name, primitives=[prim]))
+            nodes_list.append(pgl.Node(name=name, mesh=mi))
+
+        gltf = pgl.GLTF2(
+            scene=0,
+            scenes=[pgl.Scene(nodes=list(range(len(nodes_list))))],
+            nodes=nodes_list,
+            meshes=meshes_list,
+            accessors=accessors,
+            bufferViews=buffer_views,
+            buffers=[pgl.Buffer(byteLength=len(blob))],
+        )
+        gltf.set_binary_blob(bytes(blob))
+        glb_path = os.path.join(tmpdir, 'test.glb')
+        gltf.save(glb_path)
+
+        # Run strip
+        result = _strip_unchanged_data(glb_path, tmpdir)
+        assert result is not None, "Should produce stripped GLB"
+
+        # Load stripped GLB and verify only NewMesh remains
+        stripped_path = os.path.join(tmpdir, 'stripped.glb')
+        with open(stripped_path, 'wb') as f:
+            f.write(result)
+        stripped = pgl.GLTF2().load(stripped_path)
+        mesh_names = [m.name for m in stripped.meshes]
+        assert 'NewMesh' in mesh_names, f"NewMesh should be kept: {mesh_names}"
+        assert 'OriginalMesh' not in mesh_names, f"OriginalMesh should be stripped: {mesh_names}"
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_strip_keeps_edited_original():
+    """_strip_unchanged_data keeps an original mesh that was edited."""
+    from cg3h_build import _strip_unchanged_data
+    import pygltflib as pgl
+
+    tmpdir = tempfile.mkdtemp()
+    try:
+        manifest = {
+            'meshes': [{
+                'name': 'EditedMesh',
+                'entry': 'Body_Mesh',
+                'gr2_index': 0,
+                'vertex_count': 3,
+                'index_count': 3,
+                'position_hash': 'unused',
+            }]
+        }
+        with open(os.path.join(tmpdir, 'manifest.json'), 'w') as f:
+            json.dump(manifest, f)
+
+        baseline = {'EditedMesh': np.array(_CD_POSITIONS, dtype=np.float32)}
+        np.savez_compressed(os.path.join(tmpdir, '.baseline_positions.npz'), **baseline)
+
+        # Build GLB with edited positions (moved vertex by 0.05)
+        edited_pos = [(0.05, 0, 0), (1, 0, 0), (0, 1, 0)]
+        glb_path, glb_tmpdir = _make_glb_with_uvs('EditedMesh', edited_pos,
+                                                   _CD_UVS, _CD_INDICES)
+        # Copy GLB to mod dir
+        import shutil as sh
+        sh.copy2(glb_path, os.path.join(tmpdir, 'test.glb'))
+        sh.rmtree(glb_tmpdir)
+
+        result = _strip_unchanged_data(os.path.join(tmpdir, 'test.glb'), tmpdir)
+        assert result is not None, "Edited mesh should produce output"
+
+        stripped_path = os.path.join(tmpdir, 'stripped.glb')
+        with open(stripped_path, 'wb') as f:
+            f.write(result)
+        stripped = pgl.GLTF2().load(stripped_path)
+        mesh_names = [m.name for m in stripped.meshes]
+        assert 'EditedMesh' in mesh_names, f"Edited mesh should be kept: {mesh_names}"
+    finally:
+        shutil.rmtree(tmpdir)
+
+
 if __name__ == '__main__':
     sys.exit(_run_all())

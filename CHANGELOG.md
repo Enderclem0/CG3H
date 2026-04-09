@@ -4,6 +4,32 @@ All notable changes to CG3H are documented here.
 
 ---
 
+## v3.3.0
+
+Smart mesh change detection — Blender normal-split tolerance and position edit detection.
+
+### Added
+
+- **Baseline position file** — exporter saves `.baseline_positions.npz` alongside manifest for per-vertex comparison at build time
+- **Normal-split tolerance** — meshes with extra vertices from Blender's normal splitting are correctly detected as unchanged (unique UV + position count ≤ original)
+- **Position edit detection** — same vertex count meshes compared against baseline with 1e-4 tolerance (absorbs Blender ~1e-5 float noise, catches any visible edit ≥ 0.001)
+- **`_is_mesh_changed()` function** — shared change detection used by both `_strip_unchanged_data()` and `_sync_mod_json()`, replacing broken per-function checks
+- **Manifest vertex metadata** — `vertex_count`, `index_count`, `position_hash` stored per mesh in manifest for change detection
+
+### Changed
+
+- `_strip_unchanged_data()` uses `_is_mesh_changed()` instead of unreliable vertex count comparison
+- `_sync_mod_json()` uses same shared function — mod type detection (`mesh_replace` vs `mesh_add`) now accurate
+- Original meshes correctly stripped from mod packages when unchanged (previously kept due to Blender normal-split vertex inflation)
+- `.baseline_positions.npz` excluded from Thunderstore ZIP packages
+
+### Fixed
+
+- Blender re-export adding 4-200+ vertices per mesh from normal splits no longer triggers false `mesh_replace` tagging
+- Stripped mesh count in build output no longer shows negative numbers when new meshes are present
+
+---
+
 ## v3.2.0
 
 Multi-mod robustness: name deduplication, animation merge, and conflict detection.
