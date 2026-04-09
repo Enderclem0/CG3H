@@ -4,6 +4,42 @@ All notable changes to CG3H are documented here.
 
 ---
 
+## v3.1.0
+
+Multi-entry character support and improved game path detection.
+
+### Added
+
+- **Multi-entry GPK export** — all mesh entries exported by default (e.g. Hecate: Battle + Hub)
+- **Skeleton merge** — bones from all entries merged into unified skeleton for the GLB
+- **Multi-entry import** — manifest routes GLB meshes to correct GPK entries, each serialized independently
+- **Per-entry mesh routing** — `new_mesh_routing` in mod.json targets new meshes to specific entries (e.g. battle-only accessories)
+- **Smart template selection** — new meshes pick the existing mesh with best bone overlap as template
+- **Manifest merging** — multi-mod builds merge manifests from all mods
+- **Steam auto-detection** — game path found via Windows registry + `libraryfolders.vdf` (supports custom Steam libraries)
+- **Stale texture cache fallback** — if texture index misses entries, full .pkg scan with auto-cleanup
+- **Blender addon CG3H panel** — sidebar panel for assigning meshes to entries with checkboxes
+- **Blender addon auto-build** — export runs `cg3h_build.py` via system Python to produce PKG + Thunderstore ZIP
+- **Clear error on missing deps** — `texture2ddecoder` / `Pillow` missing now shows explicit error instead of silent failure
+- **requirements.txt** for easy dependency install
+- **Cross-platform guards** — `ctypes.windll` wrapped in try/except for non-Windows import compatibility
+
+### Changed
+
+- Export defaults to all `_Mesh` entries instead of body entry only
+- GUI Create tab shows entry checkboxes for multi-entry characters
+- GUI mod name/author moved to Build tab with persistent author
+- `_build_entry_routing()` replaces single-entry body selection
+- `load_gr2()` refactored into `load_sdb()` + `load_gr2_entry()` for SDB reuse
+- `os.path.abspath` for gpk_dir normalization (fixes mixed slash paths)
+
+### Known Limitations
+
+- Multi-mod animation merge not yet implemented (v3.2)
+- New mesh bone bindings limited to template mesh's bindings (v4.0)
+
+---
+
 ## v3.0.0
 
 Shared runtime builder, Blender addon, and r2modman integration.
