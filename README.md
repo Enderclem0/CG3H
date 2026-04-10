@@ -71,6 +71,7 @@ The game's `granny2_x64.dll` is required (auto-detected from Steam).
 
 ## Documentation
 
+- [`docs/skinning_guide.md`](docs/skinning_guide.md) — **Modder guide**: entries, templates, and BoneBindings explained
 - [`docs/mod_spec.md`](docs/mod_spec.md) — Mod types, mod.json format, conflict resolution
 - [`docs/file_formats.md`](docs/file_formats.md) — GPK / SDB / GR2 / PKG binary layouts
 - [`docs/texture_pipeline.md`](docs/texture_pipeline.md) — Texture export/import pipeline

@@ -14,9 +14,12 @@ import tempfile
 import shutil
 import numpy as np
 
-# Add tools/ to path
-_tools = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'tools')
+# Add tools/ and blender_addon/cg3h/ to path so tests can import pure helpers
+_repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_tools = os.path.join(_repo, 'tools')
+_addon = os.path.join(_repo, 'blender_addon', 'cg3h')
 sys.path.insert(0, _tools)
+sys.path.insert(0, _addon)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1542,6 +1545,218 @@ def test_strip_keeps_edited_original():
         assert 'EditedMesh' in mesh_names, f"Edited mesh should be kept: {mesh_names}"
     finally:
         shutil.rmtree(tmpdir)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 13. Manifest builder tests (Phase 0 of v3.4)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def test_manifest_has_bb_names():
+    """build_manifest writes bb_names per mesh."""
+    from gr2_to_gltf import build_manifest
+
+    pos = np.array([[0,0,0],[1,0,0],[0,1,0]], dtype=np.float32)
+    normals = np.array([[0,0,1]]*3, dtype=np.float32)
+    uvs = np.array([[0,0],[1,0],[0,1]], dtype=np.float32)
+    indices = np.array([0,1,2], dtype=np.uint16)
+    md = (pos, normals, uvs, None, None, indices)
+
+    manifest = build_manifest(
+        character='TestChar',
+        out_basename='TestChar.glb',
+        mesh_entries=['Body_Mesh'],
+        mesh_names=['Mesh1'],
+        exported_gr2_indices=[{'entry': 'Body_Mesh', 'gr2_index': 0}],
+        mesh_data_list=[md],
+        mesh_bb_names_list=[['BoneA', 'BoneB', 'BoneC']],
+    )
+
+    assert manifest['character'] == 'TestChar'
+    assert len(manifest['meshes']) == 1
+    m = manifest['meshes'][0]
+    assert m['name'] == 'Mesh1'
+    assert m['vertex_count'] == 3
+    assert m['index_count'] == 3
+    assert m['bb_names'] == ['BoneA', 'BoneB', 'BoneC']
+    assert 'position_hash' in m
+
+
+def test_manifest_textures_optional():
+    """build_manifest only includes textures field when provided."""
+    from gr2_to_gltf import build_manifest
+
+    pos = np.array([[0,0,0]], dtype=np.float32)
+    md = (pos, None, None, None, None, np.array([0], dtype=np.uint16))
+
+    m1 = build_manifest('C', 'C.glb', [], [], [], [], [])
+    assert 'textures' not in m1
+    assert 'animations' not in m1
+
+    m2 = build_manifest('C', 'C.glb', ['E'], ['M'],
+                        [{'entry': 'E', 'gr2_index': 0}], [md], [['B']],
+                        manifest_textures={'tex1': {'png_hash': 'abc'}},
+                        anim_data=[{'name': 'Idle'}])
+    assert m2['textures'] == {'tex1': {'png_hash': 'abc'}}
+    assert m2['animations'] == {'count': 1, 'names': ['Idle']}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 14. cg3h_core helpers (Phase 1 of v3.4)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _make_test_manifest():
+    return {
+        'character': 'Test',
+        'mesh_entries': ['Battle_Mesh', 'Hub_Mesh'],
+        'meshes': [
+            {'name': 'BattleBody', 'entry': 'Battle_Mesh', 'gr2_index': 0,
+             'bb_names': ['Hip', 'Spine', 'Head']},
+            {'name': 'BattleOutline', 'entry': 'Battle_Mesh', 'gr2_index': 1,
+             'bb_names': ['Hip', 'Spine']},
+            {'name': 'HubBody', 'entry': 'Hub_Mesh', 'gr2_index': 0,
+             'bb_names': ['Hip', 'Spine', 'Crown']},
+            {'name': 'HubShadowMesh', 'entry': 'Hub_Mesh', 'gr2_index': 1,
+             'bb_names': ['Hip']},
+        ],
+    }
+
+
+def test_select_template_exact_overlap():
+    """Template with most overlapping bones is picked."""
+    from cg3h_core import select_template
+
+    m = _make_test_manifest()
+    # Active bones include Crown, only HubBody has it
+    tpl = select_template(m, {'Hip', 'Spine', 'Crown'})
+    assert tpl is not None
+    assert tpl['name'] == 'HubBody'
+
+
+def test_select_template_skips_outline_shadow():
+    """Outline and Shadow meshes are never templates."""
+    from cg3h_core import select_template
+
+    m = _make_test_manifest()
+    tpl = select_template(m, {'Hip'})
+    assert tpl is not None
+    assert 'Outline' not in tpl['name']
+    assert 'Shadow' not in tpl['name']
+
+
+def test_select_template_restrict_entries():
+    """restrict_entries limits candidates."""
+    from cg3h_core import select_template
+
+    m = _make_test_manifest()
+    tpl = select_template(m, {'Hip', 'Spine', 'Crown'},
+                          restrict_entries={'Battle_Mesh'})
+    assert tpl is not None
+    assert tpl['entry'] == 'Battle_Mesh'
+    assert tpl['name'] == 'BattleBody'
+
+
+def test_select_template_empty_manifest():
+    """No manifest returns None."""
+    from cg3h_core import select_template
+    assert select_template(None, {'Hip'}) is None
+    assert select_template({'meshes': []}, {'Hip'}) is None
+
+
+def test_visible_bones_per_entry():
+    """ALL respects routing; entry/mesh presets return their bb_names."""
+    # Replicates the logic of _compute_visible_bones from __init__.py
+    # without importing bpy.
+    m = _make_test_manifest()
+
+    def _compute_visible(manifest, preset, target_entries=None):
+        if not manifest or preset == "WHOLE":
+            return None
+        if preset == "ALL":
+            if not target_entries:
+                return None  # no routing context — show literally everything
+            v = set()
+            for mesh in manifest.get('meshes', []):
+                if mesh.get('entry') in target_entries:
+                    v.update(mesh.get('bb_names', []))
+            return v
+        if preset.startswith("E:"):
+            entry = preset[2:]
+            v = set()
+            for mesh in manifest.get('meshes', []):
+                if mesh.get('entry') == entry:
+                    v.update(mesh.get('bb_names', []))
+            return v
+        if preset.startswith("M:"):
+            for mesh in manifest.get('meshes', []):
+                if mesh.get('name') == preset[2:]:
+                    return set(mesh.get('bb_names', []))
+            return set()
+        return None
+
+    # WHOLE → None (literal everything regardless of routing)
+    assert _compute_visible(m, "WHOLE", target_entries={'Battle_Mesh'}) is None
+    # ALL with no routing context → None (show literally everything)
+    assert _compute_visible(m, "ALL") is None
+    # ALL with Battle routing → union of all Battle meshes' bb_names
+    assert _compute_visible(m, "ALL", target_entries={'Battle_Mesh'}) == {'Hip', 'Spine', 'Head'}
+    # ALL with both entries routed → union of all bb_names
+    assert _compute_visible(m, "ALL", target_entries={'Battle_Mesh', 'Hub_Mesh'}) == {
+        'Hip', 'Spine', 'Head', 'Crown'}
+    # Explicit entry preset → union of that entry's meshes
+    assert _compute_visible(m, "E:Battle_Mesh") == {'Hip', 'Spine', 'Head'}
+    # Hub entry → HubBody {Hip,Spine,Crown} + HubShadowMesh {Hip}
+    assert _compute_visible(m, "E:Hub_Mesh") == {'Hip', 'Spine', 'Crown'}
+    # Specific mesh
+    assert _compute_visible(m, "M:HubBody") == {'Hip', 'Spine', 'Crown'}
+    # Unknown mesh → empty set
+    assert _compute_visible(m, "M:Nonexistent") == set()
+
+
+def test_find_weight_violations_new_mesh():
+    """Weight on a bone not in the template's bindings is flagged."""
+    from cg3h_core import find_weight_violations
+
+    data = [{'name': 'Cube', 'is_original': False,
+             'groups': {'Hip': 12, 'Tail': 3}}]
+    lookup = {'Cube': {'Hip', 'Spine'}}
+    v = find_weight_violations(data, lookup)
+    assert len(v) == 1
+    assert v[0]['mesh'] == 'Cube'
+    assert v[0]['bone'] == 'Tail'
+    assert v[0]['vertex_count'] == 3
+    assert v[0]['is_original'] is False
+
+
+def test_find_weight_violations_original_flagged_too():
+    """Existing meshes are flagged with same severity."""
+    from cg3h_core import find_weight_violations
+
+    data = [{'name': 'BattleBody', 'is_original': True,
+             'groups': {'Hip': 5, 'AlienBone': 1}}]
+    lookup = {'BattleBody': {'Hip'}}
+    v = find_weight_violations(data, lookup)
+    assert len(v) == 1
+    assert v[0]['is_original'] is True
+
+
+def test_find_weight_violations_unknown_mesh_skipped():
+    """Mesh not in lookup is silently skipped."""
+    from cg3h_core import find_weight_violations
+
+    data = [{'name': 'Mystery', 'is_original': False,
+             'groups': {'Hip': 5}}]
+    v = find_weight_violations(data, {})
+    assert v == []
+
+
+def test_find_weight_violations_zero_count_ignored():
+    """A group with zero vertex count is not a violation."""
+    from cg3h_core import find_weight_violations
+
+    data = [{'name': 'Cube', 'is_original': False,
+             'groups': {'Tail': 0}}]
+    v = find_weight_violations(data, {'Cube': {'Hip'}})
+    assert v == []
 
 
 if __name__ == '__main__':

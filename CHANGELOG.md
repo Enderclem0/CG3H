@@ -4,6 +4,60 @@ All notable changes to CG3H are documented here.
 
 ---
 
+## v3.4.0
+
+Blender skinning UX — bone color overlay, template toggle, export validation.
+
+### Added
+
+- **Bone color overlay** — in pose/weight-paint mode, armature bones are colored green/yellow/red based on availability for the selected mesh's BoneBindings. Green = available on all sibling meshes; yellow = partial; red = silent fallback to root.
+- **Template override dropdown** — sidebar dropdown lets modders pick which existing mesh's BoneBindings their new mesh inherits, instead of relying on automatic selection. Default "Auto (smart)" picks the best match by bone overlap.
+- **Export validation** — pre-flight check walks vertex groups before exporting and shows a popup listing weights painted on bones outside the resolved BoneBindings. Lists violations grouped by mesh; user can cancel or export anyway.
+- **`bb_names` in manifest** — exporter now stores per-mesh bone binding names. Already extracted at export time but previously discarded.
+- **`cg3h_core.py`** — new pure-helper module in `blender_addon/cg3h/` containing `select_template`, `compute_coverage`, `find_weight_violations`. Importable from tests without bpy.
+- **Bone coloring kill switch** — `enable_bone_coloring` preference in addon settings.
+
+### Changed
+
+- Blender addon `bl_info["version"]` bumped to (3, 4, 0).
+- Manifest reading wired into `CG3H_OT_Import` — manifest JSON cached on the scene as `cg3h_manifest_json` for use by sidebar/export validation.
+- `_get_characters` enum callback now caches items at module level (fixes pre-existing Blender enum-callback GC pitfall).
+- `gr2_to_gltf.py` manifest construction extracted into `build_manifest()` pure function for testability.
+
+### Fixed
+
+- Pre-existing `_get_characters` enum callback rebuilt its list every call (potential GC crash). Now cached.
+
+---
+
+## v3.4.0
+
+Blender skinning UX — bone visibility presets and pre-export weight validation.
+
+### Added
+
+- **Bone visibility presets** — sidebar dropdown filters the armature view by entry or template. Cycle with arrow buttons or pick directly. Presets:
+  - **Whole armature** — every bone in the rig
+  - **All routed bones** — union of bones for the active mesh's routed entries
+  - **Entry: X** — only bones used by meshes in entry X
+  - **Mesh: X** — only the bones in template mesh X
+- **Pre-export weight validation** — when you export, a popup lists any vertex weights painted on bones outside the resolved BoneBindings (which would silently fall back to root at engine load). Cancel to fix, or export anyway.
+- **Setup for Skinning button** — one-click parent + Armature modifier so a new mesh is immediately weight-paintable.
+- **Manifest carries `bb_names`** — each mesh's BoneBindings list is stored in `manifest.json` so the addon and validator know which bones every mesh can use.
+- **Skinning guide** — `docs/skinning_guide.md` walks modders through entries, templates, BoneBindings, and the routing/dropdown workflow.
+
+### Changed
+
+- Blender addon `bl_info["version"]` bumped to (3, 4, 0). Minimum Blender version stays at 4.0.
+- `_get_characters` enum callback now uses module-level item caching (fixes a pre-existing Blender enum-callback GC pitfall).
+
+### Fixed
+
+- Trailing/empty entries in `cg3h_entries` no longer create malformed `cg3h_entry_` properties on meshes.
+- `_read_gpk_entries` decodes filenames with `errors='replace'` and wraps the parser in try/except so a malformed GPK doesn't crash the import dialog.
+
+---
+
 ## v3.3.0
 
 Smart mesh change detection — Blender normal-split tolerance and position edit detection.

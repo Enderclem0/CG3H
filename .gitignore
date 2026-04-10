@@ -44,3 +44,9 @@ ROADMAP.md
 
 # Build artifacts (local only)
 .baseline_positions.npz
+CG3H-Blender-Addon.zip
+CG3H-Merger-*.zip
+CG3H-Python-Tools.zip
+blender_addon/cg3h/cg3h_exporter.exe
+blender_addon/cg3h/cg3h_importer.exe
+blender_addon/cg3h/cg3h_builder.exe

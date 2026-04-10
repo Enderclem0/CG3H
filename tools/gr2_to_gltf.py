@@ -42,6 +42,47 @@ _BONE_STRIDE: int = 0
 _BB_STRIDE: int = 0
 _TRANSFORM_OFFS: dict = {}   # offsets within granny_transform: flags/translation/orientation
 
+
+def build_manifest(character, out_basename, mesh_entries, mesh_names,
+                   exported_gr2_indices, mesh_data_list, mesh_bb_names_list,
+                   manifest_textures=None, anim_data=None):
+    """Construct the manifest dict for an exported character.
+
+    Pure function — no I/O.  mesh_data_list contains tuples of
+    (positions, normals, uvs, weights, joints, indices); mesh_bb_names_list
+    parallels it with the bone-binding name list per mesh.
+    """
+    import hashlib
+    meshes = []
+    for mn, gi, md, bb in zip(mesh_names, exported_gr2_indices,
+                              mesh_data_list, mesh_bb_names_list):
+        meshes.append({
+            'name': mn,
+            'entry': gi['entry'],
+            'gr2_index': gi['gr2_index'],
+            'vertex_count': len(md[0]),
+            'index_count': len(md[5]),
+            'position_hash': hashlib.md5(md[0].tobytes()).hexdigest(),
+            'bb_names': list(bb),
+        })
+    manifest = {
+        'character': character,
+        'glb': out_basename,
+        'gpk': f"{character}.gpk",
+        'sdb': f"{character}.sdb",
+        'mesh_entries': mesh_entries,
+        'meshes': meshes,
+    }
+    if manifest_textures:
+        manifest['textures'] = manifest_textures
+    if anim_data:
+        manifest['animations'] = {
+            'count': len(anim_data),
+            'names': [a['name'] for a in anim_data],
+        }
+    return manifest
+
+
 # ─────────────────────────── GPK extraction ──────────────────────────────────
 
 def extract_all_from_gpk(gpk_path):
@@ -319,6 +360,7 @@ def read_mesh_data(mesh_ptr, bone_name_to_idx, dll, debug=False):
     off_bb_name = _t('granny_bone_binding', 'BoneName')
 
     palette = []
+    bb_name_list = []
     debug_palette = []
     for bi in range(bb_count):
         entry    = bb_ptr + bi * _BB_STRIDE
@@ -326,6 +368,7 @@ def read_mesh_data(mesh_ptr, bone_name_to_idx, dll, debug=False):
         bb_name  = read_cstr(name_ptr) if _readable(name_ptr, 4) else ''
         global_idx = bone_name_to_idx.get(bb_name, 0)
         palette.append(global_idx)
+        bb_name_list.append(bb_name)
         debug_palette.append((bb_name, bone_name_to_idx.get(bb_name)))
     if not palette:
         palette = [0]
@@ -444,7 +487,7 @@ def read_mesh_data(mesh_ptr, bone_name_to_idx, dll, debug=False):
                 weights = weights[:max_idx + 1]
                 joints = joints[:max_idx + 1]
 
-    return mesh_name, positions, normals, uvs, weights, joints, indices
+    return mesh_name, positions, normals, uvs, weights, joints, indices, bb_name_list
 
 # ─────────────────────────── Animation extraction ───────────────────────────
 
@@ -1774,6 +1817,7 @@ def main():
 
     print("[4/5] Reading skeleton and mesh data")
     mesh_data_list = []
+    mesh_bb_names_list = []
     mesh_names = []
     exported_gr2_indices = []
     local_mesh_tex = {}  # local_index → tex_name (resolved per-entry)
@@ -1824,7 +1868,7 @@ def main():
             result = read_mesh_data(mesh_ptr, bone_name_to_idx, dll, debug=args.debug)
             if result is None:
                 continue
-            mesh_name, positions, normals, uvs, weights, joints, indices = result
+            mesh_name, positions, normals, uvs, weights, joints, indices, bb_names = result
             if mesh_name in seen_names:
                 seen_names[mesh_name] += 1
                 mesh_name = f"{mesh_name}_{seen_names[mesh_name]}"
@@ -1834,6 +1878,7 @@ def main():
             print(f"  Mesh[{mi}] {mesh_name!r}: {len(positions)} verts, {len(indices)//3} tris  [{mtype}]")
             local_idx = len(mesh_data_list)
             mesh_data_list.append((positions, normals, uvs, weights, joints, indices))
+            mesh_bb_names_list.append(bb_names)
             mesh_names.append(mesh_name)
             exported_gr2_indices.append({'entry': mesh_key, 'gr2_index': mi})
             # Map texture from this entry's texture map
@@ -1972,25 +2017,17 @@ def main():
 
     # Write manifest for reimport
     import json
-    import hashlib
-    manifest = {
-        'character': args.name,
-        'glb': os.path.basename(out_path),
-        'gpk': f"{args.name}.gpk",
-        'sdb': f"{args.name}.sdb",
-        'mesh_entries': mesh_keys,
-        'meshes': [{'name': mn, 'entry': gi['entry'], 'gr2_index': gi['gr2_index'],
-                    'vertex_count': len(md[0]), 'index_count': len(md[5]),
-                    'position_hash': hashlib.md5(md[0].tobytes()).hexdigest()}
-                   for mn, gi, md in zip(mesh_names, exported_gr2_indices, mesh_data_list)],
-    }
-    if args.textures and 'manifest_textures' in dir():
-        manifest['textures'] = manifest_textures
-    if anim_data:
-        manifest['animations'] = {
-            'count': len(anim_data),
-            'names': [a['name'] for a in anim_data],
-        }
+    manifest = build_manifest(
+        character=args.name,
+        out_basename=os.path.basename(out_path),
+        mesh_entries=mesh_keys,
+        mesh_names=mesh_names,
+        exported_gr2_indices=exported_gr2_indices,
+        mesh_data_list=mesh_data_list,
+        mesh_bb_names_list=mesh_bb_names_list,
+        manifest_textures=manifest_textures if (args.textures and 'manifest_textures' in dir()) else None,
+        anim_data=anim_data,
+    )
     manifest_path = os.path.join(os.path.dirname(out_path), 'manifest.json')
     with open(manifest_path, 'w') as f:
         json.dump(manifest, f, indent=2)

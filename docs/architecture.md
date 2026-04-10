@@ -62,6 +62,35 @@ The DLL's `GrannyBeginFileDataTreeWriting` accepts a param3 argument:
 
 We use param3=0. `GrannyRemapFileStrings` returns False (no-op), but all data is valid.
 
+### BoneBindings data flow
+
+Each GR2 mesh stores a `BoneBindings` array — the subset of skeleton bones whose
+indices can appear in that mesh's vertex bone indices. Weights painted on bones
+outside this set silently fall back to bone 0 (root) at engine load time.
+
+- **Exporter** (`tools/gr2_to_gltf.py`): `read_mesh_data()` extracts the bone
+  binding name list from the GR2 mesh; `build_manifest()` writes it as
+  `meshes[i].bb_names` in `manifest.json`.
+- **Blender addon import** (`blender_addon/cg3h/__init__.py`): `CG3H_OT_Import`
+  caches the manifest JSON on `scene.cg3h_manifest_json`. Pure helpers in
+  `blender_addon/cg3h/cg3h_core.py` consume the cache:
+  - `select_template(manifest, active_bones, restrict_entries=None)` — picks
+    the existing mesh with the best bone overlap as a template for new meshes.
+  - `compute_coverage(manifest, mesh_name, mesh_entries, all_bones, override,
+    is_original)` — returns green/yellow/red bone sets for the viewport overlay.
+  - `find_weight_violations(mesh_vertex_data, bb_names_lookup)` — flags any
+    non-zero weight on a bone outside the resolved BoneBindings.
+- **Viewport overlay**: `_compute_bone_coverage()` resolves the armature for the
+  active mesh, calls `compute_coverage()`, and applies custom palette colors to
+  pose bones via `pose_bone.color.palette = 'CUSTOM'`. Triggered by msgbus
+  subscription on `LayerObjects.active` and the template-override property
+  `update=` callback. Reset on unselect/mode-change/addon-unregister.
+- **Pre-export validation**: `CG3H_OT_Export._check_bone_bindings()` walks
+  selected meshes' vertex groups, resolves the allowed bones per mesh
+  (template's for new, own for originals), counts non-zero weighted vertices,
+  and surfaces violations through a confirmation dialog
+  (`CG3H_OT_ExportViolationsConfirm`).
+
 ### Vertex patching in DLL memory
 Vertex data is modified by `ctypes.memmove` directly into the DLL's loaded data buffers
 before serialization. The DLL's writer then serializes the modified data tree, including
