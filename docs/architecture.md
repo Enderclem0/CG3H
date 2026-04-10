@@ -76,15 +76,16 @@ outside this set silently fall back to bone 0 (root) at engine load time.
   `blender_addon/cg3h/cg3h_core.py` consume the cache:
   - `select_template(manifest, active_bones, restrict_entries=None)` — picks
     the existing mesh with the best bone overlap as a template for new meshes.
-  - `compute_coverage(manifest, mesh_name, mesh_entries, all_bones, override,
-    is_original)` — returns green/yellow/red bone sets for the viewport overlay.
   - `find_weight_violations(mesh_vertex_data, bb_names_lookup)` — flags any
     non-zero weight on a bone outside the resolved BoneBindings.
-- **Viewport overlay**: `_compute_bone_coverage()` resolves the armature for the
-  active mesh, calls `compute_coverage()`, and applies custom palette colors to
-  pose bones via `pose_bone.color.palette = 'CUSTOM'`. Triggered by msgbus
-  subscription on `LayerObjects.active` and the template-override property
-  `update=` callback. Reset on unselect/mode-change/addon-unregister.
+- **Bone visibility presets**: the scene-level `cg3h_bone_preset` enum drives
+  a sidebar dropdown with arrow-button cycling.  Presets are `WHOLE` (every
+  bone), `ALL` (union of routed bb_names), `E:<entry>` (one entry's union),
+  and `M:<mesh>` (one template's bones).  Items filter by the active mesh's
+  routing checkboxes (`cg3h_entry_*`), and the apply callback toggles
+  `bone.hide` directly so the chosen subset is visible in Object/Pose/Weight
+  Paint mode.  Original hide state is saved on the armature
+  (`["_cg3h_saved_hide"]`) and restored on `WHOLE` or addon disable.
 - **Pre-export validation**: `CG3H_OT_Export._check_bone_bindings()` walks
   selected meshes' vertex groups, resolves the allowed bones per mesh
   (template's for new, own for originals), counts non-zero weighted vertices,
@@ -152,11 +153,13 @@ Characters with multiple mesh entries (e.g. Hecate has `HecateBattle_Mesh` +
 `HecateHub_Mesh`) export ALL entries by default. The `--mesh-entry` flag filters
 to specific entries; `--list-entries` inspects what is available.
 
-The **importer** currently patches the body entry only (`{Character}_Mesh`).
-All GLB meshes (existing + new) are routed to this single entry and serialized
-in one pass.  This is required for custom MaterialBindings to survive Granny's
-serialization — a double load→serialize cycle corrupts custom material pointers.
-Full multi-entry import support is planned for v3.1.
+The **importer** patches all `_Mesh` entries (multi-entry shipped in v3.1).
+Each entry runs an independent load → patch → serialize cycle, with the SDB
+loaded once and shared across entries.  GLB meshes are routed to the right
+entry via `_build_entry_routing()`, which reads `manifest.json` for original
+meshes and `target.new_mesh_routing` in mod.json for new meshes added by
+modders.  `_keepalive` is held until after every entry has been serialized
+so custom MaterialBindings survive the per-entry cycles.
 
 ### Animation export sanitization
 Several channel-level fixes prevent corrupt animation data from producing
@@ -225,13 +228,21 @@ Per-operation analysis:
 - mesh_add + mesh_add = compatible (merged)
 - Different animation filters = compatible
 
-### Smart data stripping
+### Smart data stripping (v3.3+)
 
 Thunderstore ZIPs only contain changed data:
-- Meshes: compared by vertex/index count against manifest
-- Textures: compared by PNG hash against manifest
-- Animations: compared by content hash
-- Unchanged assets stripped from distribution
+- **Meshes**: `_is_mesh_changed()` in `cg3h_build.py` compares the GLB
+  against `.baseline_positions.npz` (a per-mesh `(N, 3) float32` array
+  saved at export time).  Same-count meshes use a 1e-4 tolerance to absorb
+  Blender's ~1e-5 float noise.  Different-count meshes are still considered
+  unchanged if the unique `(UV, coarse position)` count is less than the
+  original — this handles Blender's normal-split vertex inflation, which
+  otherwise would falsely tag every roundtripped mesh as edited.
+- **Textures**: PNG hash compared against the manifest's `png_hash` field.
+- **Animations**: content hash compared against the per-animation hash
+  stored in the GLB's `extras` field.
+- The baseline file is local-only — excluded from Thunderstore ZIPs and
+  added to `.gitignore`.
 
 ### Standalone .pkg builder
 
@@ -327,6 +338,6 @@ single GPK at game launch.  Two mods cannot each ship their own `Melinoe.gpk`
 
 | Feature | Approach |
 |---|---|
-| v3.1 diff format | Distribute mesh deltas instead of full geometry (CC-free mesh_replace/mesh_patch) |
-| Bone changes | Build new bone array + update every mesh's `BoneBindings` |
-| String-stripped output | Fix sec[3] descriptor patching (zeroing f0/f1 isn't sufficient) |
+| In-game mod manager | NativeMenu integration to enable/disable mods at runtime; outfit cycling between mesh variants |
+| Skeleton editing | Build new bone arrays + update every mesh's `BoneBindings`, expand binding sets so new meshes can use bones not in the template |
+| Native animation codec | Use Granny's curve evaluation/builder API directly instead of the Python decoder for sub-second full-character animation export |

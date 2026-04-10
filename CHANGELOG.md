@@ -4,6 +4,24 @@ All notable changes to CG3H are documented here.
 
 ---
 
+## v3.5.3
+
+Patch release — documentation accuracy pass.
+
+### Changed
+
+- **`docs/architecture.md`**: removed stale references to `compute_coverage()` (deleted in v3.4) and the bone color overlay (replaced by visibility presets in v3.4). Documents the actual `cg3h_bone_preset` system.
+- **`docs/architecture.md`**: rewrote the multi-entry import paragraph — multi-entry shipped in v3.1, no longer "planned".
+- **`docs/architecture.md`**: dropped the `v3.1 diff format` future-work entry. Future work table now lists in-game mod manager, skeleton editing, and native animation codec.
+- **`docs/architecture.md`**: documented the v3.3 smart change detection system (`_is_mesh_changed`, `.baseline_positions.npz`, normal-split tolerance).
+- **`docs/mod_spec.md`**: replaced two outdated "v3.1 diff format will enable CC-free distribution" notes with accurate descriptions of how the runtime CG3HBuilder rebuilds GPKs from local game files.
+
+### Fixed
+
+- No code changes — documentation only.
+
+---
+
 ## v3.5.2
 
 Patch release — unified test runner and `mod_info` test coverage.

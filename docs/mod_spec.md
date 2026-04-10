@@ -72,7 +72,7 @@ Replace a character's meshes entirely with new ones.
 
 **Build**: Loads the original GPK, replaces specified meshes, updates MeshBindings, builds standalone `.pkg` for textures.
 
-**CC note**: Currently requires distributing modified geometry. A v3.1 diff format will enable CC-free distribution.
+**Distribution note**: ships the modified geometry as a GLB inside the Thunderstore package. CG3HBuilder rebuilds the GPK on the user's machine using their game files, so no copyrighted base geometry is redistributed.
 
 ### mesh_patch
 
@@ -92,7 +92,7 @@ Modify existing mesh vertices (reshape, sculpt) without adding or removing meshe
 
 **Build**: Loads the original GPK, matches GLB meshes to GR2 meshes by name, patches vertex positions/normals/UVs in-place.
 
-**CC note**: Currently requires distributing the edited GLB. A v3.1 diff format will enable CC-free distribution.
+**Distribution note**: ships the edited GLB; CG3HBuilder repatches the user's local GPK at runtime.
 
 ### animation_patch
 
