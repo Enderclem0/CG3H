@@ -4,6 +4,20 @@ All notable changes to CG3H are documented here.
 
 ---
 
+## v3.5.2
+
+Patch release — unified test runner and `mod_info` test coverage.
+
+### Added
+
+- **11 new tests for `tools/mod_info.py`** — covers `group_by_character`, `check_conflicts` (mesh_replace conflict, mesh_add compatibility, texture conflicts, mixed types), `load_priority`/`save_priority` roundtrip, `generate_default_priority`, `scan_cg3h_mods` with format filtering.
+
+### Changed
+
+- **`python tests/test_core.py` now runs the full suite** — `_run_all` discovers tests in `test_coverage.py` automatically. Single command goes from 62 → 108 passing tests (96 from the merged suites + 12 new mod_info tests).
+
+---
+
 ## v3.5.1
 
 Patch release — `mod_merger.py` removed.

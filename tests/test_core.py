@@ -470,20 +470,34 @@ def test_swap32():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _run_all():
-    """Run all test functions and report results."""
+    """Run all test functions across test_core, test_coverage, and test_integration."""
+    import importlib
     import traceback
-    tests = [(name, obj) for name, obj in globals().items()
-             if name.startswith('test_') and callable(obj)]
-    passed = failed = 0
-    for name, fn in sorted(tests):
+
+    # Always discover this module's own tests first
+    suites = [(__name__, globals())]
+
+    # Pull in sibling test modules so a single invocation runs the full suite
+    for sibling in ('test_coverage',):
         try:
-            fn()
-            passed += 1
-            print(f"  PASS  {name}")
+            mod = importlib.import_module(sibling)
+            suites.append((sibling, vars(mod)))
         except Exception as e:
-            failed += 1
-            print(f"  FAIL  {name}: {e}")
-            traceback.print_exc()
+            print(f"  (skip {sibling}: {e})")
+
+    passed = failed = 0
+    for module_name, ns in suites:
+        tests = [(name, obj) for name, obj in ns.items()
+                 if name.startswith('test_') and callable(obj)]
+        for name, fn in sorted(tests):
+            try:
+                fn()
+                passed += 1
+                print(f"  PASS  {name}")
+            except Exception as e:
+                failed += 1
+                print(f"  FAIL  {name}: {e}")
+                traceback.print_exc()
     print(f"\n{passed} passed, {failed} failed out of {passed + failed}")
     return failed
 
@@ -1757,6 +1771,212 @@ def test_find_weight_violations_zero_count_ignored():
              'groups': {'Tail': 0}}]
     v = find_weight_violations(data, {'Cube': {'Hip'}})
     assert v == []
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 15. mod_info helpers (extracted from old mod_merger in v3.5.1)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _make_mod(mod_id, character, mod_type='mesh_replace', textures=None,
+              extras=None):
+    """Build a minimal mod info dict matching mod_info.scan_cg3h_mods output."""
+    mod = {
+        'format': 'cg3h-mod/1.0',
+        'metadata': {'name': mod_id, 'author': 'tester', 'version': '1.0.0'},
+        'type': mod_type,
+        'target': {'character': character},
+        'assets': {'glb': f'{character}.glb'},
+    }
+    if textures:
+        mod['assets']['textures'] = textures
+    if extras:
+        mod.update(extras)
+    return {
+        'id': mod_id,
+        'mod_json_path': f'/fake/{mod_id}/mod.json',
+        'plugin_path': f'/fake/{mod_id}',
+        'data_path': f'/fake/{mod_id}',
+        'mod': mod,
+    }
+
+
+def test_mod_info_group_by_character():
+    """group_by_character clusters mods by their target.character field."""
+    from mod_info import group_by_character
+
+    mods = [
+        _make_mod('A', 'Melinoe'),
+        _make_mod('B', 'Melinoe'),
+        _make_mod('C', 'Hecate'),
+        _make_mod('D', 'Melinoe'),
+    ]
+    groups = group_by_character(mods)
+    assert set(groups.keys()) == {'Melinoe', 'Hecate'}
+    assert len(groups['Melinoe']) == 3
+    assert len(groups['Hecate']) == 1
+    assert {m['id'] for m in groups['Melinoe']} == {'A', 'B', 'D'}
+
+
+def test_mod_info_group_skips_no_character():
+    """Mods without target.character are skipped."""
+    from mod_info import group_by_character
+
+    mods = [
+        _make_mod('A', 'Melinoe'),
+        {'id': 'no_char', 'mod': {'target': {}}},
+    ]
+    groups = group_by_character(mods)
+    assert list(groups.keys()) == ['Melinoe']
+    assert len(groups['Melinoe']) == 1
+
+
+def test_mod_info_check_conflicts_two_mesh_replace():
+    """Two mesh_replace mods on the same character → ERROR."""
+    from mod_info import check_conflicts
+
+    group = [
+        _make_mod('ModA', 'Hecate', mod_type='mesh_replace'),
+        _make_mod('ModB', 'Hecate', mod_type='mesh_replace'),
+    ]
+    warnings, errors = check_conflicts(group)
+    assert any('mesh_replace' in e or 'CONFLICT' in e for e in errors)
+
+
+def test_mod_info_check_conflicts_mesh_add_only():
+    """Two mesh_add mods on the same character → no error (compatible)."""
+    from mod_info import check_conflicts
+
+    group = [
+        _make_mod('ModA', 'Hecate', mod_type='mesh_add'),
+        _make_mod('ModB', 'Hecate', mod_type='mesh_add'),
+    ]
+    warnings, errors = check_conflicts(group)
+    assert errors == []
+
+
+def test_mod_info_check_conflicts_same_texture():
+    """Two mods modifying the same texture name → ERROR."""
+    from mod_info import check_conflicts
+
+    group = [
+        _make_mod('ModA', 'Hecate', mod_type='texture_replace',
+                  textures=[{'name': 'Hecate_Color'}]),
+        _make_mod('ModB', 'Hecate', mod_type='texture_replace',
+                  textures=[{'name': 'Hecate_Color'}]),
+    ]
+    warnings, errors = check_conflicts(group)
+    assert any('Hecate_Color' in e for e in errors)
+
+
+def test_mod_info_check_conflicts_different_textures():
+    """Two mods with different texture names → no error."""
+    from mod_info import check_conflicts
+
+    group = [
+        _make_mod('ModA', 'Hecate', mod_type='texture_replace',
+                  textures=[{'name': 'Hecate_Color'}]),
+        _make_mod('ModB', 'Hecate', mod_type='texture_replace',
+                  textures=[{'name': 'Hecate_Normal'}]),
+    ]
+    warnings, errors = check_conflicts(group)
+    assert errors == []
+
+
+def test_mod_info_check_conflicts_mixed_add_replace():
+    """mesh_add + mesh_replace → warning (not error)."""
+    from mod_info import check_conflicts
+
+    group = [
+        _make_mod('ModA', 'Hecate', mod_type='mesh_add'),
+        _make_mod('ModB', 'Hecate', mod_type='mesh_replace'),
+    ]
+    warnings, errors = check_conflicts(group)
+    assert errors == []
+    assert any('mesh_add' in w and 'mesh_replace' in w for w in warnings)
+
+
+def test_mod_info_priority_roundtrip():
+    """load_priority → save_priority → load_priority returns the same data."""
+    from mod_info import load_priority, save_priority
+
+    tmpdir = tempfile.mkdtemp()
+    try:
+        priority = {'Hecate': ['ModA', 'ModB'], 'Melinoe': ['ModC']}
+        save_priority(tmpdir, priority)
+        loaded = load_priority(tmpdir)
+        assert loaded == priority
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_mod_info_load_priority_missing_file():
+    """load_priority returns an empty dict when the file doesn't exist."""
+    from mod_info import load_priority
+
+    tmpdir = tempfile.mkdtemp()
+    try:
+        assert load_priority(tmpdir) == {}
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_mod_info_generate_default_priority():
+    """generate_default_priority creates an alphabetical entry per multi-mod character."""
+    from mod_info import generate_default_priority
+
+    tmpdir = tempfile.mkdtemp()
+    try:
+        mods = [
+            _make_mod('zeta', 'Hecate'),
+            _make_mod('alpha', 'Hecate'),
+            _make_mod('beta', 'Hecate'),
+            _make_mod('solo', 'Melinoe'),  # only one mod → no entry
+        ]
+        priority = generate_default_priority(tmpdir, mods)
+        assert 'Hecate' in priority
+        assert priority['Hecate'] == ['alpha', 'beta', 'zeta']
+        assert 'Melinoe' not in priority  # single mod = no priority entry
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_mod_info_scan_cg3h_mods_finds_format():
+    """scan_cg3h_mods picks up mod.json files with format starting with cg3h-mod."""
+    from mod_info import scan_cg3h_mods
+
+    tmpdir = tempfile.mkdtemp()
+    try:
+        plugins = os.path.join(tmpdir, 'plugins')
+        plugins_data = os.path.join(tmpdir, 'plugins_data')
+        for mid, fmt in [('GoodMod', 'cg3h-mod/1.0'),
+                         ('OtherMod', 'something-else'),
+                         ('NoFormat', None)]:
+            os.makedirs(os.path.join(plugins, mid))
+            os.makedirs(os.path.join(plugins_data, mid))
+            mod_json = {'metadata': {'name': mid}}
+            if fmt:
+                mod_json['format'] = fmt
+            with open(os.path.join(plugins_data, mid, 'mod.json'), 'w') as f:
+                json.dump(mod_json, f)
+
+        mods = scan_cg3h_mods(tmpdir)
+        ids = [m['id'] for m in mods]
+        assert 'GoodMod' in ids
+        assert 'OtherMod' not in ids
+        assert 'NoFormat' not in ids
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_mod_info_scan_cg3h_mods_empty_dir():
+    """Scanning a directory without plugins/ returns an empty list."""
+    from mod_info import scan_cg3h_mods
+
+    tmpdir = tempfile.mkdtemp()
+    try:
+        assert scan_cg3h_mods(tmpdir) == []
+    finally:
+        shutil.rmtree(tmpdir)
 
 
 if __name__ == '__main__':
