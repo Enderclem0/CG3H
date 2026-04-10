@@ -27,8 +27,8 @@ symbols (`GrannyFileInfoType`, `GrannyMeshType`, etc.). No hardcoded offsets exc
 | `pkg_texture.py` — PKG texture extractor/replacer + standalone .pkg builder | Done |
 | `converter_gui.py` — CG3H Mod Builder GUI (Create/Build/Mods tabs) | Done |
 | `cg3h_build.py` — H2M mod builder (mod.json -> Thunderstore ZIP) | Done |
-| `mod_merger.py` — multi-mod merger with conflict detection | Done |
-| `cg3h_builder_entry.py` — PyInstaller entry point for cg3h_builder.exe | Done |
+| `mod_info.py` — mod metadata + conflict detection helpers | Done |
+| `cg3h_builder_entry.py` — runtime GLB merger + GPK builder (CG3HBuilder plugin) | Done |
 | Standalone .pkg builder (custom textures from scratch) | Done |
 | H2M Lua companion generation | Done |
 | PyInstaller exe (`cg3h_builder.exe`, 29MB standalone) | Done |
@@ -203,13 +203,19 @@ Mods infer their operations from the assets present. A single mod can perform
 multiple operations (e.g. mesh_add + texture_replace). `_infer_operations`
 examines what assets the mod ships and determines what build steps to run.
 
-### Multi-mod merger (`mod_merger.py`)
+### Multi-mod merging at runtime (CG3HBuilder)
 
-When multiple mods target the same character:
-1. Scans installed mods, groups by character
-2. Sequential merge: each mod applied to previous output
-3. Merged PKG combines all custom textures
-4. `cg3h_mod_priority.json` controls merge order (higher index = applied later = wins)
+When multiple mods target the same character, merging happens at game launch
+inside the CG3HBuilder plugin (`cg3h_builder_entry.py`):
+1. Scans `plugins_data/` for installed CG3H mods
+2. Groups by target character
+3. Single-pass GLB merge via `_merge_glbs()` (avoids the double-serialize
+   problem of the old sequential approach)
+4. Single `convert()` call produces the final GPK
+
+The build-time helpers (`scan_cg3h_mods`, `group_by_character`,
+`check_conflicts`) live in `tools/mod_info.py` and are used by the GUI
+and tests for pre-flight conflict reporting.
 
 ### Conflict detection
 
@@ -293,31 +299,29 @@ on startup with cache invalidation, which:
 
 The built GPK is cached locally and rebuilt when mod content changes.
 
-### Runtime: Multi-Mod Merger (`mod_merger.py`)
+### Runtime: Multi-Mod Merger (`cg3h_builder_entry.py`)
 
-When multiple mods target the same character, CG3H fuses them into a single package.
-Two mods cannot each ship their own `Melinoe.gpk` — the merger resolves this.
+When multiple mods target the same character, CG3HBuilder fuses them into a
+single GPK at game launch.  Two mods cannot each ship their own `Melinoe.gpk`
+— the runtime merger resolves this.
 
 **Merge flow:**
 
-1. **Scan** — walks the H2M `plugins` + `plugins_data` directories for all installed CG3H mods (identified by `mod.json` with `format: "cg3h-mod"`)
+1. **Scan** — walks `plugins_data/` for all installed CG3H mods (identified by `mod.json` with `format: "cg3h-mod"`)
 2. **Group** — clusters mods by target character
-3. **Order** — reads `cg3h_mod_priority.json` for merge order (higher index = applied later = wins conflicts). Auto-generates a default alphabetical order if missing.
-4. **Conflict check** — per-operation analysis before merging:
+3. **Conflict check** — per-operation analysis before merging:
    - Multiple `mesh_replace` for the same character → hard conflict (blocked)
    - Same texture replaced by multiple mods → hard conflict (blocked)
    - `mesh_add` + `mesh_add` → compatible (both appended; same mesh names auto-prefixed with mod id)
    - `mesh_add` + `mesh_replace` → warning (may not interact well)
    - Different animation filters → compatible
-5. **Single-pass merge** — uses `_merge_glbs` to fuse all mods' GLBs into one merged GLB per character (meshes, materials, textures, and animations), then a single `convert()` call builds the final GPK. Animations are merged with name-based node remapping; same animation name across mods: last mod wins.
-6. **PKG merge** — collects all custom textures from all mods and builds a single `CG3H-Merged-<Character>.pkg`
+4. **Single-pass merge** — uses `_merge_glbs` to fuse all mods' GLBs into one merged GLB per character (meshes, materials, textures, and animations), then a single `convert()` call builds the final GPK.  Animations are merged with name-based node remapping; same animation name across mods: last mod wins.
 
-**Output:** `plugins_data/CG3H-Merged-<Character>/` containing the merged GPK, merged PKG, and merged Lua companion. H2M loads this as a single mod.
+**Output:** `plugins_data/CG3HBuilder/{character}.gpk` registered with H2M via `rom.data.add_granny_file`.
 
 **Trigger points:**
-- GUI Mods tab → Refresh, Open Folder, Remove buttons
-- CLI: `python mod_merger.py <r2_dir> [--game-dir DIR] [--character NAME]`
 - CG3HBuilder plugin auto-build on startup (with cache invalidation)
+- Build-time conflict reporting via `tools/mod_info.py:check_conflicts()`
 
 ## Future Work
 

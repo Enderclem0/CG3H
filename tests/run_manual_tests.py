@@ -117,10 +117,6 @@ TESTS = [
         "python tools/cg3h_build.py <mod_dir> --package",
         "Creates Thunderstore ZIP",
     ]),
-    ("CLI", "7.3", "mod_merger.py", [
-        "python tools/mod_merger.py <r2_dir>",
-        "Scans mods, creates cg3h_mod_priority.json",
-    ]),
 
     ("Blender Addon", "8.1", "Import character", [
         "File > Import > Hades II Model (.gpk)",

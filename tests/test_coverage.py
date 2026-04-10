@@ -696,7 +696,7 @@ def _make_mod_group(mods_spec):
 
 def test_conflict_two_mesh_replace():
     """Two mesh_replace mods = hard conflict (error)."""
-    from mod_merger import check_conflicts
+    from mod_info import check_conflicts
     group = _make_mod_group([
         ('mod_a', 'ModA', 'mesh_replace', []),
         ('mod_b', 'ModB', 'mesh_replace', []),
@@ -708,7 +708,7 @@ def test_conflict_two_mesh_replace():
 
 def test_conflict_same_texture_two_mods():
     """Two mods replacing the same texture = hard conflict."""
-    from mod_merger import check_conflicts
+    from mod_info import check_conflicts
     group = _make_mod_group([
         ('mod_a', 'ModA', 'texture_replace', ['Melinoe_Color512']),
         ('mod_b', 'ModB', 'texture_replace', ['Melinoe_Color512']),
@@ -720,7 +720,7 @@ def test_conflict_same_texture_two_mods():
 
 def test_conflict_mesh_add_compatible():
     """Two mesh_add mods = no conflict."""
-    from mod_merger import check_conflicts
+    from mod_info import check_conflicts
     group = _make_mod_group([
         ('mod_a', 'ModA', 'mesh_add', []),
         ('mod_b', 'ModB', 'mesh_add', []),
@@ -731,7 +731,7 @@ def test_conflict_mesh_add_compatible():
 
 def test_conflict_mesh_add_plus_replace_warning():
     """mesh_add + mesh_replace = warning (not error)."""
-    from mod_merger import check_conflicts
+    from mod_info import check_conflicts
     group = _make_mod_group([
         ('mod_a', 'ModA', 'mesh_add', []),
         ('mod_b', 'ModB', 'mesh_replace', []),
@@ -743,7 +743,7 @@ def test_conflict_mesh_add_plus_replace_warning():
 
 def test_conflict_different_textures_ok():
     """Two mods replacing different textures = no conflict."""
-    from mod_merger import check_conflicts
+    from mod_info import check_conflicts
     group = _make_mod_group([
         ('mod_a', 'ModA', 'texture_replace', ['TextureA']),
         ('mod_b', 'ModB', 'texture_replace', ['TextureB']),
@@ -754,7 +754,7 @@ def test_conflict_different_textures_ok():
 
 def test_conflict_texture_replace_plus_mesh_patch_ok():
     """texture_replace + mesh_patch = independent, no conflict."""
-    from mod_merger import check_conflicts
+    from mod_info import check_conflicts
     group = _make_mod_group([
         ('mod_a', 'ModA', 'texture_replace', ['SomeTex']),
         ('mod_b', 'ModB', 'mesh_patch', []),

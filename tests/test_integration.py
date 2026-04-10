@@ -191,7 +191,7 @@ def test_conflict_mesh_add_compatible():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def test_priority_generation():
-    from mod_merger import load_priority, save_priority, generate_default_priority, group_by_character
+    from mod_info import load_priority, save_priority, generate_default_priority, group_by_character
     tmp = _tmpdir()
     try:
         mods = [

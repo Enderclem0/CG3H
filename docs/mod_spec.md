@@ -250,24 +250,23 @@ When multiple mods target the same character, CG3H detects conflicts per-operati
 `cg3h_mod_priority.json` controls merge order when multiple mods target the same character:
 - Auto-generated, editable via the GUI Mods tab or by hand
 - Higher index = applied later = wins conflicts
-- The multi-mod merger (`mod_merger.py`) applies mods sequentially in priority order
 
 ### Multi-mod merging (runtime)
 
-CG3H is not just a build tool — it also runs on end-user machines to fuse multiple mods
-into one coherent package per character. Two mods cannot each ship their own `Melinoe.gpk`;
-the merger resolves this automatically.
+CG3H is not just a build tool — the **CG3HBuilder plugin** runs on end-user
+machines to fuse multiple mods into one GPK per character at game launch.
+Two mods cannot each ship their own `Melinoe.gpk`; the runtime merger
+resolves this automatically.
 
-When mods are compatible, `mod_merger.py`:
-1. Scans all installed CG3H mods in the H2M `plugins` + `plugins_data` directories
+The merger:
+1. Scans all installed CG3H mods in `plugins_data/`
 2. Groups mods by target character
-3. Sorts by `cg3h_mod_priority.json` (higher index = applied later = wins)
-4. Applies each mod sequentially to the original GPK from the player's game install
-5. Merges all custom textures into a single `CG3H-Merged-<Character>.pkg`
-6. Outputs everything to `plugins_data/CG3H-Merged-<Character>/`
+3. Single-pass GLB merge via `_merge_glbs()` (meshes + animations + materials)
+4. Single `convert()` call produces the final `{character}.gpk`
+5. Registers the GPK via `rom.data.add_granny_file`
 
-The merge is triggered via the GUI Mods tab ("Rebuild"), the CLI (`python mod_merger.py`),
-or automatically by the CG3HBuilder plugin at game launch.
+Build-time conflict pre-flight is exposed via `tools/mod_info.py:check_conflicts()`
+and used by the GUI Mods tab.
 
 See [`architecture.md`](architecture.md) for the full merge flow and conflict check details.
 

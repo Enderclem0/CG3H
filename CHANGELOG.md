@@ -4,6 +4,24 @@ All notable changes to CG3H are documented here.
 
 ---
 
+## v3.5.1
+
+Patch release — `mod_merger.py` removed.
+
+### Changed
+
+- **`tools/mod_merger.py` deleted** (455 lines). Marked deprecated since v3.0.1. The runtime merging path has been handled by `cg3h_builder_entry.py` since v3.0; the only reason mod_merger lingered was that 6 tests still imported `check_conflicts` and `load_priority`/`save_priority`/`group_by_character`/`scan_cg3h_mods` from it.
+- **New `tools/mod_info.py`** carries those still-used helpers (155 lines, no merge logic). Test imports updated.
+- **Docs updated** — `architecture.md` and `mod_spec.md` no longer reference `mod_merger.py`. The "multi-mod merger" section now correctly attributes runtime merging to `cg3h_builder_entry.py`.
+- **Manual test checklist updated** — removed `7b. mod_merger.py from command line` and the related references in `v3_release_tests.md` and `run_manual_tests.py`.
+
+### Removed
+
+- `tools/mod_merger.py` — deprecated wrapper around the obsolete sequential `convert()` merge path
+- `merge_character_mods()`, `merge_all()`, `main()` (CLI entry) — never called from elsewhere
+
+---
+
 ## v3.5.0
 
 Quality-of-life cleanup release. No new features or behavior changes — purely code health.
