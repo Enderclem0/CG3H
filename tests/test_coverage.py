@@ -12,7 +12,12 @@ Covers:
 Usage:
     python -m pytest tests/test_coverage.py -v
 """
-import sys, os, struct, json, tempfile, shutil
+import sys
+import os
+import struct
+import json
+import tempfile
+import shutil
 import numpy as np
 
 _tools = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'tools')

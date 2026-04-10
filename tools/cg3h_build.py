@@ -11,15 +11,24 @@ Reads mod.json from the mod directory, builds GPK + standalone PKG,
 and outputs to build/ in H2M folder structure.
 """
 import argparse
+import hashlib
 import json
 import os
+import shutil
 import sys
+import tempfile
+import traceback
+import zipfile
+
+import numpy as np
+import pygltflib
 
 _tools_dir = os.path.dirname(os.path.abspath(__file__))
 if _tools_dir not in sys.path:
     sys.path.insert(0, _tools_dir)
 
 from cg3h_constants import CG3H_BUILDER_DEPENDENCY, H2M_DEPENDENCY, find_game_path
+from pkg_texture import build_standalone_pkg
 
 
 def _is_mesh_changed(gltf, mesh, blob, orig_mesh, baseline_positions=None):
@@ -30,8 +39,6 @@ def _is_mesh_changed(gltf, mesh, blob, orig_mesh, baseline_positions=None):
     detecting any genuine edit >= 0.001.  Handles Blender's normal-split
     vertex inflation via unique (UV + coarse position) counting.
     """
-    import numpy as np
-
     orig_vc = orig_mesh.get('vertex_count')
 
     for prim in mesh.primitives:
@@ -103,9 +110,6 @@ def _strip_unchanged_data(glb_path, mod_dir):
     Returns stripped GLB bytes, or None if nothing changed or stripping failed.
     """
     try:
-        import pygltflib
-        import hashlib
-
         manifest_path = os.path.join(mod_dir, 'manifest.json')
         if not os.path.isfile(manifest_path):
             return None
@@ -118,7 +122,6 @@ def _strip_unchanged_data(glb_path, mod_dir):
         blob = gltf.binary_blob()
 
         # Load baseline positions for direct comparison
-        import numpy as np
         baseline_path = os.path.join(mod_dir, '.baseline_positions.npz')
         try:
             baseline = dict(np.load(baseline_path)) if os.path.isfile(baseline_path) else {}
@@ -211,10 +214,7 @@ def _strip_unchanged_data(glb_path, mod_dir):
 
         for node in gltf.nodes:
             if node.mesh is not None:
-                if node.mesh in old_to_new:
-                    node.mesh = old_to_new[node.mesh]
-                else:
-                    node.mesh = None
+                node.mesh = old_to_new.get(node.mesh)
 
         gltf.meshes = new_meshes
 
@@ -232,7 +232,6 @@ def _strip_unchanged_data(glb_path, mod_dir):
             print(f"  Stripped {stripped_anims} unchanged animation(s), "
                   f"keeping {len(keep_anims)}")
 
-        import tempfile
         tmp = tempfile.mktemp(suffix=".glb")
         gltf.save(tmp)
         with open(tmp, "rb") as f:
@@ -241,7 +240,6 @@ def _strip_unchanged_data(glb_path, mod_dir):
         return data
 
     except Exception as e:
-        import traceback
         print(f"  Strip failed: {e}")
         traceback.print_exc()
         return None
@@ -337,7 +335,7 @@ def detect_conflicts(mod_dir, r2_plugins_dir):
                     with open(candidate) as f:
                         other_mods.append(json.load(f))
                 except (json.JSONDecodeError, OSError):
-                    pass
+                    pass  # skip mods with invalid/unreadable mod.json
 
     if not other_mods:
         print(f"CONFLICT CHECK: No other CG3H mods found in {r2_plugins_dir}")
@@ -453,9 +451,6 @@ def _sync_mod_json(mod_dir):
     manifest_meshes = {m['name']: m for m in manifest.get('meshes', [])}
     if manifest_meshes:
         try:
-            import pygltflib
-            import numpy as np
-
             gltf = pygltflib.GLTF2().load(glb_path)
             blob = gltf.binary_blob()
 
@@ -483,8 +478,8 @@ def _sync_mod_json(mod_dir):
             if has_edited and 'mesh_replace' not in types:
                 types.add('mesh_replace')
                 changed = True
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"  WARNING: mesh change detection failed: {e}")
 
     # ── Detect texture changes (same logic as _strip_unchanged_data) ──
     manifest_textures = manifest.get('textures', {})
@@ -514,12 +509,11 @@ def _sync_mod_json(mod_dir):
                         if 'texture_replace' not in types:
                             types.add('texture_replace')
                         changed = True
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"  WARNING: texture change detection failed: {e}")
 
     # ── Pick up custom textures from new meshes ──
     # The converter writes *_custom_textures.json; also check build output
-    character = mod.get('target', {}).get('character', '')
     for search_dir in [mod_dir, os.path.join(mod_dir, 'build')]:
         for root, dirs, files in os.walk(search_dir):
             for fname in files:
@@ -553,7 +547,7 @@ def _sync_mod_json(mod_dir):
                                     })
                                     changed = True
                     except Exception:
-                        pass
+                        pass  # ignore unreadable custom_textures.json files
 
     # ── Remove stale texture_replace if nothing left ──
     if types - {'texture_replace'} and not assets.get('textures'):
@@ -605,10 +599,6 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
         print("ERROR: Game directory not found. Use --game-dir.")
         return False
 
-    ship_dir = os.path.join(game_dir, "Ship")
-    gpk_dir = os.path.join(game_dir, "Content", "GR2", "_Optimized")
-    dll_path = os.path.join(ship_dir, "granny2_x64.dll")
-
     # Setup build output — mods are data-only (no main.lua).
     # The CG3HBuilder Thunderstore plugin handles all runtime logic.
     # A minimal plugins/ stub is needed so H2M recognizes the plugins_data/ owner.
@@ -628,7 +618,6 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
     has_mesh_ops = ops & {'adds_meshes', 'replaces_meshes'}
     has_mesh_or_anim_ops = has_mesh_ops or has_anim_ops
     if has_mesh_or_anim_ops and os.path.isfile(glb_path):
-        import shutil
         shutil.copy2(glb_path, os.path.join(plugins_data, glb_name))
         print(f"\n  Included GLB: {glb_name}")
 
@@ -642,7 +631,6 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
     tex_list = assets.get('textures', [])
     if not tex_list and os.path.isfile(glb_path):
         try:
-            import pygltflib
             gltf = pygltflib.GLTF2().load(glb_path)
 
             # Load manifest to identify original meshes
@@ -696,12 +684,9 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
     custom_textures = [t for t in tex_list if t.get('custom', False)]
 
     if custom_textures:
-        pkg_dir = os.path.join(game_dir, "Content", "Packages", "1080p")
         # Name PKG with CG3HBuilder prefix so the builder plugin can call
         # LoadPackages on it (H2M validates the calling plugin's GUID is in the filename)
         pkg_path = os.path.join(plugins_data, f"CG3HBuilder-{mod_id}.pkg")
-
-        from pkg_texture import build_standalone_pkg
 
         print(f"\n  Building standalone PKG: {len(custom_textures)} custom texture(s)")
 
@@ -729,7 +714,6 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
             build_standalone_pkg(pkg_textures, pkg_path)
 
     # Copy mod.json to build output (the CG3HBuilder plugin discovers mods via this file)
-    import shutil
     shutil.copy2(os.path.join(mod_dir, 'mod.json'), os.path.join(plugins_data, 'mod.json'))
 
     # Write minimal plugin stub (manifest only — no main.lua).
@@ -773,7 +757,6 @@ def package_thunderstore(mod_dir):
     zip_path = os.path.join(mod_dir, zip_name)
 
     # Thunderstore expects: manifest.json, icon.png, README.md at root + plugins/ + plugins_data/
-    import zipfile
     with zipfile.ZipFile(zip_path + '.zip', 'w', zipfile.ZIP_DEFLATED) as zf:
         # Root manifest (Thunderstore format)
         ts_manifest = {

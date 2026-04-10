@@ -9,9 +9,12 @@ Usage:
     cg3h_builder.exe <mod_dir>
     python cg3h_builder_entry.py <mod_dir>
 """
-import sys
-import os
 import json
+import os
+import sys
+import traceback
+
+import pygltflib
 
 _dir = os.path.dirname(os.path.abspath(__file__))
 if _dir not in sys.path:
@@ -20,6 +23,7 @@ if sys.stdout and sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8'
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
 from cg3h_constants import find_game_path as _find_game_path
+from gltf_to_gr2 import convert
 
 
 def _merge_manifests(char_mods, collisions=None):
@@ -63,8 +67,6 @@ def _copy_accessor(base_gltf, base_blob, other_gltf, other_blob,
     Returns the new accessor index in base_gltf.  Reuses already-copied
     BufferViews/Accessors via the offset maps (mutated in place).
     """
-    import pygltflib
-
     if acc_idx in acc_offset_map:
         return acc_offset_map[acc_idx]
 
@@ -97,7 +99,6 @@ def _copy_accessor(base_gltf, base_blob, other_gltf, other_blob,
 def _merge_animations(base_gltf, base_blob, other_gltf, other_blob,
                       bv_offset_map, acc_offset_map, mod_id):
     """Copy animations from other_gltf into base_gltf with node remapping."""
-    import pygltflib
 
     if not other_gltf.animations:
         return
@@ -170,8 +171,6 @@ def _merge_glbs(char_mods, output_dir, character):
     Returns (merged_path, collisions) where collisions is a set of original
     mesh names that appeared in multiple mods and were prefixed.
     """
-    import pygltflib
-
     # ── Pre-scan: detect mesh name collisions across all mods ──
     name_to_mods = {}
     for mod_info in char_mods:
@@ -380,7 +379,6 @@ def build_gpk(mod_dir, game_dir=None):
     print(f"  GLB: {glb_path}")
     print(f"  Game: {game_dir}")
 
-    from gltf_to_gr2 import convert
     try:
         convert(
             glb_path=glb_path,
@@ -397,7 +395,6 @@ def build_gpk(mod_dir, game_dir=None):
         return True
     except Exception as e:
         print(f"ERROR: GPK build failed: {e}")
-        import traceback
         traceback.print_exc()
         return False
 
@@ -486,8 +483,6 @@ def scan_and_build_all(plugins_data_dir, game_dir=None):
     gpk_dir = os.path.join(game_dir, "Content", "GR2", "_Optimized")
     sdb_dir = gpk_dir
     dll_path = os.path.join(game_dir, "Ship", "granny2_x64.dll")
-
-    from gltf_to_gr2 import convert
 
     built = 0
     cached = 0
@@ -581,7 +576,6 @@ def scan_and_build_all(plugins_data_dir, game_dir=None):
             ok = True
         except Exception as e:
             print(f"    ERROR: {e}")
-            import traceback
             traceback.print_exc()
             ok = False
 

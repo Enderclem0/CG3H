@@ -11,11 +11,17 @@ Expects:
     - granny2_x64.dll in cwd (run from the Ship/ directory)
     - ../Content/GR2/_Optimized/<name>.gpk and .sdb
 """
-import struct
-import ctypes
 import argparse
+import ctypes
+import hashlib
+import io
+import json
+import multiprocessing
 import os
+import re
+import struct
 import sys
+import traceback
 if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 import numpy as np
@@ -35,6 +41,10 @@ from granny_types import (
     get_transform_field_offsets, setup_dll_types,
     MTYPE_UINT8, MTYPE_NORMAL_U8, MTYPE_REAL32, MTYPE_REAL16,
 )
+from pkg_texture import (
+    _read_7bit_int, _read_csstring, _swap32, build_dds_header, load_texture_index,
+    read_pkg_chunks, save_texture_index, scan_textures,
+)
 
 # Module-level state populated by setup_granny().
 _TYPES: dict = {}
@@ -52,7 +62,6 @@ def build_manifest(character, out_basename, mesh_entries, mesh_names,
     (positions, normals, uvs, weights, joints, indices); mesh_bb_names_list
     parallels it with the bone-binding name list per mesh.
     """
-    import hashlib
     meshes = []
     for mn, gi, md, bb in zip(mesh_names, exported_gr2_indices,
                               mesh_data_list, mesh_bb_names_list):
@@ -96,9 +105,11 @@ def extract_all_from_gpk(gpk_path):
     off = 8
     result = {}
     for _ in range(count):
-        nl = raw[off]; name = raw[off+1:off+1+nl].decode('utf-8')
+        nl = raw[off]
+        name = raw[off+1:off+1+nl].decode('utf-8')
         off += 1 + nl
-        cs = struct.unpack_from('<I', raw, off)[0]; off += 4
+        cs = struct.unpack_from('<I', raw, off)[0]
+        off += 4
         result[name] = lz4.block.decompress(raw[off:off+cs], uncompressed_size=32*1024*1024)
         off += cs
     return result
@@ -770,7 +781,6 @@ def extract_animations(dll, gpk_entries, sdb_bytes, anim_filter=None,
     else:
         n_workers = anim_workers
     if dll_path and n_workers > 1 and total >= 20:
-        import multiprocessing
         print(f"  Using {n_workers} parallel workers", flush=True)
 
         # Split entries into roughly equal chunks
@@ -1004,7 +1014,6 @@ def build_gltf(character_name, mesh_data_list, mesh_names, bones, animations=Non
         total_anims = len(animations)
         print(f"  Building {total_anims} animation(s) into glTF...", flush=True)
         for anim_idx, anim_data in enumerate(animations):
-            import hashlib
             h = hashlib.md5()
             for t in anim_data['tracks']:
                 for key in ('orient', 'pos', 'scale'):
@@ -1136,7 +1145,6 @@ def _load_granny_texture_overrides(scripts_dir):
     The game's entity data can replace a GR2's texture reference at runtime.
     Returns dict {character_name_lower: [texture_base_names]}.
     """
-    import re
     overrides = {}  # character_lower -> [tex_base_name, ...]
     if not os.path.isdir(scripts_dir):
         return overrides
@@ -1160,44 +1168,6 @@ def _load_granny_texture_overrides(scripts_dir):
                 char = char.lower()
                 overrides.setdefault(char, []).append(tex_name)
     return overrides
-
-
-def _read_gr2_texture_names(fi):
-    """
-    Read texture filenames from the GR2 file_info's Textures array.
-    Returns list of base filenames (without extension or path), e.g. ["Melinoe_Color512"].
-    """
-    names = []
-    try:
-        tex_off = _t('granny_file_info', 'Textures')
-    except KeyError:
-        return names
-
-    tex_count = ri(fi, tex_off)
-    if tex_count <= 0:
-        return names
-    tex_arr = rq(fi, tex_off + 4)
-    if not _valid_ptr(tex_arr):
-        return names
-
-    # Get FromFileName offset from granny_texture type map
-    try:
-        fn_off = _t('granny_texture', 'FromFileName')
-    except KeyError:
-        fn_off = 0  # fallback: first field is typically the filename
-
-    for i in range(tex_count):
-        tex_ptr = rq(tex_arr, i * 8)
-        if not _valid_ptr(tex_ptr):
-            continue
-        fn_ptr = rq(tex_ptr, fn_off)
-        fn = read_cstr(fn_ptr)
-        if fn:
-            # Extract base filename: "D:/work/.../Melinoe_Color512.png" → "Melinoe_Color512"
-            base = fn.replace('\\', '/').split('/')[-1]
-            base = base.rsplit('.', 1)[0] if '.' in base else base
-            names.append(base)
-    return names
 
 
 def _resolve_texture_from_material(mat_ptr, debug=False):
@@ -1383,7 +1353,6 @@ _TEXTURE_DECODE_WARNING_SHOWN = False
 def _decode_texture_to_png(pixel_data, tw, th, fmt):
     """Decode raw pixel data to PNG bytes. Returns PNG bytes or None."""
     global _TEXTURE_DECODE_WARNING_SHOWN
-    import io
     try:
         import texture2ddecoder
         from PIL import Image
@@ -1434,16 +1403,12 @@ def _extract_all_textures(pkg_dir, texture_names):
     texture_names: list of base filenames (e.g. ["Athena_Color", "Artemis_Color"])
     Returns dict {base_name: (png_bytes, dds_bytes)} for found textures.
     """
-    from pkg_texture import (read_pkg_chunks, scan_textures, build_dds_header,
-                              load_texture_index)
-
     remaining = {n.lower(): n for n in texture_names}  # lowercase → original
     results = {}
 
     # Use index for fast .pkg file lookup (build if missing)
     tex_index = load_texture_index(pkg_dir)
     if tex_index is None:
-        from pkg_texture import save_texture_index
         print("  Building texture index (one-time)...", flush=True)
         save_texture_index(pkg_dir)
         tex_index = load_texture_index(pkg_dir)
@@ -1578,7 +1543,7 @@ def _extract_all_textures(pkg_dir, texture_names):
                 try:
                     os.remove(idx_path)
                 except OSError:
-                    pass
+                    pass  # stale index removal is best-effort
 
     return results
 
@@ -1590,7 +1555,6 @@ def _extract_model_texture(pkg_dir, character_name, gr2_texture_names=None):
     falls back to name-based guessing.
     Returns (png_bytes, dds_bytes, texture_name) or (None, None, None) if not found.
     """
-    import io
     try:
         import texture2ddecoder
         from PIL import Image
@@ -1598,9 +1562,6 @@ def _extract_model_texture(pkg_dir, character_name, gr2_texture_names=None):
         print("  WARNING: texture2ddecoder or Pillow not installed. "
               "Run: pip install texture2ddecoder Pillow")
         return None, None
-
-    from pkg_texture import (read_pkg_chunks, _swap32, _read_7bit_int,
-                              _read_csstring, build_dds_header, load_texture_index)
 
     # Build search patterns: prefer GR2 texture names (exact), fall back to guessing
     search = []
@@ -1661,7 +1622,8 @@ def _extract_model_texture(pkg_dir, character_name, gr2_texture_names=None):
         for ci, (chunk, _) in enumerate(chunks):
             doff = 0
             while doff < len(chunk) - 5:
-                tag = chunk[doff]; doff += 1
+                tag = chunk[doff]
+                doff += 1
                 if tag in (0xFF, 0xBE):
                     break
                 if tag == 0xAD:  # Tex2D
@@ -1718,10 +1680,13 @@ def _extract_model_texture(pkg_dir, character_name, gr2_texture_names=None):
 
                     doff = data_start + total_sz
                 elif tag == 0xDE:
-                    sz = struct.unpack_from('<i', chunk, doff)[0]; doff += 4 + sz
+                    sz = struct.unpack_from('<i', chunk, doff)[0]
+                    doff += 4 + sz
                 elif tag == 0xAA:
-                    nl, doff = _read_7bit_int(chunk, doff); doff += nl
-                    sz = struct.unpack_from('<i', chunk, doff)[0]; doff += 4 + max(sz, 0)
+                    nl, doff = _read_7bit_int(chunk, doff)
+                    doff += nl
+                    sz = struct.unpack_from('<i', chunk, doff)[0]
+                    doff += 4 + max(sz, 0)
                 else:
                     break
 
@@ -1927,12 +1892,6 @@ def main():
                             unique_tex_names.append(lt)
                             lua_variant_names.add(lt)
 
-                # Also check fi->Textures as a fallback source
-                if not unique_tex_names:
-                    unique_tex_names = _read_gr2_texture_names(fi)
-                    if unique_tex_names:
-                        print(f"  fi->Textures fallback: {unique_tex_names}")
-
                 # Last resort: name-based guessing
                 if not unique_tex_names:
                     cn = args.name.lower()
@@ -1965,8 +1924,7 @@ def main():
                         if indices_for_tex:
                             texture_map[tex_name] = (tex_info['png'], indices_for_tex)
                         # Save DDS + PNG alongside GLB
-                        import hashlib as _hl
-                        png_hash = _hl.md5(tex_info['png']).hexdigest()
+                        png_hash = hashlib.md5(tex_info['png']).hexdigest()
                         dds_filename = f"{tex_name}.dds"
                         with open(os.path.join(out_dir, dds_filename), 'wb') as f:
                             f.write(tex_info['dds'])
@@ -1998,7 +1956,6 @@ def main():
                     manifest_textures = {}
                     print(f"  No textures found for {args.name}")
             except Exception as e:
-                import traceback
                 print(f"  Texture extraction failed: {e}")
                 traceback.print_exc()
         else:
@@ -2016,7 +1973,6 @@ def main():
     print(f"\nDone!  {len(mesh_data_list)} meshes, {len(bones)} bones{anim_msg}{tex_msg} -> {out_path}")
 
     # Write manifest for reimport
-    import json
     manifest = build_manifest(
         character=args.name,
         out_basename=os.path.basename(out_path),

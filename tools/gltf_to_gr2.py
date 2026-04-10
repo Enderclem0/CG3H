@@ -37,6 +37,8 @@ import argparse
 import ctypes
 import os
 import struct
+import json
+import re
 import sys
 if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -430,14 +432,13 @@ def patch_animation_entries(dll, gpk_entries, sdb_bytes, glb_animations,
     # Build lookup tables for matching GLB animation names to GPK entries.
     # Primary: exact match by GPK entry name (from our exporter).
     # Fallback: normalized match stripping Blender suffixes (_Skin, .001).
-    import re as _re
     def _norm_anim_name(name):
         n = name
         for suffix in ('_Melinoe_Skin', '_Armature', '_Skin'):
             if n.endswith(suffix):
                 n = n[:-len(suffix)]
                 break
-        n = _re.sub(r'\.\d{3,}$', '', n)
+        n = re.sub(r'\.\d{3,}$', '', n)
         return n
 
     glb_by_exact = dict(glb_animations)  # exact name match
@@ -916,7 +917,6 @@ def _normalize_mesh_name(name: str) -> str:
     # Drop 'Armature:' / 'Rig:' style prefixes Blender adds on export
     n = name.split(':')[-1].split('|')[-1].split('/')[-1]
     # Strip Blender duplicate suffixes (.001, .002, etc.)
-    import re
     n = re.sub(r'\.\d{3,}$', '', n)
     # Strip part suffixes (_1, _2, _3 and legacy _LOD1, _LOD2, _LOD3)
     n = re.sub(r'_(?:LOD)?[1-9]$', '', n, flags=re.IGNORECASE)
@@ -1582,7 +1582,7 @@ def patch_vertex_data(
                     if tex:
                         existing_tex_names.add(tex)
                 except Exception:
-                    pass
+                    pass  # texture lookup is best-effort, OK to skip
 
             for glb_m in glb_group:
                 # Pick template: find the existing mesh whose BoneBindings
@@ -1671,7 +1671,7 @@ def patch_vertex_data(
                             struct.pack_into('<Q', (ctypes.c_uint8 * 8).from_address(fi + mats_off + 4),
                                              0, ctypes.addressof(new_mat_arr))
                         except KeyError:
-                            pass
+                            pass  # Materials field not in this Granny version — skip
 
                         # fi->Textures (ArrayOfReferences)
                         try:
@@ -1694,7 +1694,7 @@ def patch_vertex_data(
                             struct.pack_into('<Q', (ctypes.c_uint8 * 8).from_address(fi + texs_off + 4),
                                              0, ctypes.addressof(new_tex_arr))
                         except KeyError:
-                            pass
+                            pass  # Textures field not in this Granny version — skip
 
                     # Refresh mesh list for subsequent iterations
                     gr2_mesh_list = get_gr2_meshes(fi)
@@ -1803,7 +1803,6 @@ def convert(
     # Load manifest (used for routing meshes to correct entries)
     manifest = manifest_dict
     if manifest is None and manifest_path:
-        import json
         with open(manifest_path) as f:
             manifest = json.load(f)
 

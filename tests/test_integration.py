@@ -6,7 +6,12 @@ Usage:
     cd "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Hades II\\Ship"
     python C:/Users/ender/GhidraHades2/tests/test_integration.py
 """
-import sys, os, json, struct, shutil, tempfile
+import sys
+import os
+import json
+import struct
+import shutil
+import tempfile
 
 _tools = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'tools')
 sys.path.insert(0, _tools)

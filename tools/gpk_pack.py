@@ -22,6 +22,7 @@ import argparse
 import os
 import struct
 import sys
+import tempfile
 
 try:
     import lz4.block
@@ -168,14 +169,13 @@ def cmd_patch(args):
 
 def cmd_roundtrip_test(args):
     """Internal self-test: extract → pack → re-extract, verify all entries match."""
-    import tempfile, shutil
     entries_a = extract_gpk(args.gpk)
     tmp = tempfile.mktemp(suffix='.gpk')
     try:
         pack_gpk(entries_a, tmp)
         entries_b = extract_gpk(tmp)
         if set(entries_a) != set(entries_b):
-            sys.exit(f"FAIL: entry name sets differ")
+            sys.exit("FAIL: entry name sets differ")
         mismatches = [k for k in entries_a if entries_a[k] != entries_b[k]]
         if mismatches:
             sys.exit(f"FAIL: content mismatch for entries: {mismatches}")

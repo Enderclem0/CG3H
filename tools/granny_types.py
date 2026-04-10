@@ -180,7 +180,7 @@ def _get_element_size(dll, mtype: int, ref_type_ptr: int) -> int:
                 if sz > 0:
                     return sz
             except Exception:
-                pass
+                pass  # DLL call failed — fall through to return 0
         return 0  # should not happen for a valid InlineMember
 
     mem_sz = MEMBER_MEMORY_SIZE.get(mtype)
@@ -351,16 +351,16 @@ _KNOWN_OFFSETS = {
 
 def _validate(type_map: dict):
     failures = []
-    for (struct, field), expected in _KNOWN_OFFSETS.items():
-        actual = type_map.get(struct, {}).get(field)
+    for (struct_name, field), expected in _KNOWN_OFFSETS.items():
+        actual = type_map.get(struct_name, {}).get(field)
         if actual is None:
-            failures.append(f"  {struct}.{field}: NOT FOUND (expected +0x{expected:02X})")
+            failures.append(f"  {struct_name}.{field}: NOT FOUND (expected +0x{expected:02X})")
             # Print available fields to help diagnose name mismatches.
-            avail = sorted(type_map.get(struct, {}).keys())
+            avail = sorted(type_map.get(struct_name, {}).keys())
             failures.append(f"    available fields: {avail}")
         elif actual != expected:
             failures.append(
-                f"  {struct}.{field}: got +0x{actual:02X}, expected +0x{expected:02X}"
+                f"  {struct_name}.{field}: got +0x{actual:02X}, expected +0x{expected:02X}"
             )
     if failures:
         raise RuntimeError(

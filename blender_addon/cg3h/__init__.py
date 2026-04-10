@@ -20,11 +20,13 @@ bl_info = {
 }
 
 import bpy
-import os
+import importlib
 import json
+import os
+import re
+import struct
 import subprocess
 import tempfile
-import importlib
 from bpy.props import BoolProperty, EnumProperty, StringProperty
 from bpy_extras.io_utils import ExportHelper, ImportHelper
 
@@ -40,8 +42,7 @@ importlib.reload(cg3h_core)
 
 def _find_game_path():
     """Find Hades II via Steam registry + libraryfolders.vdf, then fallback paths."""
-    import re
-    # Try Steam registry
+    # Try Steam registry (Windows only — winreg deferred for cross-platform safety)
     try:
         import winreg
         for hive, subkey in [
@@ -72,7 +73,7 @@ def _find_game_path():
             except OSError:
                 continue
     except ImportError:
-        pass
+        pass  # winreg not available (non-Windows) — fall through to path scan
     # Fallback
     for p in [
         r"C:\Program Files (x86)\Steam\steamapps\common\Hades II",
@@ -572,14 +573,14 @@ class CG3H_OT_Import(bpy.types.Operator, ImportHelper):
             try:
                 os.unlink(manifest_path)
             except OSError:
-                pass
+                pass  # temp manifest cleanup is best-effort
 
         bpy.ops.import_scene.gltf(filepath=tmp_glb)
 
         try:
             os.unlink(tmp_glb)
         except OSError:
-            pass
+            pass  # temp GLB cleanup is best-effort
 
         # Auto-load mesh entries for the CG3H panel
         entries = _read_gpk_entries(name)
@@ -697,7 +698,6 @@ class CG3H_OT_Export(bpy.types.Operator):
             return {'CANCELLED'}
 
         # Build mesh entry list and per-mesh routing from CG3H panel properties
-        import json
         entries_str = context.scene.get("cg3h_entries", "")
         all_entries = entries_str.split(",") if entries_str else [f"{character}_Mesh"]
         all_entries = [e for e in all_entries if e]  # filter empties
@@ -779,8 +779,8 @@ class CG3H_OT_Export(bpy.types.Operator):
                     import shutil
                     shutil.copy2(manifest_src, os.path.join(workspace, "manifest.json"))
                     os.unlink(manifest_src)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[CG3H] Manifest sync skipped: {e}")
             finally:
                 if os.path.isfile(manifest_glb):
                     os.unlink(manifest_glb)
@@ -928,7 +928,6 @@ def _read_gpk_entries(character):
     gpk_path = os.path.join(gpk_dir, f"{character}.gpk")
     if not os.path.isfile(gpk_path):
         return []
-    import struct
     try:
         with open(gpk_path, 'rb') as f:
             data = f.read()
@@ -936,9 +935,12 @@ def _read_gpk_entries(character):
         pos = 8
         entries = []
         for _ in range(count):
-            nl = data[pos]; pos += 1
-            name = data[pos:pos+nl].decode('utf-8', errors='replace'); pos += nl
-            cs = struct.unpack_from('<I', data, pos)[0]; pos += 4
+            nl = data[pos]
+            pos += 1
+            name = data[pos:pos+nl].decode('utf-8', errors='replace')
+            pos += nl
+            cs = struct.unpack_from('<I', data, pos)[0]
+            pos += 4
             if name.endswith('_Mesh'):
                 entries.append(name)
             pos += cs
@@ -1165,7 +1167,7 @@ def unregister():
                     bone.hide = saved.get(bone.name, False)
                 del arm["_cg3h_saved_hide"]
             except Exception:
-                pass
+                pass  # restore is best-effort during addon unload
 
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)

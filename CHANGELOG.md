@@ -4,6 +4,38 @@ All notable changes to CG3H are documented here.
 
 ---
 
+## v3.5.0
+
+Quality-of-life cleanup release. No new features or behavior changes — purely code health.
+
+### Changed
+
+- **Imports consolidated** — deferred `import` statements moved to module top across `tools/` and `blender_addon/cg3h/`. Optional dependencies (`lz4`, `pygltflib`, `texture2ddecoder`, `PIL`, `etcpak`, `xxhash`, `winreg`) remain wrapped in `try/except ImportError` patterns.
+- **Silent exception handlers documented** — every `except: pass` block now either logs or carries an inline comment explaining why the failure is intentional.
+- **Semicolon-chained statements expanded** — GPK/PKG parser loops now use one statement per line.
+- **`pyproject.toml` ruff config updated** — codifies the project's ignore rules so future runs are consistent. Excludes `tools/debug/`.
+
+### Removed
+
+- **`tools/debug/` trimmed** from 32 files to 6. Deleted ~25 exhausted reverse-engineering probes (`probe_write_api2-19.py`, hybrid probes, write-API hypothesis tests). Kept `gr2_serializer.py`, `granny_datatree_roundtrip.py`, `probe_golden_path.py`, and the diagnostic helpers as reference material with a new `tools/debug/README.md`.
+- **Dead helper `_read_gr2_texture_names()`** in `gr2_to_gltf.py` — referenced from a fallback path that used an undefined name (`fi`); the path was unreachable.
+- **Unused local variables** caught by ruff (`character`, `gpk_dir`, `dll_path`, `pkg_dir`, `dds_mips`, `compressed`, `total_sz_off`, XNB header field reads).
+- **Unused import** `shutil` in `gpk_pack.py`.
+- **F-strings without placeholders** converted to plain strings.
+
+### Fixed
+
+- `converter_gui.py`: `pygltflib` import now wrapped in `try/except` and guarded at use site (was an unconditional `import` that would crash if missing).
+- `granny_types.py`: loop variable `struct` no longer shadows the `struct` module import.
+- `gltf_to_gr2.py`: removed dead fallback path that referenced undefined `fi`.
+
+### Notes
+
+- 62/62 tests pass, ruff clean on `tools/`, `blender_addon/cg3h/`, and `tests/` (with codified ignores).
+- v3.5.x patch lane: bug fixes go to 3.5.1, 3.5.2, etc.; new features wait for v3.6.
+
+---
+
 ## v3.4.0
 
 Blender skinning UX — bone color overlay, template toggle, export validation.

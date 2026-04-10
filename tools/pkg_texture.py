@@ -14,9 +14,11 @@ the same format and dimensions.
 """
 
 import argparse
+import json
 import os
 import struct
 import sys
+import tempfile
 
 try:
     import lz4.block
@@ -136,12 +138,9 @@ def scan_textures(chunks):
                 data_start = doff + 4
                 doff += 4
 
-                # XNB header (10 bytes)
+                # XNB header (10 bytes): magic[3] + version[1] + flags[1] + size[4]
                 xnb_off = doff
                 if chunk[doff:doff + 3] == b'XNB':
-                    xnb_version = chunk[doff + 4]
-                    xnb_flags = chunk[doff + 5]
-                    xnb_size = struct.unpack_from('<I', chunk, doff + 6)[0]
                     doff += 10
 
                     # Texture header
@@ -522,8 +521,6 @@ def install_custom_texture(pkg_dir, texture_name, png_path_or_bytes, width, heig
     max_size: max texture dimension (default 512 to match game standard)
     Returns the texture base name on success, or None on failure.
     """
-    import tempfile
-
     # Clamp dimensions to game standard
     if width > max_size or height > max_size:
         print(f"  Resizing {width}x{height} -> {max_size}x{max_size}")
@@ -699,7 +696,6 @@ def add_texture_entry(pkg_path, entry_name, dds_path, output_path=None):
         dds_header_size += 20
     dds_w = struct.unpack_from('<I', dds_raw, 16)[0]
     dds_h = struct.unpack_from('<I', dds_raw, 12)[0]
-    dds_mips = struct.unpack_from('<I', dds_raw, 28)[0]
     pixel_data = dds_raw[dds_header_size:]
 
     # Detect format from DDS
@@ -723,16 +719,13 @@ def add_texture_entry(pkg_path, entry_name, dds_path, output_path=None):
     with open(pkg_path, 'rb') as f:
         raw = bytearray(f.read())
 
-    header_raw = struct.unpack_from('<I', raw, 0)[0]
-    header = _swap32(header_raw)
-    compressed = (header & 0x20000000) != 0
-
     # Find the LAST chunk and insert before its terminator
     chunks = []
     off = 4
     while off < len(raw):
         flag_off = off
-        flag = raw[off]; off += 1
+        flag = raw[off]
+        off += 1
         if flag == 0:
             break
         comp_size = _swap32(struct.unpack_from('<I', raw, off)[0])
@@ -793,8 +786,6 @@ def build_standalone_pkg(textures, output_path, output_manifest_path=None):
     output_manifest_path: path for the .pkg_manifest (optional, auto-derived if None)
     Returns True on success.
     """
-    import tempfile
-
     # Build the chunk data: sequence of 0xAD entries + 0xFF terminator
     chunk = bytearray()
 
@@ -900,16 +891,13 @@ def replace_texture(pkg_path, texture_name, new_dds_path, output_path):
     with open(pkg_path, 'rb') as f:
         raw = bytearray(f.read())
 
-    header_raw = struct.unpack_from('<I', raw, 0)[0]
-    header = _swap32(header_raw)
-    compressed = (header & 0x20000000) != 0
-
     # Parse and decompress all chunks, keeping track of file offsets
     chunks = []  # (decompressed_bytes, flag_offset, size_offset, data_offset, comp_size)
     off = 4
     while off < len(raw):
         flag_off = off
-        flag = raw[off]; off += 1
+        flag = raw[off]
+        off += 1
         if flag == 0:
             break
         comp_size = _swap32(struct.unpack_from('<I', raw, off)[0])
@@ -928,13 +916,13 @@ def replace_texture(pkg_path, texture_name, new_dds_path, output_path):
     for ci, (chunk, flag_off, size_off, data_off, orig_comp_size) in enumerate(chunks):
         doff = 0
         while doff < len(chunk) - 5:
-            tag = chunk[doff]; doff += 1
+            tag = chunk[doff]
+            doff += 1
             if tag in (0xFF, 0xBE):
                 break
             if tag == 0xAD:  # Tex2D
                 name, doff = _read_csstring(chunk, doff)
                 total_sz = _swap32(struct.unpack_from('<I', chunk, doff)[0])
-                total_sz_off = doff
                 doff += 4
                 data_start = doff
 
@@ -944,7 +932,7 @@ def replace_texture(pkg_path, texture_name, new_dds_path, output_path):
                 if target_lower in filename or filename in target_lower:
                     # Found the texture — check XNB header
                     if chunk[doff:doff+3] != b'XNB':
-                        print(f"  ERROR: No XNB header at expected position")
+                        print("  ERROR: No XNB header at expected position")
                         return False
 
                     tex_header_off = doff + 10  # after XNB header
@@ -1009,10 +997,13 @@ def replace_texture(pkg_path, texture_name, new_dds_path, output_path):
 
                 doff = data_start + total_sz
             elif tag == 0xDE:
-                sz = struct.unpack_from('<i', chunk, doff)[0]; doff += 4 + sz
+                sz = struct.unpack_from('<i', chunk, doff)[0]
+                doff += 4 + sz
             elif tag == 0xAA:
-                nl, doff = _read_7bit_int(chunk, doff); doff += nl
-                sz = _swap32(struct.unpack_from('<I', chunk, doff)[0]); doff += 4 + sz
+                nl, doff = _read_7bit_int(chunk, doff)
+                doff += nl
+                sz = _swap32(struct.unpack_from('<I', chunk, doff)[0])
+                doff += 4 + sz
             else:
                 break
 
@@ -1063,7 +1054,6 @@ def build_texture_index(pkg_dir):
 
 def save_texture_index(pkg_dir, output_path=None):
     """Build and save the texture index as JSON."""
-    import json
     index = build_texture_index(pkg_dir)
     if output_path is None:
         output_path = os.path.join(pkg_dir, '_texture_index.json')
@@ -1075,7 +1065,6 @@ def save_texture_index(pkg_dir, output_path=None):
 
 def load_texture_index(pkg_dir):
     """Load a previously saved texture index, or return None if not found."""
-    import json
     idx_path = os.path.join(pkg_dir, '_texture_index.json')
     if os.path.isfile(idx_path):
         with open(idx_path) as f:

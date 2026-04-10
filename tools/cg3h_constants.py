@@ -58,7 +58,7 @@ def _parse_library_folders(steam_root):
             if os.path.isdir(path) and path not in libraries:
                 libraries.append(path)
     except Exception:
-        pass
+        pass  # missing or malformed libraryfolders.vdf — return whatever we have
     return libraries
 
 

@@ -9,13 +9,17 @@ Three tabs:
 Requires: numpy, pygltflib, lz4  (pip install numpy pygltflib lz4)
 """
 
+import contextlib
 import glob
+import io
 import json
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -23,6 +27,11 @@ try:
     import cg3h_build
 except ImportError:
     cg3h_build = None
+
+try:
+    import pygltflib
+except ImportError:
+    pygltflib = None
 
 
 # -- Constants ----------------------------------------------------------------
@@ -87,7 +96,7 @@ class App:
                 with open(self._config_path) as f:
                     return json.load(f)
         except Exception:
-            pass
+            pass  # corrupt/unreadable config falls back to defaults
         return {}
 
     def _save_config(self):
@@ -95,7 +104,7 @@ class App:
             with open(self._config_path, 'w') as f:
                 json.dump(self._config, f, indent=2)
         except Exception:
-            pass
+            pass  # config save is best-effort
 
     # -- Top-level UI ---------------------------------------------------------
 
@@ -314,7 +323,7 @@ class App:
             with open(mod_json_path, "w") as f:
                 json.dump(mod_json, f, indent=2)
             self._log_write_ui(self._create_log,
-                               f"\nGenerated mod.json\n")
+                               "\nGenerated mod.json\n")
         except Exception as exc:
             self._log_write_ui(self._create_log, f"\nmod.json error: {exc}\n")
 
@@ -463,7 +472,7 @@ class App:
                 meta = m.get("metadata", {})
                 mod_type = m.get("type", "?")
             except Exception:
-                pass
+                pass  # sync is best-effort; fall back to whatever's already in mod.json
 
         ops_str = mod_type
         if isinstance(mod_type, list):
@@ -474,7 +483,7 @@ class App:
                 if ops:
                     ops_str = ", ".join(sorted(ops))
             except Exception:
-                pass
+                pass  # operation inference is best-effort, OK to skip
 
         # Show what will actually be built
         display_name = self._build_mod_name.get() or name
@@ -503,7 +512,8 @@ class App:
                     manifest = json.load(f)
                 manifest_mesh_names = {mm["name"] for mm in manifest.get("meshes", [])}
 
-                import pygltflib
+                if pygltflib is None:
+                    return
                 gltf = pygltflib.GLTF2().load(glb_path)
                 new_meshes = [m.name for m in gltf.meshes if m.name not in manifest_mesh_names]
 
@@ -524,7 +534,7 @@ class App:
                             ttk.Checkbutton(mesh_frame, text=entry,
                                             variable=var).pack(side=tk.LEFT, padx=4)
             except Exception:
-                pass
+                pass  # GLB inspection failed — skip routing UI for new meshes
 
     def _build_mod(self):
         if cg3h_build is None:
@@ -573,8 +583,8 @@ class App:
 
             with open(mod_json_path, 'w') as f:
                 json.dump(m, f, indent=2)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"  WARNING: failed to update mod.json: {e}")
 
         self._log_clear(self._build_log)
         self._build_running = True
@@ -589,9 +599,6 @@ class App:
         ).start()
 
     def _build_worker(self, mod_dir):
-        import io
-        import contextlib
-
         game_dir = self.game_path.get()
         output_path = None
         ts_path = None
@@ -683,7 +690,6 @@ class App:
             shutil.copy2(mod_json_src, mod_json_dst)
 
         # Register in r2modman's mods.yml so it appears in the mod list
-        import time
         try:
             mods_yml_path = os.path.normpath(os.path.join(r2_dir, "..", "mods.yml"))
 
@@ -1078,16 +1084,18 @@ class App:
             return
 
         try:
-            import struct
             with open(gpk_path, 'rb') as f:
                 data = f.read()
             count = struct.unpack_from('<I', data, 4)[0]
             pos = 8
             mesh_entries = []
-            for i in range(count):
-                nl = data[pos]; pos += 1
-                name = data[pos:pos+nl].decode(); pos += nl
-                cs = struct.unpack_from('<I', data, pos)[0]; pos += 4
+            for _ in range(count):
+                nl = data[pos]
+                pos += 1
+                name = data[pos:pos+nl].decode()
+                pos += nl
+                cs = struct.unpack_from('<I', data, pos)[0]
+                pos += 4
                 if name.endswith('_Mesh'):
                     mesh_entries.append(name)
                 pos += cs
