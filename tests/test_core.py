@@ -1895,6 +1895,38 @@ def test_mod_info_check_conflicts_mixed_add_replace():
     assert any('mesh_add' in w and 'mesh_replace' in w for w in warnings)
 
 
+def test_mod_info_check_conflicts_custom_texture_shared():
+    """v3.6: two mods shipping a custom texture with the same name → INFO
+    warning, no error (auto-prefixed at build time)."""
+    from mod_info import check_conflicts
+
+    group = [
+        _make_mod('ModA', 'Hecate', mod_type='mesh_add',
+                  textures=[{'name': 'HecateColor', 'custom': True}]),
+        _make_mod('ModB', 'Hecate', mod_type='mesh_add',
+                  textures=[{'name': 'HecateColor', 'custom': True}]),
+    ]
+    warnings, errors = check_conflicts(group)
+    assert errors == []
+    assert any('HecateColor' in w and 'auto-prefixed' in w for w in warnings)
+
+
+def test_mod_info_check_conflicts_custom_vs_replace_isolated():
+    """v3.6: a custom texture and a texture_replace target sharing a name
+    do not interfere — the custom texture is auto-prefixed at build, so the
+    replace target stands alone (no error, no warning for that pair)."""
+    from mod_info import check_conflicts
+
+    group = [
+        _make_mod('ModA', 'Hecate', mod_type='mesh_add',
+                  textures=[{'name': 'Hecate_Color', 'custom': True}]),
+        _make_mod('ModB', 'Hecate', mod_type='texture_replace',
+                  textures=[{'name': 'Hecate_Color'}]),
+    ]
+    warnings, errors = check_conflicts(group)
+    assert errors == []
+
+
 def test_mod_info_priority_roundtrip():
     """load_priority → save_priority → load_priority returns the same data."""
     from mod_info import load_priority, save_priority

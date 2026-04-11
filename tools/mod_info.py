@@ -151,17 +151,33 @@ def check_conflicts(group):
         warnings.append("WARNING: mesh_add + mesh_replace -- additive meshes may not "
                         "work with the replacement model")
 
-    # Same texture modified by multiple mods
-    all_textures = {}
+    # Texture conflicts split by intent:
+    #   - Custom textures (``custom: true``) ship via per-mod PKGs.  v3.6
+    #     auto-prefixes their names with the mod id at build time, so a
+    #     shared name is harmless — surface as INFO so the modder knows the
+    #     final filenames will differ.
+    #   - texture_replace targets (no ``custom`` flag) overwrite a game
+    #     texture by its real name; two mods overwriting the same name still
+    #     fight at runtime (last loaded wins).  Keep that as ERROR.
+    custom_textures = {}
+    replace_textures = {}
     for m in group:
+        mod_label = m['mod'].get('metadata', {}).get('name', m['id'])
         for tex in m['mod'].get('assets', {}).get('textures', []):
             tex_name = tex.get('name', '')
-            if tex_name:
-                all_textures.setdefault(tex_name, []).append(
-                    m['mod'].get('metadata', {}).get('name', m['id']))
-    for tex_name, mod_names in all_textures.items():
+            if not tex_name:
+                continue
+            bucket = custom_textures if tex.get('custom', False) else replace_textures
+            bucket.setdefault(tex_name, []).append(mod_label)
+    for tex_name, mod_names in replace_textures.items():
         if len(mod_names) > 1:
-            errors.append(f"CONFLICT: texture '{tex_name}' modified by: {', '.join(mod_names)}")
+            errors.append(
+                f"CONFLICT: texture '{tex_name}' replaced by: {', '.join(mod_names)}")
+    for tex_name, mod_names in custom_textures.items():
+        if len(mod_names) > 1:
+            warnings.append(
+                f"INFO: custom texture '{tex_name}' shipped by {', '.join(mod_names)} "
+                f"— will be auto-prefixed with mod id at build time")
 
     # mesh_add mods with shared mesh names — auto-prefixed at merge time
     adders = [m for m, ops in zip(group, all_ops) if 'adds_meshes' in ops]

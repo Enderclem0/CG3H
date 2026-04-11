@@ -4,6 +4,28 @@ All notable changes to CG3H are documented here.
 
 ---
 
+## v3.6.0
+
+Texture name deduplication. Closes the v3.2 dedup gap so two mods can ship a custom texture with the same name without one silently overwriting the other.
+
+### Added
+
+- **Custom texture auto-prefix at build time**: `tools/cg3h_build.py` rewrites every `assets.textures[*]` entry with `custom: true` to `{mod_id}_{name}` before baking the per-mod PKG. Idempotent — re-running build does not double-prefix.
+- **GLB image rename**: when textures are renamed, `cg3h_build.py` mutates the shipped GLB's image names to match so the runtime converter writes the prefixed name into the GR2 material chain. The modder's source files (`mod.json`, source GLB) are never touched — only the build output under `build/plugins_data/{mod_id}/`.
+- **`tools/mod_info.check_conflicts` texture policy split**: custom textures (`custom: true`) shipped by multiple mods now produce an INFO warning ("will be auto-prefixed with mod id at build time") instead of a hard error. `texture_replace` overrides — where two mods overwrite the same game-asset name — remain a hard ERROR.
+- **2 new tests** in `test_core.py` covering the v3.6 conflict policy: shared custom texture → INFO, custom + replace at the same name → no false-positive error.
+
+### Changed
+
+- `package_thunderstore()` now reads the GLB from `build_dir/plugins_data/{mod_id}/` first (the v3.6-renamed copy) and falls back to the source only if the build copy is missing — so the prefixed image names land in the Thunderstore zip.
+- The build output's `mod.json` is now written from the in-memory mutated mod dict instead of `shutil.copy2`-ing the source, so the texture rename never bleeds back into the modder's repo.
+
+### Why
+
+Mesh names already get auto-prefixed at runtime by `_merge_glbs()` when two `mesh_add` mods collide. Textures could not follow the same pattern because PKGs are baked once at modder build time, not at runtime — a collision would silently let the last-loaded PKG win. v3.6 closes the gap by always-prefixing at build time, making collisions impossible by construction.
+
+---
+
 ## v3.5.3
 
 Patch release — documentation accuracy pass.

@@ -223,7 +223,8 @@ and tests for pre-flight conflict reporting.
 ### Conflict detection
 
 Per-operation analysis:
-- Same texture replaced by multiple mods = conflict
+- Same game texture targeted by multiple `texture_replace` mods = conflict
+- Same custom texture name shipped by multiple `mesh_add`/`mesh_replace` mods = no conflict — auto-prefixed with mod id at build time (v3.6)
 - Multiple mesh_replace for same character = conflict
 - mesh_add + mesh_add = compatible (merged)
 - Different animation filters = compatible
@@ -322,7 +323,8 @@ single GPK at game launch.  Two mods cannot each ship their own `Melinoe.gpk`
 2. **Group** — clusters mods by target character
 3. **Conflict check** — per-operation analysis before merging:
    - Multiple `mesh_replace` for the same character → hard conflict (blocked)
-   - Same texture replaced by multiple mods → hard conflict (blocked)
+   - Same game texture targeted by multiple `texture_replace` mods → hard conflict (blocked)
+   - Same custom texture name shipped by multiple mods → INFO (auto-prefixed with mod id at build time, v3.6)
    - `mesh_add` + `mesh_add` → compatible (both appended; same mesh names auto-prefixed with mod id)
    - `mesh_add` + `mesh_replace` → warning (may not interact well)
    - Different animation filters → compatible

@@ -235,6 +235,7 @@ When multiple mods target the same character, CG3H detects conflicts per-operati
 | Mod A | Mod B | Conflict? | Resolution |
 |-------|-------|-----------|------------|
 | texture_replace (same texture) | texture_replace (same texture) | Yes | Priority order; higher wins |
+| mesh_add (custom texture, same name) | mesh_add (custom texture, same name) | No | Both auto-prefixed with mod id at build time (v3.6) |
 | mesh_add | mesh_add | No | Both appended (same names auto-prefixed with mod id) |
 | mesh_replace | mesh_replace (same meshes) | Yes | Mutually exclusive |
 | mesh_replace | mesh_add | Maybe | May need manual adjustment |

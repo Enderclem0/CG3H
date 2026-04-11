@@ -683,6 +683,23 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
 
     custom_textures = [t for t in tex_list if t.get('custom', False)]
 
+    # ── v3.6: auto-prefix custom texture names with mod_id ────────────────
+    # PKGs are baked per-mod and loaded into one shared texture namespace at
+    # game launch.  Two mods shipping a texture with the same name would
+    # collide at runtime, so we always prefix custom textures with the mod
+    # id at build time.  Idempotent: skips textures already prefixed.
+    texture_renames = {}
+    for tex in custom_textures:
+        old_name = tex.get('name', '')
+        if not old_name or old_name.startswith(f"{mod_id}_"):
+            continue
+        new_name = f"{mod_id}_{old_name}"
+        texture_renames[old_name] = new_name
+        tex['name'] = new_name
+    if texture_renames:
+        for old, new in texture_renames.items():
+            print(f"  INFO: texture {old!r} auto-prefixed → {new!r}")
+
     if custom_textures:
         # Name PKG with CG3HBuilder prefix so the builder plugin can call
         # LoadPackages on it (H2M validates the calling plugin's GUID is in the filename)
@@ -713,8 +730,30 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
         if pkg_textures:
             build_standalone_pkg(pkg_textures, pkg_path)
 
-    # Copy mod.json to build output (the CG3HBuilder plugin discovers mods via this file)
-    shutil.copy2(os.path.join(mod_dir, 'mod.json'), os.path.join(plugins_data, 'mod.json'))
+    # Write the (possibly texture-renamed) mod.json to the build output.  We
+    # rewrite from the in-memory `mod` dict instead of copying the source so
+    # the v3.6 texture auto-prefix never touches the modder's source files.
+    with open(os.path.join(plugins_data, 'mod.json'), 'w') as f:
+        json.dump(mod, f, indent=2)
+
+    # Mutate the shipped GLB's image names to match the renamed textures so
+    # the runtime converter (gltf_to_gr2.convert) reads the prefixed name and
+    # writes the matching FromFileName into the GR2 material chain.
+    if texture_renames and has_mesh_or_anim_ops:
+        shipped_glb = os.path.join(plugins_data, glb_name)
+        if os.path.isfile(shipped_glb):
+            try:
+                gltf = pygltflib.GLTF2().load(shipped_glb)
+                renamed = 0
+                for img in (gltf.images or []):
+                    if img.name and img.name in texture_renames:
+                        img.name = texture_renames[img.name]
+                        renamed += 1
+                if renamed:
+                    gltf.save(shipped_glb)
+                    print(f"  Renamed {renamed} GLB image(s) to match prefixed textures")
+            except Exception as e:
+                print(f"  WARNING: failed to rename GLB images for texture dedup: {e}")
 
     # Write minimal plugin stub (manifest only — no main.lua).
     # H2M requires plugins/{id}/ to exist as owner of plugins_data/{id}/.
@@ -787,13 +826,16 @@ def package_thunderstore(mod_dir):
         else:
             zf.writestr('README.md', f'# {name}\n\n{meta.get("description", "")}\n')
 
-        # Include GLB in plugins_data/ (stripped if possible)
+        # Include GLB in plugins_data/ (stripped if possible).
+        # Prefer the GLB from build_dir/plugins_data/ — that's the copy with
+        # v3.6 texture-name prefixes applied.  Fall back to source if absent.
         pd_prefix = f'plugins_data/{mod_id}'
         assets_cfg = mod.get('assets', {})
         glb = assets_cfg.get('glb', '')
         glb_arc_path = None
         if glb:
-            glb_full = os.path.join(mod_dir, glb)
+            renamed_glb = os.path.join(build_dir, 'plugins_data', mod_id, glb)
+            glb_full = renamed_glb if os.path.isfile(renamed_glb) else os.path.join(mod_dir, glb)
             if os.path.isfile(glb_full):
                 glb_arc_path = f'{pd_prefix}/{glb}'
                 stripped = _strip_unchanged_data(glb_full, mod_dir)
