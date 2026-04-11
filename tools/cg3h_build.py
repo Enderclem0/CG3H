@@ -27,7 +27,12 @@ _tools_dir = os.path.dirname(os.path.abspath(__file__))
 if _tools_dir not in sys.path:
     sys.path.insert(0, _tools_dir)
 
-from cg3h_constants import CG3H_BUILDER_DEPENDENCY, H2M_DEPENDENCY, find_game_path
+from cg3h_constants import (
+    CG3H_BUILDER_DEPENDENCY,
+    CG3H_BUILDER_FOLDER,
+    H2M_DEPENDENCY,
+    find_game_path,
+)
 from pkg_texture import build_standalone_pkg
 
 
@@ -701,9 +706,14 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
             print(f"  INFO: texture {old!r} auto-prefixed → {new!r}")
 
     if custom_textures:
-        # Name PKG with CG3HBuilder prefix so the builder plugin can call
-        # LoadPackages on it (H2M validates the calling plugin's GUID is in the filename)
-        pkg_path = os.path.join(plugins_data, f"CG3HBuilder-{mod_id}.pkg")
+        # PKG filename must contain a registered H2M module GUID.  Data-
+        # only CG3H mods don't have a main.lua so they aren't registered,
+        # but the caller (Enderclem-CG3HBuilder) is.  H2M's LoadPackages
+        # validator (data.cpp) checks stem.contains(mod->guid()) against
+        # every registered module — prefix with the full builder folder
+        # name so that check finds Enderclem-CG3HBuilder in the stem.
+        pkg_path = os.path.join(
+            plugins_data, f"{CG3H_BUILDER_FOLDER}-{mod_id}.pkg")
 
         print(f"\n  Building standalone PKG: {len(custom_textures)} custom texture(s)")
 

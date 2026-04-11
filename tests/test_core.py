@@ -1927,6 +1927,22 @@ def test_mod_info_check_conflicts_custom_vs_replace_isolated():
     assert errors == []
 
 
+def test_version_consistency():
+    """cg3h_constants.CG3H_VERSION must match the Thunderstore manifest's
+    version_number.  Bumping the release version in only one place is a
+    common mistake — this test catches the drift before release."""
+    from cg3h_constants import CG3H_VERSION
+
+    manifest_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        '.github', 'thunderstore', 'manifest.json')
+    with open(manifest_path) as f:
+        manifest = json.load(f)
+    assert manifest['version_number'] == CG3H_VERSION, (
+        f"CG3H_VERSION ({CG3H_VERSION}) and thunderstore/manifest.json "
+        f"version_number ({manifest['version_number']}) disagree")
+
+
 def test_mod_info_priority_roundtrip():
     """load_priority → save_priority → load_priority returns the same data."""
     from mod_info import load_priority, save_priority

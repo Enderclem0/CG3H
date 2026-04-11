@@ -9,12 +9,18 @@ Usage:
     cg3h_builder.exe <mod_dir>
     python cg3h_builder_entry.py <mod_dir>
 """
+import datetime
 import json
 import os
 import sys
+import time
 import traceback
 
 import pygltflib
+
+# Schema version for cg3h_status.json.  Bump when fields change in
+# backwards-incompatible ways so the Lua reader can degrade gracefully.
+CG3H_STATUS_SCHEMA_VERSION = 1
 
 _dir = os.path.dirname(os.path.abspath(__file__))
 if _dir not in sys.path:
@@ -22,6 +28,7 @@ if _dir not in sys.path:
 if sys.stdout and sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
+from cg3h_constants import CG3H_VERSION
 from cg3h_constants import find_game_path as _find_game_path
 from gltf_to_gr2 import convert
 
@@ -477,9 +484,6 @@ def scan_and_build_all(plugins_data_dir, game_dir=None):
                     os.unlink(cache_key)
                 print(f"  Removed stale GPK: {f}")
 
-    if not by_character:
-        print("No CG3H mesh mods found")
-        return True
     gpk_dir = os.path.join(game_dir, "Content", "GR2", "_Optimized")
     sdb_dir = gpk_dir
     dll_path = os.path.join(game_dir, "Ship", "granny2_x64.dll")
@@ -488,7 +492,37 @@ def scan_and_build_all(plugins_data_dir, game_dir=None):
     cached = 0
     failed = 0
 
+    # v3.7: per-character status for cg3h_status.json (consumed by the
+    # in-game mod manager UI).  Populated as we iterate so every branch
+    # (cached, built, failed-at-merge, failed-at-convert) writes a record.
+    status_characters = {}
+
+    # Empty-mods case: skip the loop but still fall through to the status
+    # JSON write so the UI sees fresh state (important when a modder just
+    # uninstalled everything — stale status would be misleading).
+    if not by_character:
+        print("No CG3H mesh mods found")
+
+    def _record(char, state, char_mods, gpk_path, error, duration_ms):
+        status_characters[char] = {
+            "state": state,
+            "gpk_path": gpk_path if gpk_path and os.path.isfile(gpk_path) else None,
+            "mods": [mi['id'] for mi in char_mods],
+            "mod_details": [
+                {
+                    "id": mi['id'],
+                    "name": mi['mod'].get('metadata', {}).get('name', mi['id']),
+                    "version": mi['mod'].get('metadata', {}).get('version', ''),
+                    "author": mi['mod'].get('metadata', {}).get('author', ''),
+                }
+                for mi in char_mods
+            ],
+            "error": error,
+            "duration_ms": int(duration_ms) if duration_ms is not None else None,
+        }
+
     for character, char_mods in sorted(by_character.items()):
+        char_start = time.monotonic()
         output_gpk = os.path.join(builder_dir, f"{character}.gpk")
         cache_key_path = os.path.join(builder_dir, f"{character}.cache_key")
 
@@ -505,6 +539,8 @@ def scan_and_build_all(plugins_data_dir, game_dir=None):
             if saved_key == current_key:
                 print(f"  {character}: cached ({len(char_mods)} mod(s))")
                 cached += 1
+                _record(character, "cached", char_mods, output_gpk, None,
+                        (time.monotonic() - char_start) * 1000)
                 continue
             else:
                 print(f"  {character}: mods changed, rebuilding...")
@@ -519,6 +555,9 @@ def scan_and_build_all(plugins_data_dir, game_dir=None):
         if not os.path.isfile(original_gpk) or not os.path.isfile(sdb_path):
             print(f"  {character}: ERROR — game GPK/SDB not found")
             failed += 1
+            _record(character, "failed", char_mods, None,
+                    "game GPK/SDB not found",
+                    (time.monotonic() - char_start) * 1000)
             continue
 
         print(f"  {character}: building from {len(char_mods)} mod(s)...")
@@ -531,10 +570,16 @@ def scan_and_build_all(plugins_data_dir, game_dir=None):
         except Exception as e:
             print(f"  {character}: ERROR — GLB merge failed: {e}")
             failed += 1
+            _record(character, "failed", char_mods, None,
+                    f"GLB merge failed: {e}",
+                    (time.monotonic() - char_start) * 1000)
             continue
         if not merged_glb:
             print(f"  {character}: ERROR — GLB merge returned no output")
             failed += 1
+            _record(character, "failed", char_mods, None,
+                    "GLB merge returned no output",
+                    (time.monotonic() - char_start) * 1000)
             continue
 
         # Collect operations and routing from all mods
@@ -561,6 +606,7 @@ def scan_and_build_all(plugins_data_dir, game_dir=None):
         for mi in char_mods:
             print(f"    - {mi['id']}")
 
+        convert_error = None
         try:
             convert(
                 glb_path=merged_glb,
@@ -578,20 +624,44 @@ def scan_and_build_all(plugins_data_dir, game_dir=None):
             print(f"    ERROR: {e}")
             traceback.print_exc()
             ok = False
+            convert_error = str(e)
 
         if os.path.isfile(merged_glb):
             os.unlink(merged_glb)
 
+        duration_ms = (time.monotonic() - char_start) * 1000
         if ok:
             built += 1
             # Save cache key so we can detect mod changes
             with open(cache_key_path, 'w') as f:
                 f.write(current_key)
             print(f"  {character}: done -> {output_gpk}")
+            _record(character, "built", char_mods, output_gpk, None, duration_ms)
         else:
             failed += 1
+            _record(character, "failed", char_mods, None,
+                    convert_error or "convert() failed", duration_ms)
 
     print(f"\nScan complete: {built} built, {cached} cached, {failed} failed")
+
+    # v3.7: write the status JSON.  Consumed by the in-game mod manager
+    # Lua plugin.  Best-effort — builder success does not depend on the
+    # write succeeding.
+    status_doc = {
+        "version": CG3H_STATUS_SCHEMA_VERSION,
+        "builder_version": CG3H_VERSION,
+        "built_at": datetime.datetime.now(datetime.timezone.utc)
+                    .replace(microsecond=0).isoformat(),
+        "summary": {"built": built, "cached": cached, "failed": failed},
+        "characters": status_characters,
+    }
+    status_path = os.path.join(builder_dir, "cg3h_status.json")
+    try:
+        with open(status_path, 'w', encoding='utf-8') as f:
+            json.dump(status_doc, f, indent=2)
+    except OSError as e:
+        print(f"  WARNING: could not write {status_path}: {e}")
+
     return failed == 0
 
 

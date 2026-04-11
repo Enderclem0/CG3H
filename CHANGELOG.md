@@ -4,6 +4,58 @@ All notable changes to CG3H are documented here.
 
 ---
 
+## v3.7.0
+
+In-game mod manager (read-only), plus a pile of Hell2Modding compliance fixes discovered while shipping it. First in-game UI surface for CG3H, built on the H2M ImGui binding. The existing runtime plugin is split into modular layers so future UI changes only touch one file.
+
+### Added
+
+- **In-game mod manager** — press the H2M GUI toggle (INSERT), open the `CG3HBuilder → Mod Manager` menu. Three tabs:
+  - **Characters** — collapsing header per character with build state, GPK path, last-build time, error (if failed), and the mod list.
+  - **Mods** — flat table of every installed CG3H mod (name, author, version, character, status).
+  - **Summary** — totals, builder version, last build timestamp.
+  - A **Refresh** button re-reads `cg3h_status.json` and re-scans `plugins_data/` without touching the builder.
+- **`cg3h_status.json`** — the runtime builder now writes `{builder_dir}/cg3h_status.json` at the end of every `--scan-all` pass. Schema version 1, captures per-character state (`built` / `cached` / `failed`), mod list + metadata, GPK path, error, duration_ms. Best-effort write; failures never block the build.
+- **Modular CG3HBuilder plugin** — the single 190-line `main.lua` is now split into:
+  - `main.lua` — path discovery, module loading, glue
+  - `mod_state.lua` — pure data layer: scan, parse, group, load status JSON
+  - `runtime.lua` — all game-facing side effects: texture loading, builder invocation, GPK registration
+  - `ui.lua` — ImGui rendering only; reads `mod_state` and never touches the filesystem
+  - The hard rule: the UI reads the state table and nothing else. Swap `ui.lua` freely; everything else stays put.
+- **Version centralization** — `tools/cg3h_constants.py::CG3H_VERSION` is now the single source of truth for the release version and plugin folder name. `CG3H_BUILDER_FOLDER`, `CG3H_BUILDER_DEPENDENCY`, and the builder's `cg3h_status.json` all derive from it. A new `test_version_consistency` enforces that `.github/thunderstore/manifest.json` stays in sync (111 tests total, all passing).
+- **`tools/install_plugin_local.py`** — developer-facing local installer. Rebuilds `cg3h_builder.exe` via PyInstaller, wipes and recreates `plugins/Enderclem-CG3HBuilder/` and `plugins_data/Enderclem-CG3HBuilder/` in the default r2modman profile. Used for testing without going through CI.
+
+### Fixed (Hell2Modding compliance)
+
+- **Plugin folder layout** — H2M's `lua_manager.cpp:89` requires the folder containing `main.lua` to have exactly one hyphen (the `AuthorName-ModName` convention). The pre-v3.7 ZIP shipped files under `plugins/CG3HBuilder/`, which r2modman placed at `plugins/Enderclem-CG3HBuilder/CG3HBuilder/` — the innermost `CG3HBuilder` folder has zero hyphens, so H2M logged `Bad folder name` and the plugin loaded in a weird half-registered state. v3.7 ships files directly at the ZIP's `plugins/` root; r2modman now places them at `plugins/Enderclem-CG3HBuilder/` which passes the check.
+- **PKG filename GUID check** — H2M's `data.cpp` `LoadPackages` binding requires the `.pkg` filename stem to contain a registered module's GUID, and `TerminateProcess`es the game on mismatch. Data-only CG3H mods (no `main.lua`) aren't registered as H2M modules, so their own GUID can't satisfy the check. `cg3h_build.py` now prefixes PKGs with `{CG3H_BUILDER_FOLDER}-` (i.e. `Enderclem-CG3HBuilder-`) instead of `CG3HBuilder-` — the builder plugin's registered GUID is always in the stem.
+- **Legacy PKG migration** — `runtime.lua` detects legacy-named `CG3HBuilder-*.pkg` files from pre-v3.7 builds and renames them in-place to the new `Enderclem-CG3HBuilder-*.pkg` before loading. Mods built before v3.7 no longer hard-crash the game; they get silently upgraded on first launch.
+- **`plugins_data_dir` path derivation** — the old `gsub` trick stripped the last two path segments from the derived data folder, which worked for the pre-v3.7 nested layout but returned the wrong (too-high) directory for the flat v3.7 layout. Replaced with a `string.find "plugins_data"` lookup that handles both layouts.
+- **`rom.path.get_directories` recursion** — H2M's Lua binding returns directories recursively, not immediate children. The scan loop now filters entries to only include direct children of `plugins_data_dir` and dedupes by `mod.json` path. Previously this produced duplicate "ghost" entries in the mod list.
+- **Menu path** — `rom.gui.add_to_menu_bar` auto-wraps the callback inside the plugin's own submenu. Emitting `BeginMenu("CG3H")` inside that callback produced the path `CG3HBuilder → CG3H → Mod Manager`. Now the callback emits the `MenuItem` directly, so the path is `CG3HBuilder → Mod Manager`.
+
+### Changed
+
+- **`cg3h_builder_entry.py`**: `scan_and_build_all()` now records per-character state as it iterates and writes the status JSON before returning. Every exit branch (cached, built, GLB-merge failed, GPK-SDB missing, convert failed) writes a record. Empty-mods case still writes an empty status doc so uninstall-all clears stale state.
+- **`.github/workflows/release.yml`**: Thunderstore packaging flattened (`plugins/` at ZIP root, not wrapped in a `CG3HBuilder/` subfolder) and now copies all four Lua modules instead of just `main.lua`.
+- **CG3HBuilder plugin manifest** bumped to `3.7.0`.
+
+### Why
+
+Modders and players had no in-game visibility into what CG3H built, what got cached, or why a character failed. You had to read the H2M console at startup and hope you caught the scroll. v3.7 puts that state behind a toggle-able ImGui window you can check whenever. No actions yet — that's v3.8 (enable/disable, rebuild, hot-reload).
+
+The modular split pays for itself the first time we redesign the UI: every iteration on `ui.lua` is a self-contained change, no risk of breaking the runtime.
+
+The H2M compliance fixes surfaced because the v3.0-v3.6 releases shipped a plugin that was technically broken but happened to work anyway. H2M tightened its validators; v3.7 brings us back into compliance.
+
+### Not in v3.7
+
+- Enable/disable individual mods → v3.8
+- Trigger rebuild from the UI → v3.8
+- Hot-reload after rebuild → v3.8 (RE-gated)
+
+---
+
 ## v3.6.0
 
 Texture name deduplication. Closes the v3.2 dedup gap so two mods can ship a custom texture with the same name without one silently overwriting the other.

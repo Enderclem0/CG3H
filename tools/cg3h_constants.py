@@ -2,7 +2,18 @@
 import os
 import re
 
-CG3H_BUILDER_DEPENDENCY = "Enderclem-CG3HBuilder-3.0.0"
+# Single source of truth for the CG3H release version.  Bump this on
+# release; tests/test_core.py::test_version_consistency enforces that
+# .github/thunderstore/manifest.json matches.
+CG3H_VERSION = "3.7.0"
+
+# Thunderstore dependency string.  The folder name AuthorName-ModName
+# is required by Hell2Modding's plugin loader (lua_manager.cpp:89
+# counts hyphens and rejects any folder that doesn't match).
+CG3H_BUILDER_AUTHOR = "Enderclem"
+CG3H_BUILDER_NAME = "CG3HBuilder"
+CG3H_BUILDER_FOLDER = f"{CG3H_BUILDER_AUTHOR}-{CG3H_BUILDER_NAME}"
+CG3H_BUILDER_DEPENDENCY = f"{CG3H_BUILDER_FOLDER}-{CG3H_VERSION}"
 H2M_DEPENDENCY = "Hell2Modding-Hell2Modding-0.2.0"
 
 HADES2_APP_ID = "1145350"
