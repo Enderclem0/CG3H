@@ -69,24 +69,61 @@ rom.log.info(LOG_PREFIX .. " plugins_data_dir = " .. plugins_data_dir)
 rom.log.info(LOG_PREFIX .. " builder_data_dir = " .. builder_data_dir)
 
 mod_state.scan(plugins_data_dir)
+-- v3.8: read per-mod enable/disable state BEFORE the build so the builder
+-- subprocess (which reads the same JSON) sees a consistent view.
+mod_state.load_mod_state(builder_data_dir)
 rom.log.info(LOG_PREFIX .. " Found " .. mod_state.count() .. " CG3H mod(s)")
 for _, mod in ipairs(mod_state.mods) do
-    rom.log.info(LOG_PREFIX .. "   - " .. mod.id .. " (" .. mod.character .. ")")
+    local flag = mod_state.is_enabled(mod.id) and "" or " [disabled]"
+    rom.log.info(LOG_PREFIX .. "   - " .. mod.id .. " (" .. mod.character .. ")" .. flag)
 end
 
-runtime.apply(mod_state, {
+local runtime_ctx = {
     builder_path      = builder_path,
     builder_data_dir  = builder_data_dir,
     plugins_data_dir  = plugins_data_dir,
-})
+    game_dir          = "",  -- populated below from cg3h_status.json
+}
+
+runtime.apply(mod_state, runtime_ctx)
 
 -- Status JSON is written by the builder during runtime.apply().  Read it
--- after the build so the UI sees fresh per-character results.
+-- after the build so the UI sees fresh per-character results AND so
+-- runtime_ctx.game_dir gets populated for stock-restore hot-reload.
 mod_state.load_status(builder_data_dir)
+runtime_ctx.game_dir = mod_state.game_dir
+
+-- NOTE: apply_visibility is NOT called at startup because HashGuid::Lookup
+-- returns 0 before the first scene loads.  The builder respects mod_state
+-- at build time, so disabled mods are already excluded from the GPK.
+
+if runtime.has_draw_gate() then
+    rom.log.info(LOG_PREFIX .. " Draw-gate available — toggle is instant")
+else
+    rom.log.info(LOG_PREFIX .. " Draw-gate unavailable — toggle requires rebuild + restart")
+end
 
 ui.init(mod_state, {
     on_refresh = function()
         mod_state.refresh(plugins_data_dir, builder_data_dir)
+    end,
+    on_toggle_mod = function(mod_id, enabled)
+        local character = mod_state.set_enabled(mod_id, enabled, builder_data_dir)
+        if not character then
+            return nil
+        end
+
+        -- Try the draw-gate for instant visual toggle.  Falls back to
+        -- rebuild + restart on older H2M without the DoDraw3D hook.
+        local outcome = runtime.toggle_mod_visibility(mod_id, enabled, mod_state)
+        if outcome then
+            return outcome
+        end
+
+        return runtime.trigger_rebuild_and_reload(character, runtime_ctx, mod_state)
+    end,
+    on_rebuild = function(character)
+        return runtime.trigger_rebuild_and_reload(character, runtime_ctx, mod_state)
     end,
 })
 

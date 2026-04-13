@@ -53,6 +53,35 @@ def extract_gpk(gpk_path: str) -> dict[str, bytes]:
     return result
 
 
+def extract_gpk_raw(gpk_path: str) -> dict[str, bytes]:
+    """Return {entry_name: raw_lz4_compressed_bytes} without decompressing.
+
+    The bytes returned are the on-disk lz4 payload exactly as the game
+    expects to read them from a standalone ``.gr2.lz4`` file via
+    ``OpenOptimizedGrannyFile``.  Used by the v3.8 hot-reload pipeline
+    to materialize per-entry standalone files alongside the merged GPK,
+    so the game's per-entry loader can find them through H2M's file
+    redirect.
+    """
+    with open(gpk_path, 'rb') as f:
+        raw = f.read()
+    version = struct.unpack_from('<I', raw, 0)[0]
+    if version != 1:
+        raise ValueError(f"Unsupported GPK version {version} in {gpk_path!r}")
+    count = struct.unpack_from('<I', raw, 4)[0]
+    off = 8
+    result = {}
+    for _ in range(count):
+        nl = raw[off]
+        name = raw[off + 1: off + 1 + nl].decode('utf-8')
+        off += 1 + nl
+        cs = struct.unpack_from('<I', raw, off)[0]
+        off += 4
+        result[name] = raw[off: off + cs]
+        off += cs
+    return result
+
+
 def list_gpk(gpk_path: str) -> list[tuple[str, int]]:
     """Return [(name, compressed_size)] without decompressing."""
     with open(gpk_path, 'rb') as f:

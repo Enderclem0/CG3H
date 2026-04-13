@@ -1,0 +1,167 @@
+diff --git a/src/lua_extensions/bindings/hades/data.cpp b/src/lua_extensions/bindings/hades/data.cpp
+index 551cf31..603d71b 100644
+--- a/src/lua_extensions/bindings/hades/data.cpp
++++ b/src/lua_extensions/bindings/hades/data.cpp
+@@ -184,6 +184,154 @@ namespace lua::hades::data
+ 		LOG(INFO) << "Adding to package files (runtime): " << full_path;
+ 	}
+ 
++	// ═════════════════════════════════════════════════════════════════════
++	// CG3H mesh visibility gate — rom.data.toggle_entry_meshes(name, visible)
++	//
++	// Toggles all meshes in a mModelData entry by setting vertex count
++	// to 0 (hidden) or restoring the original (visible).  Does NOT call
++	// LoadModelData or AddModelData — pure in-memory integer writes.
++	// Safe to call mid-session because it only touches one uint32 per
++	// mesh (atomic on x86-64, no vector mutation).
++	//
++	// RE reference: docs/granny_hot_reload_re.md
++	// ═════════════════════════════════════════════════════════════════════
++	namespace cg3h_visibility
++	{
++		constexpr size_t HT_BUCKETS        = 0x08;
++		constexpr size_t HT_COUNT          = 0x10;
++		constexpr size_t MD_NODE_VEC_BEGIN  = 0x10;
++		constexpr size_t MD_NODE_VEC_END   = 0x18;
++		constexpr size_t MD_NODE_MPNEXT    = 0xC0;
++		constexpr size_t GMD_STRIDE        = 0x50;
++		constexpr size_t GMD_MESHBINDING   = 0x00;
++		constexpr size_t GMD_INDEX_COUNT   = 0x38;
++		constexpr size_t GMD_VERTEX_COUNT  = 0x3C;
++		constexpr size_t GMD_NAME_HASH     = 0x48;
++
++		using StringIntern_t = uint32_t (*)(const char*, int);
++		static StringIntern_t  g_StringIntern   = nullptr;
++		static uint8_t*        g_mModelData     = nullptr;
++		static bool            g_init_done      = false;
++
++		// Saved vertex counts: entry_hash -> { mesh_index -> original_count }
++		static std::unordered_map<uint32_t, std::unordered_map<int, uint32_t>> g_saved_counts;
++
++		template<typename T>
++		static inline T load(void* base, size_t off)
++		{
++			return *reinterpret_cast<T*>(reinterpret_cast<uint8_t*>(base) + off);
++		}
++		template<typename T>
++		static inline void store(void* base, size_t off, T v)
++		{
++			*reinterpret_cast<T*>(reinterpret_cast<uint8_t*>(base) + off) = v;
++		}
++
++		static inline uint32_t eastl_int_hash(uint32_t mId)
++		{
++			uint32_t h = (mId >> 16 ^ mId) * 0x7feb352d;
++			h          = (h >> 15 ^ h) * 0x846ca68b;
++			return h >> 16 ^ h;
++		}
++
++		static bool ensure_init()
++		{
++			if (g_init_done) return true;
++			auto& syms = big::hades2_symbol_to_address;
++			auto si = syms["sgg::HashGuid::StringIntern"];
++			if (si) g_StringIntern = si.as_func<uint32_t(const char*, int)>();
++			auto md = syms["sgg::Granny3D::mModelData"];
++			if (md) g_mModelData = md.as<uint8_t*>();
++			if (!g_StringIntern || !g_mModelData) return false;
++			g_init_done = true;
++			return true;
++		}
++
++		static void* find_node(uint8_t* ht, uint32_t key, size_t mpnext_off)
++		{
++			uint8_t* buckets = load<uint8_t*>(ht, HT_BUCKETS);
++			size_t count = load<size_t>(ht, HT_COUNT);
++			if (!buckets || count <= 1) return nullptr;
++			size_t idx = eastl_int_hash(key) % count;
++			void* node = *reinterpret_cast<void**>(buckets + idx * sizeof(void*));
++			while (node)
++			{
++				if (load<uint32_t>(node, 0) == key) return node;
++				node = load<void*>(node, mpnext_off);
++			}
++			return nullptr;
++		}
++	} // namespace cg3h_visibility
++
++	// Lua API: Function
++	// Table: data
++	// Name: toggle_entry_meshes
++	// Param: entry_name: string: Mesh entry name (e.g. "HecateBattle_Mesh").
++	// Param: visible: boolean: true to show, false to hide.
++	// Toggles visibility of all meshes in a mModelData entry by setting
++	// vertex counts to 0 (hidden) or restoring saved values (visible).
++	// Safe mid-session — no LoadModelData, no AddModelData.
++	static void toggle_entry_meshes(const std::string& entry_name, bool visible)
++	{
++		using namespace cg3h_visibility;
++		if (!ensure_init())
++		{
++			LOG(ERROR) << "CG3H visibility: symbol init failed";
++			return;
++		}
++
++		uint32_t hash = g_StringIntern(entry_name.c_str(), 0);
++		uint8_t* node = static_cast<uint8_t*>(
++		    find_node(g_mModelData, hash, MD_NODE_MPNEXT));
++		if (!node)
++		{
++			LOG(INFO) << "CG3H visibility: no mModelData entry for " << entry_name;
++			return;
++		}
++
++		uint8_t* mp_begin = load<uint8_t*>(node, MD_NODE_VEC_BEGIN);
++		uint8_t* mp_end   = load<uint8_t*>(node, MD_NODE_VEC_END);
++		if (!mp_begin || mp_begin >= mp_end) return;
++
++		int mesh_idx = 0;
++		// Save/restore uses void* for MeshBinding pointers.
++		static std::unordered_map<uint32_t, std::unordered_map<int, void*>> g_saved_bindings;
++
++		for (uint8_t* it = mp_begin; it < mp_end; it += GMD_STRIDE, mesh_idx++)
++		{
++			void* binding = load<void*>(it, GMD_MESHBINDING);
++
++			if (!visible)
++			{
++				// Save original MeshBinding pointer then null it.
++				// The renderer null-checks MeshBinding before drawing
++				// (confirmed from Granny3D::Exit which also nulls +0x00).
++				if (binding != nullptr)
++				{
++					g_saved_bindings[hash][mesh_idx] = binding;
++				}
++				store<void*>(it, GMD_MESHBINDING, nullptr);
++			}
++			else
++			{
++				// Restore saved MeshBinding pointer
++				auto it_entry = g_saved_bindings.find(hash);
++				if (it_entry != g_saved_bindings.end())
++				{
++					auto it_mesh = it_entry->second.find(mesh_idx);
++					if (it_mesh != it_entry->second.end())
++					{
++						store<void*>(it, GMD_MESHBINDING, it_mesh->second);
++					}
++				}
++			}
++		}
++
++		LOG(INFO) << "CG3H visibility: " << entry_name
++		          << (visible ? " shown" : " hidden")
++		          << " (" << mesh_idx << " meshes)";
++	}
++
+ 	static std::unordered_map<void*, std::filesystem::path> g_sjson_FileStream_to_filepath;
+ 	static constexpr size_t g_sjson_size_multiplier_for_patches = 8;
+ 
+@@ -485,6 +633,7 @@ namespace lua::hades::data
+ 		ns.set_function("load_package_overrides_set", load_package_overrides_set);
+ 		ns.set_function("add_granny_file", add_granny_file);
+ 		ns.set_function("add_package_file", add_package_file);
++		ns.set_function("toggle_entry_meshes", toggle_entry_meshes);
+ 
+ 		state["sol.__h2m_LoadPackages__"] = state["LoadPackages"];
+ 		// Lua API: Function

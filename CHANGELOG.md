@@ -4,6 +4,39 @@ All notable changes to CG3H are documented here.
 
 ---
 
+## v3.8.0
+
+Instant in-game mesh visibility toggle.  Enable/disable mods from the mod manager and see the result immediately — no rebuild, no restart.  Built on a new `rom.data.set_draw_visible` H2M API that hooks the game's draw dispatch to suppress draw calls per model entry.
+
+### Added
+
+- **Instant toggle** — the mod manager checkbox now hides/shows character meshes in real time.  Internally calls `rom.data.set_draw_visible(entry_name, visible)` per mesh entry.  The change takes effect on the next frame; no GPK rebuild, no game restart, no data mutation.
+- **Full shadow suppression** — toggling a character off also suppresses its shadow.  DoDraw3D, DoDrawShadow3D, and DoDraw3DThumbnail are covered by detour hooks on param4 (HashGuid).  DoDrawShadowCast3D (different signature, no hash param) is covered by a manual code cave patched into the draw dispatch via VirtualProtect — the hash is read directly from the draw entry at `[r10+0x28]`.
+- **Fallback path** — on older H2M builds without the draw hooks, the toggle gracefully falls back to the v3.7 rebuild + restart flow.
+- **`rom.data.set_draw_visible` H2M binding** — new Lua API in a standalone `draw.cpp` module (`lua::hades::draw` namespace).  Generic framework feature, not CG3H-specific.  Designed for upstream merge into Hell2Modding.
+- **Builder GPK gating** — `register_gpks()` now checks `is_enabled()` before registering a character's GPK redirect.  Disabled mods no longer load their modded meshes at startup; the stock model appears instead.
+
+### Fixed
+
+- **Checkbox stuck on** — `state.is_enabled(mod.id) or true` always evaluated to `true` due to Lua operator precedence (`and` binds tighter than `or`).  Replaced with `state.is_enabled(mod.id)`.  The checkbox now correctly reflects the persisted enable/disable state.
+- **Hash system timing** — `HashGuid::Lookup` returns 0 before the first scene loads.  Startup `apply_visibility()` was removed (it would insert hash 0 for every entry).  Visibility is now only applied at toggle time, when the hash system is guaranteed active.
+
+### Changed
+
+- **H2M draw module** — all draw-call hook code lives in `src/lua_extensions/bindings/hades/draw.cpp` / `draw.hpp`, registered via `lua_manager_extension.cpp`.  Removed from `data.cpp`.  Namespace: `lua::hades::draw`.
+- **Lua API rename** — `rom.data.set_entry_visible` renamed to `rom.data.set_draw_visible` for the generic H2M API.
+- **Banner text** — "live" toggle outcome shows "toggled" instead of "reloaded" since no reload occurs.
+
+### Architecture
+
+The draw dispatch loop (6336-byte function at `DoDraw3D + 0x148E0`) iterates an array of draw entries.  Each entry has a HashGuid at `[+0x28]` and variant flags at `[+0x2C..0x2E]` that select one of four draw functions.  Three share the signature `(const vector<RenderMesh*>&, uint, int, HashGuid)` and are hooked with standard detour hooks.  The fourth (`DoDrawShadowCast3D`) has a different signature without HashGuid, but the hash is still in the draw entry.  SafetyHook mid-hooks fail in this dispatch area (instruction relocation issues with short conditional jumps), so we patch the 7-byte shadow-flag check (`cmp byte [r10+0x2d], 0; je`) with a `jmp` to an allocated code cave that reads the hash, calls `is_hash_hidden()`, and either skips to loop-next or replays the original instructions.
+
+### Why
+
+v3.7 added the mod manager UI but every toggle required a full GPK rebuild + game restart.  v3.8 makes the toggle instant by intercepting the render pipeline.  This is the foundation for v3.9 outfit switching — the same code cave can be extended from a boolean visibility gate to a hash remap that swaps which mModelData entry draws.
+
+---
+
 ## v3.7.0
 
 In-game mod manager (read-only), plus a pile of Hell2Modding compliance fixes discovered while shipping it. First in-game UI surface for CG3H, built on the H2M ImGui binding. The existing runtime plugin is split into modular layers so future UI changes only touch one file.

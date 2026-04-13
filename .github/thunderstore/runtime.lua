@@ -129,11 +129,14 @@ end
 -- init time, so no hot-reload is required.
 function M.register_gpks(state, builder_data_dir)
     for character, char_mods in pairs(state.by_character) do
-        local has_glb = false
+        local has_enabled_glb = false
         for _, mod in ipairs(char_mods) do
-            if mod.has_glb then has_glb = true; break end
+            if mod.has_glb and state.is_enabled(mod.id) then
+                has_enabled_glb = true
+                break
+            end
         end
-        if has_glb then
+        if has_enabled_glb then
             local gpk_file = character .. ".gpk"
             local gpk_path = rom.path.combine(builder_data_dir, gpk_file)
             if rom.path.exists(gpk_path) then
@@ -151,6 +154,149 @@ function M.apply(state, ctx)
     end
     M.run_builder(state, ctx.builder_path, ctx.plugins_data_dir)
     M.register_gpks(state, ctx.builder_data_dir)
+end
+
+-- ── v3.8: draw-call visibility gate ────────────────────────────────────
+-- Hooks sgg::DrawManager::DoDraw3D (+ shadow/thumbnail variants) via
+-- rom.data.set_draw_visible to suppress draw calls per mesh entry.
+-- Instant, no rebuild, no restart, no data mutation.
+
+--- Check whether the H2M draw-gate API is available.  Returns false on
+-- older H2M builds that lack the DoDraw3D hook.
+function M.has_draw_gate()
+    return type(rom.data.set_draw_visible) == "function"
+end
+
+--- Toggle visibility of a single mod's mesh entries.  Uses the draw-call
+-- hook for instant visual feedback.  Returns "live" on success or nil if
+-- the draw gate is unavailable.
+function M.toggle_mod_visibility(mod_id, enabled, state)
+    if not M.has_draw_gate() then
+        return nil
+    end
+
+    local target_mod = nil
+    for _, mod in ipairs(state.mods) do
+        if mod.id == mod_id then
+            target_mod = mod
+            break
+        end
+    end
+    if not target_mod or #target_mod.mesh_entries == 0 then
+        rom.log.info(LOG_PREFIX .. " [draw-gate] no mesh entries for " .. mod_id)
+        return nil
+    end
+
+    local character = target_mod.character
+
+    if enabled then
+        -- Re-enable: make all this mod's entries visible.
+        for _, entry in ipairs(target_mod.mesh_entries) do
+            rom.data.set_draw_visible(entry, true)
+            rom.log.info(LOG_PREFIX .. " [draw-gate] show " .. entry)
+        end
+    else
+        -- Disable: hide entries that no other ENABLED mod uses.
+        local other_entries = {}
+        for _, mod in ipairs(state.mods) do
+            if mod.character == character
+                and mod.id ~= mod_id
+                and state.is_enabled(mod.id) then
+                for _, entry in ipairs(mod.mesh_entries) do
+                    other_entries[entry] = true
+                end
+            end
+        end
+
+        for _, entry in ipairs(target_mod.mesh_entries) do
+            if not other_entries[entry] then
+                rom.data.set_draw_visible(entry, false)
+                rom.log.info(LOG_PREFIX .. " [draw-gate] hide " .. entry)
+            end
+        end
+    end
+
+    return "live"
+end
+
+--- Sync the draw-gate hidden set to match current mod_state.  Call once
+-- at startup (after GPK registration) to handle the case where mods
+-- were disabled between sessions but the GPK cache wasn't rebuilt.
+function M.apply_visibility(state)
+    if not M.has_draw_gate() then
+        return
+    end
+
+    for character, entries in pairs(state.char_mesh_entries) do
+        -- Collect entries that have at least one enabled mod.
+        local enabled_entries = {}
+        for _, mod in ipairs(state.mods) do
+            if mod.character == character and state.is_enabled(mod.id) then
+                for _, entry in ipairs(mod.mesh_entries) do
+                    enabled_entries[entry] = true
+                end
+            end
+        end
+
+        for _, entry in ipairs(entries) do
+            if not enabled_entries[entry] then
+                rom.data.set_draw_visible(entry, false)
+                rom.log.info(LOG_PREFIX .. " [draw-gate] startup hide " .. entry)
+            end
+        end
+    end
+end
+
+-- ── v3.8: per-character rebuild ────────────────────────────────────────
+
+--- Force-rebuild one character.  Blocks until the builder subprocess
+-- returns.  The builder deletes the cache key first, so this always
+-- fires a fresh build regardless of cache state.
+function M.rebuild_character(character, ctx)
+    if not rom.path.exists(ctx.builder_path) then
+        rom.log.info(LOG_PREFIX .. " ERROR: cg3h_builder.exe not found at "
+            .. ctx.builder_path)
+        return false
+    end
+    rom.log.info(LOG_PREFIX .. " Rebuilding " .. character .. "...")
+    local cmd = 'cmd /c ""' .. ctx.builder_path .. '" --scan-all "'
+        .. ctx.plugins_data_dir .. '" --character "' .. character .. '""'
+    os.execute(cmd)
+    rom.log.info(LOG_PREFIX .. " Rebuild complete for " .. character)
+    return true
+end
+
+--- Rebuild + register GPK redirect for next launch.  The rebuilt GPK
+-- takes effect on the next game restart (LoadModelData not safe
+-- mid-session).
+function M.hot_reload_character(character, ctx, state)
+    local gpk_file = character .. ".gpk"
+    local gpk_path = rom.path.combine(ctx.builder_data_dir, gpk_file)
+
+    if rom.path.exists(gpk_path) then
+        rom.data.add_granny_file(gpk_file, gpk_path)
+        rom.log.info(LOG_PREFIX .. " [rebuild] re-registered GPK redirect: " .. gpk_file)
+    end
+
+    rom.log.info(LOG_PREFIX .. " [rebuild] " .. character
+        .. " rebuilt — restart the game to see mesh changes")
+    return "restart"
+end
+
+--- Single-call path used by the UI Rebuild button: rebuild the
+-- character, re-read status.  Returns outcome string.
+function M.trigger_rebuild_and_reload(character, ctx, state)
+    local ok = M.rebuild_character(character, ctx)
+    if not ok then
+        return nil
+    end
+
+    -- Re-read the status JSON so the UI sees fresh per-character state.
+    if state then
+        state.load_status(ctx.builder_data_dir)
+    end
+
+    return M.hot_reload_character(character, ctx, state)
 end
 
 return M

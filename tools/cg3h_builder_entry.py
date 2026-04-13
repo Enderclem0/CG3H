@@ -22,6 +22,33 @@ import pygltflib
 # backwards-incompatible ways so the Lua reader can degrade gracefully.
 CG3H_STATUS_SCHEMA_VERSION = 1
 
+# Schema version for cg3h_mod_state.json (user-writable per-mod state —
+# enabled flag etc.).  Separate file from cg3h_status.json because one is
+# builder output and one is user input.
+CG3H_MOD_STATE_SCHEMA_VERSION = 1
+
+
+def _load_mod_state(builder_dir):
+    """Read cg3h_mod_state.json.  Missing / unreadable file → empty dict."""
+    path = os.path.join(builder_dir, "cg3h_mod_state.json")
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, encoding='utf-8') as f:
+            doc = json.load(f)
+        return doc.get("mods", {})
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"  WARNING: could not read {path}: {e}")
+        return {}
+
+
+def _is_mod_enabled(mod_state, mod_id):
+    """Default to enabled if the mod has no state entry."""
+    entry = mod_state.get(mod_id)
+    if not entry:
+        return True
+    return entry.get("enabled", True)
+
 _dir = os.path.dirname(os.path.abspath(__file__))
 if _dir not in sys.path:
     sys.path.insert(0, _dir)
@@ -406,18 +433,36 @@ def build_gpk(mod_dir, game_dir=None):
         return False
 
 
-def scan_and_build_all(plugins_data_dir, game_dir=None):
+def scan_and_build_all(plugins_data_dir, game_dir=None, only_character=None):
     """Scan plugins_data/ for all CG3H mods, group by character, build merged GPKs.
 
     Merged GPKs are output to plugins_data/CG3HBuilder/{character}.gpk.
     For multiple mods targeting the same character, each mod's GLB is applied
     sequentially to produce one merged GPK with all meshes.
+
+    If ``only_character`` is provided, only that character is processed (the
+    UI uses this for single-character rebuilds after a mod toggle).  Its
+    cache key is deleted first so the rebuild always fires.
     """
     if not game_dir:
         game_dir = find_game_dir()
     if not game_dir:
         print("ERROR: Hades II game directory not found")
         return False
+
+    # Output GPKs next to cg3h_builder.exe (handles r2modman nesting)
+    # When running as PyInstaller exe, sys.executable is the exe path
+    if getattr(sys, 'frozen', False):
+        builder_dir = os.path.dirname(sys.executable)
+    else:
+        builder_dir = os.path.join(plugins_data_dir, 'CG3HBuilder')
+    os.makedirs(builder_dir, exist_ok=True)
+
+    # v3.8: read per-mod enable/disable state.  Disabled mods are filtered
+    # out of the scan so they contribute nothing to the merged GPK, but
+    # they still get a record in cg3h_status.json so the UI can grey them.
+    mod_state = _load_mod_state(builder_dir)
+    disabled_records = {}  # character → list of mod details that were skipped
 
     # Scan for CG3H mods with GLBs
     # Handles both flat layout (manual install) and nested layout (r2modman)
@@ -457,32 +502,68 @@ def scan_and_build_all(plugins_data_dir, game_dir=None):
         if not os.path.isfile(glb_path):
             continue
 
-        by_character.setdefault(character, []).append({
+        mod_info = {
             'id': entry,
             'mod': mod,
             'mod_dir': mod_dir,
             'glb_path': glb_path,
             'manifest_path': os.path.join(mod_dir, 'manifest.json'),
-        })
+        }
 
-    # Output GPKs next to cg3h_builder.exe (handles r2modman nesting)
-    # When running as PyInstaller exe, sys.executable is the exe path
-    if getattr(sys, 'frozen', False):
-        builder_dir = os.path.dirname(sys.executable)
-    else:
-        builder_dir = os.path.join(plugins_data_dir, 'CG3HBuilder')
-    os.makedirs(builder_dir, exist_ok=True)
+        if not _is_mod_enabled(mod_state, entry):
+            # Disabled: don't contribute to the build, but track so the UI
+            # can show the mod greyed out under its target character.
+            disabled_records.setdefault(character, []).append(mod_info)
+            print(f"  {entry}: disabled, skipping")
+            continue
 
-    # Clean up GPKs for characters that no longer have mods
-    for f in os.listdir(builder_dir):
-        if f.endswith('.gpk'):
-            char = f[:-4]
-            if char not in by_character:
-                os.unlink(os.path.join(builder_dir, f))
-                cache_key = os.path.join(builder_dir, f"{char}.cache_key")
-                if os.path.isfile(cache_key):
-                    os.unlink(cache_key)
-                print(f"  Removed stale GPK: {f}")
+        by_character.setdefault(character, []).append(mod_info)
+
+    # --character: narrow the build set to that character only, deleting
+    # its cache key first so the rebuild always fires.
+    if only_character is not None:
+        print(f"  [--character] target={only_character!r}")
+        print(f"  [--character] enabled chars before filter={sorted(by_character.keys())!r}")
+        print(f"  [--character] disabled chars before filter={sorted(disabled_records.keys())!r}")
+        by_character = {
+            k: v for k, v in by_character.items() if k == only_character
+        }
+        disabled_records = {
+            k: v for k, v in disabled_records.items() if k == only_character
+        }
+        cache_key_path = os.path.join(builder_dir, f"{only_character}.cache_key")
+        if os.path.isfile(cache_key_path):
+            os.unlink(cache_key_path)
+            print(f"  {only_character}: cache key cleared for forced rebuild")
+
+        # If --character was given but the character now has zero enabled
+        # mods (the user just disabled the last one), the build loop won't
+        # run for it.  Restore stock by deleting the merged GPK and cache
+        # key right here, so the runtime falls back to the original file.
+        if only_character not in by_character:
+            stock_gpk = os.path.join(builder_dir, f"{only_character}.gpk")
+            if os.path.isfile(stock_gpk):
+                os.unlink(stock_gpk)
+                print(f"  {only_character}: no enabled mods, removed merged GPK (revert to stock)")
+
+    # Clean up GPKs for characters that no longer have *enabled* mods.
+    # Pre-v3.8 this was keyed on `by_character`, but a character with only
+    # disabled mods should also revert to stock — so we compare against
+    # the union, and if a character has zero enabled mods the GPK is
+    # deleted below during the status-record pass.
+    active_chars = set(by_character.keys())
+    if only_character is None:
+        # Only prune during full scans — a --character run must not touch
+        # other characters' files.
+        for f in os.listdir(builder_dir):
+            if f.endswith('.gpk'):
+                char = f[:-4]
+                if char not in active_chars:
+                    os.unlink(os.path.join(builder_dir, f))
+                    cache_key = os.path.join(builder_dir, f"{char}.cache_key")
+                    if os.path.isfile(cache_key):
+                        os.unlink(cache_key)
+                    print(f"  Removed stale GPK: {f} (no enabled mods)")
 
     gpk_dir = os.path.join(game_dir, "Content", "GR2", "_Optimized")
     sdb_dir = gpk_dir
@@ -497,13 +578,45 @@ def scan_and_build_all(plugins_data_dir, game_dir=None):
     # (cached, built, failed-at-merge, failed-at-convert) writes a record.
     status_characters = {}
 
+    # v3.8 hot-reload helper: extract each GPK entry as a standalone
+    # .gr2.lz4 file alongside the merged GPK so the game's per-entry
+    # loader (sgg::Granny3D::OpenOptimizedGrannyFile) can find them via
+    # H2M's file redirect.  Runs on both fresh-build and cached-build
+    # paths — on cached path it's a no-op if the files already exist.
+    def _extract_entries(character_name, gpk_path, force=False):
+        try:
+            from gpk_pack import extract_gpk_raw
+            entries_raw = extract_gpk_raw(gpk_path)
+            n_written = 0
+            for entry_name, lz4_bytes in entries_raw.items():
+                entry_path = os.path.join(builder_dir, f"{entry_name}.gr2.lz4")
+                # On cache hits (force=False), skip if the file exists and
+                # matches size.  On fresh builds (force=True), always
+                # overwrite — two files with different content can have
+                # the same compressed size (e.g. position-only edits).
+                if (not force and os.path.isfile(entry_path)
+                        and os.path.getsize(entry_path) == len(lz4_bytes)):
+                    continue
+                with open(entry_path, 'wb') as f:
+                    f.write(lz4_bytes)
+                n_written += 1
+            if n_written > 0:
+                print(f"  {character_name}: extracted {n_written} entry file(s)")
+        except Exception as e:
+            print(f"  {character_name}: WARNING extract_gpk_raw failed: {e}")
+
     # Empty-mods case: skip the loop but still fall through to the status
     # JSON write so the UI sees fresh state (important when a modder just
     # uninstalled everything — stale status would be misleading).
     if not by_character:
         print("No CG3H mesh mods found")
 
-    def _record(char, state, char_mods, gpk_path, error, duration_ms):
+    def _record(char, state, char_mods, gpk_path, error, duration_ms,
+                disabled_mods=None):
+        # mod_details lists ALL mods on this character (enabled + disabled)
+        # so the UI can render the full picture; the per-mod "enabled"
+        # flag tells it which to grey out.
+        all_mods = list(char_mods) + list(disabled_mods or [])
         status_characters[char] = {
             "state": state,
             "gpk_path": gpk_path if gpk_path and os.path.isfile(gpk_path) else None,
@@ -514,8 +627,9 @@ def scan_and_build_all(plugins_data_dir, game_dir=None):
                     "name": mi['mod'].get('metadata', {}).get('name', mi['id']),
                     "version": mi['mod'].get('metadata', {}).get('version', ''),
                     "author": mi['mod'].get('metadata', {}).get('author', ''),
+                    "enabled": mi in char_mods,
                 }
-                for mi in char_mods
+                for mi in all_mods
             ],
             "error": error,
             "duration_ms": int(duration_ms) if duration_ms is not None else None,
@@ -525,12 +639,17 @@ def scan_and_build_all(plugins_data_dir, game_dir=None):
         char_start = time.monotonic()
         output_gpk = os.path.join(builder_dir, f"{character}.gpk")
         cache_key_path = os.path.join(builder_dir, f"{character}.cache_key")
+        char_disabled = disabled_records.get(character, [])
 
-        # Build a cache key from sorted mod ids + GLB modification times
+        # Build a cache key from sorted mod ids + GLB mtimes.  v3.8 appends
+        # a "disabled:<id>" line for every disabled mod targeting this
+        # character — toggling a mod naturally invalidates the cache.
         current_key = ""
         for mi in sorted(char_mods, key=lambda m: m['id']):
             glb_mtime = os.path.getmtime(mi['glb_path']) if os.path.isfile(mi['glb_path']) else 0
             current_key += f"{mi['id']}:{glb_mtime}\n"
+        for mi in sorted(char_disabled, key=lambda m: m['id']):
+            current_key += f"disabled:{mi['id']}\n"
 
         # Check cache — rebuild if mods changed
         if os.path.isfile(output_gpk) and os.path.isfile(cache_key_path):
@@ -539,8 +658,13 @@ def scan_and_build_all(plugins_data_dir, game_dir=None):
             if saved_key == current_key:
                 print(f"  {character}: cached ({len(char_mods)} mod(s))")
                 cached += 1
+                # Ensure per-entry standalone files exist for hot-reload
+                # even on cache hits (so profiles built before v3.8 get
+                # them on first launch after upgrading).
+                _extract_entries(character, output_gpk)
                 _record(character, "cached", char_mods, output_gpk, None,
-                        (time.monotonic() - char_start) * 1000)
+                        (time.monotonic() - char_start) * 1000,
+                        disabled_mods=char_disabled)
                 continue
             else:
                 print(f"  {character}: mods changed, rebuilding...")
@@ -557,7 +681,8 @@ def scan_and_build_all(plugins_data_dir, game_dir=None):
             failed += 1
             _record(character, "failed", char_mods, None,
                     "game GPK/SDB not found",
-                    (time.monotonic() - char_start) * 1000)
+                    (time.monotonic() - char_start) * 1000,
+                    disabled_mods=char_disabled)
             continue
 
         print(f"  {character}: building from {len(char_mods)} mod(s)...")
@@ -572,14 +697,16 @@ def scan_and_build_all(plugins_data_dir, game_dir=None):
             failed += 1
             _record(character, "failed", char_mods, None,
                     f"GLB merge failed: {e}",
-                    (time.monotonic() - char_start) * 1000)
+                    (time.monotonic() - char_start) * 1000,
+                    disabled_mods=char_disabled)
             continue
         if not merged_glb:
             print(f"  {character}: ERROR — GLB merge returned no output")
             failed += 1
             _record(character, "failed", char_mods, None,
                     "GLB merge returned no output",
-                    (time.monotonic() - char_start) * 1000)
+                    (time.monotonic() - char_start) * 1000,
+                    disabled_mods=char_disabled)
             continue
 
         # Collect operations and routing from all mods
@@ -636,26 +763,58 @@ def scan_and_build_all(plugins_data_dir, game_dir=None):
             with open(cache_key_path, 'w') as f:
                 f.write(current_key)
             print(f"  {character}: done -> {output_gpk}")
-            _record(character, "built", char_mods, output_gpk, None, duration_ms)
+            _extract_entries(character, output_gpk, force=True)
+            _record(character, "built", char_mods, output_gpk, None, duration_ms,
+                    disabled_mods=char_disabled)
         else:
             failed += 1
             _record(character, "failed", char_mods, None,
-                    convert_error or "convert() failed", duration_ms)
+                    convert_error or "convert() failed", duration_ms,
+                    disabled_mods=char_disabled)
+
+    # Disabled-only characters: a character whose ONLY mods are all
+    # disabled has already been pruned from the builder dir above (or
+    # never built), but we still need a status record so the UI can
+    # show it as "stock" with the disabled mods greyed out.
+    for character, disabled_mods in disabled_records.items():
+        if character in status_characters:
+            continue  # already recorded via the build loop
+        _record(character, "disabled", [], None, None, 0,
+                disabled_mods=disabled_mods)
 
     print(f"\nScan complete: {built} built, {cached} cached, {failed} failed")
 
     # v3.7: write the status JSON.  Consumed by the in-game mod manager
     # Lua plugin.  Best-effort — builder success does not depend on the
     # write succeeding.
+    # v3.8: --character runs touch only one character, but the on-disk
+    # status JSON must keep records for every built character.  If we're
+    # in --character mode, load the existing JSON and merge our new
+    # records on top instead of overwriting.
+    merged_characters = dict(status_characters)
+    status_path = os.path.join(builder_dir, "cg3h_status.json")
+    if only_character is not None and os.path.isfile(status_path):
+        try:
+            with open(status_path, encoding='utf-8') as f:
+                prev = json.load(f)
+            prev_chars = prev.get("characters", {})
+            for char, rec in prev_chars.items():
+                if char not in merged_characters:
+                    merged_characters[char] = rec
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"  WARNING: could not merge prior status JSON: {e}")
+
     status_doc = {
         "version": CG3H_STATUS_SCHEMA_VERSION,
         "builder_version": CG3H_VERSION,
         "built_at": datetime.datetime.now(datetime.timezone.utc)
                     .replace(microsecond=0).isoformat(),
+        # v3.8: expose game_dir so the Lua runtime can find stock GPKs
+        # when reverting a disabled character back to vanilla.
+        "game_dir": game_dir.replace("\\", "/") if game_dir else "",
         "summary": {"built": built, "cached": cached, "failed": failed},
-        "characters": status_characters,
+        "characters": merged_characters,
     }
-    status_path = os.path.join(builder_dir, "cg3h_status.json")
     try:
         with open(status_path, 'w', encoding='utf-8') as f:
             json.dump(status_doc, f, indent=2)
@@ -668,7 +827,7 @@ def scan_and_build_all(plugins_data_dir, game_dir=None):
 def main():
     if len(sys.argv) < 2:
         print("Usage: cg3h_builder <mod_dir> [--game-dir <path>]")
-        print("       cg3h_builder --scan-all <plugins_data_dir> [--game-dir <path>]")
+        print("       cg3h_builder --scan-all <plugins_data_dir> [--game-dir <path>] [--character <name>]")
         sys.exit(1)
 
     # Optional --game-dir flag
@@ -678,11 +837,20 @@ def main():
         if idx + 1 < len(sys.argv):
             game_dir = sys.argv[idx + 1]
 
+    # Optional --character flag (v3.8): limits --scan-all to one character
+    # and forces rebuild for that character by clearing its cache key.
+    only_character = None
+    if '--character' in sys.argv:
+        idx = sys.argv.index('--character')
+        if idx + 1 < len(sys.argv):
+            only_character = sys.argv[idx + 1]
+
     if sys.argv[1] == '--scan-all':
         if len(sys.argv) < 3 or sys.argv[2].startswith('--'):
-            print("Usage: cg3h_builder --scan-all <plugins_data_dir> [--game-dir <path>]")
+            print("Usage: cg3h_builder --scan-all <plugins_data_dir> [--game-dir <path>] [--character <name>]")
             sys.exit(1)
-        ok = scan_and_build_all(sys.argv[2], game_dir=game_dir)
+        ok = scan_and_build_all(sys.argv[2], game_dir=game_dir,
+                                only_character=only_character)
         sys.exit(0 if ok else 1)
 
     mod_dir = sys.argv[1]
