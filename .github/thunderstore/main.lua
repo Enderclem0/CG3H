@@ -103,6 +103,18 @@ else
     rom.log.info(LOG_PREFIX .. " Draw-gate unavailable — toggle requires rebuild + restart")
 end
 
+local variant_count = 0
+for _, entries in pairs(mod_state.variants or {}) do
+    for _, entry_data in pairs(entries) do
+        for _ in pairs(entry_data.variants or {}) do
+            variant_count = variant_count + 1
+        end
+    end
+end
+if variant_count > 0 then
+    rom.log.info(LOG_PREFIX .. " " .. variant_count .. " variant(s) registered for outfit switching")
+end
+
 ui.init(mod_state, {
     on_refresh = function()
         mod_state.refresh(plugins_data_dir, builder_data_dir)
@@ -122,9 +134,27 @@ ui.init(mod_state, {
 
         return runtime.trigger_rebuild_and_reload(character, runtime_ctx, mod_state)
     end,
+    -- v3.9: per-entry body picker.
+    on_set_variant_entry = function(character, entry_name, mod_id)
+        mod_state.set_active_variant(character, entry_name, mod_id, builder_data_dir)
+        return runtime.swap_entry(character, entry_name, mod_id, mod_state)
+    end,
+    -- v3.9: "Apply to all scenes" cascade.
+    on_set_variant_all = function(character, mod_id)
+        local char_variants = mod_state.variants[character] or {}
+        for entry_name, _ in pairs(char_variants) do
+            mod_state.set_active_variant(character, entry_name, mod_id, builder_data_dir)
+        end
+        return runtime.swap_character_all(character, mod_id, mod_state)
+    end,
     on_rebuild = function(character)
         return runtime.trigger_rebuild_and_reload(character, runtime_ctx, mod_state)
     end,
 })
+
+-- v3.9 picker = swap between stock entries the game already loaded.
+-- runtime.register_variants populated state.variants from the union of
+-- char_mesh_entries; the existing per-entry dropdown UI in ui.lua picks
+-- it up automatically.  swap_entry handles populate-then-remap on click.
 
 rom.log.info(LOG_PREFIX .. " CG3H Builder ready (" .. mod_state.count() .. " mod(s) loaded)")

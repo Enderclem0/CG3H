@@ -27,6 +27,12 @@ M.built_at = ""        -- ISO timestamp from cg3h_status.json
 M.game_dir = ""        -- from cg3h_status.json (forward-slashed)
 M.summary = { built = 0, cached = 0, failed = 0 }
 M.last_scan_ts = 0
+M.variants = {}        -- v3.9: populated by runtime.register_variants.
+                       -- Shape: { [character] = { [entry_name] = { stock, variants = { [mod_id] = variant_entry_name } } } }
+
+M.active_variants = {} -- v3.9: per-entry active body selection.
+                       -- Shape: { [character] = { [entry_name] = mod_id } }
+                       -- Missing / "stock" → stock render for that entry.
 
 -- ── Helpers ────────────────────────────────────────────────────────────
 
@@ -200,9 +206,11 @@ end
 -- cg3h_status.json because that file is builder output; this one is
 -- user input (written by the UI on checkbox toggle).
 
---- Read cg3h_mod_state.json into M.mod_state.  Missing → empty.
+--- Read cg3h_mod_state.json into M.mod_state and M.active_variants.
+-- Missing → empty.
 function M.load_mod_state(builder_dir)
     M.mod_state = {}
+    M.active_variants = {}
     local path = rom.path.combine(builder_dir, "cg3h_mod_state.json")
     if not rom.path.exists(path) then
         return
@@ -214,39 +222,47 @@ function M.load_mod_state(builder_dir)
     local content = f:read("*a")
     f:close()
 
-    -- Minimal parser: we only care about the "enabled" bool per mod id.
-    -- Structure is { "mods": { "mod_id": { "enabled": true/false }, ... } }.
+    -- "mods": { "mod_id": { "enabled": true/false }, ... }
     local mods_block = content:match('"mods"%s*:%s*(%b{})')
-    if not mods_block then
-        return
-    end
-    for mod_id, body in mods_block:gmatch('"([^"]+)"%s*:%s*(%b{})') do
-        local enabled_str = body:match('"enabled"%s*:%s*(%a+)')
-        local enabled = true
-        if enabled_str == "false" then
-            enabled = false
+    if mods_block then
+        for mod_id, body in mods_block:gmatch('"([^"]+)"%s*:%s*(%b{})') do
+            local enabled_str = body:match('"enabled"%s*:%s*(%a+)')
+            local enabled = true
+            if enabled_str == "false" then
+                enabled = false
+            end
+            M.mod_state[mod_id] = { enabled = enabled }
         end
-        M.mod_state[mod_id] = { enabled = enabled }
+    end
+
+    -- v3.9: "active_variants": { "Character": { "EntryName": "mod_id", ... }, ... }
+    local av_block = content:match('"active_variants"%s*:%s*(%b{})')
+    if av_block then
+        for char, char_body in av_block:gmatch('"([^"]+)"%s*:%s*(%b{})') do
+            M.active_variants[char] = {}
+            for entry, mod_id in char_body:gmatch('"([^"]+)"%s*:%s*"([^"]*)"') do
+                M.active_variants[char][entry] = mod_id
+            end
+        end
     end
 end
 
---- Write M.mod_state back to cg3h_mod_state.json.  Best-effort — logs a
--- warning on failure but does not error.  Hand-serialised because we
--- don't ship a JSON encoder in the plugin.
+--- Write M.mod_state + M.active_variants back to cg3h_mod_state.json.
+-- Best-effort — logs a warning on failure but does not error.
+-- Hand-serialised because we don't ship a JSON encoder in the plugin.
 function M.save_mod_state(builder_dir)
     local path = rom.path.combine(builder_dir, "cg3h_mod_state.json")
     local lines = {}
     table.insert(lines, '{')
-    table.insert(lines, '  "version": 1,')
-    table.insert(lines, '  "mods": {')
+    table.insert(lines, '  "version": 2,')
 
-    -- Sorted keys for stable file content.
+    -- mods block — stable sort by id.
+    table.insert(lines, '  "mods": {')
     local ids = {}
     for mod_id, _ in pairs(M.mod_state) do
         table.insert(ids, mod_id)
     end
     table.sort(ids)
-
     for i, mod_id in ipairs(ids) do
         local entry = M.mod_state[mod_id]
         local enabled_str = entry.enabled and "true" or "false"
@@ -254,8 +270,38 @@ function M.save_mod_state(builder_dir)
         table.insert(lines, string.format(
             '    "%s": { "enabled": %s }%s', mod_id, enabled_str, comma))
     end
+    table.insert(lines, '  },')
 
+    -- v3.9: active_variants block — per-entry body selection.
+    table.insert(lines, '  "active_variants": {')
+    local chars = {}
+    for char, _ in pairs(M.active_variants) do
+        table.insert(chars, char)
+    end
+    table.sort(chars)
+    for ci, char in ipairs(chars) do
+        local per_entry = M.active_variants[char] or {}
+        local entries = {}
+        for entry, mod_id in pairs(per_entry) do
+            -- Only persist non-stock picks — stock is the default.
+            if mod_id and mod_id ~= "stock" then
+                table.insert(entries, { entry = entry, mod = mod_id })
+            end
+        end
+        table.sort(entries, function(a, b) return a.entry < b.entry end)
+        if #entries == 0 then goto next_char end
+        table.insert(lines, string.format('    "%s": {', char))
+        for i, e in ipairs(entries) do
+            local comma = (i < #entries) and "," or ""
+            table.insert(lines, string.format(
+                '      "%s": "%s"%s', e.entry, e.mod, comma))
+        end
+        local char_comma = (ci < #chars) and "}," or "}"
+        table.insert(lines, '    ' .. char_comma)
+        ::next_char::
+    end
     table.insert(lines, '  }')
+
     table.insert(lines, '}')
 
     local f = io.open(path, "w")
@@ -310,6 +356,59 @@ end
 function M.state_for(character)
     local rec = M.build_status[character]
     return rec and rec.state or "unknown"
+end
+
+-- ── v3.9: per-entry active variant accessors ────────────────────────────
+
+--- Read the active variant mod_id for a given entry.  Returns "stock" if
+-- no mod is selected.  Never returns nil so callers can treat the result
+-- as a dropdown selection directly.
+function M.get_active_variant(character, entry_name)
+    local per = M.active_variants[character]
+    if not per then return "stock" end
+    local id = per[entry_name]
+    if not id or id == "" then return "stock" end
+    return id
+end
+
+--- Set the active variant for a single entry.  Pass "stock" (or nil) to
+-- clear the selection.  Persists to cg3h_mod_state.json.
+function M.set_active_variant(character, entry_name, mod_id, builder_dir)
+    if not M.active_variants[character] then
+        M.active_variants[character] = {}
+    end
+    if mod_id == "stock" or mod_id == nil or mod_id == "" then
+        M.active_variants[character][entry_name] = nil
+    else
+        M.active_variants[character][entry_name] = mod_id
+    end
+    M.save_mod_state(builder_dir)
+end
+
+--- Subset of mods that provide a variant for EVERY entry in the
+-- character's variants table.  Used for the "Apply to all scenes"
+-- dropdown — only candidates that cover every scene should appear.
+function M.mods_covering_all_entries(character)
+    local char_vars = M.variants[character]
+    if not char_vars then return {} end
+    local entry_names = {}
+    for name, _ in pairs(char_vars) do table.insert(entry_names, name) end
+    if #entry_names == 0 then return {} end
+
+    local candidate = {}  -- mod_id → count of entries it covers
+    for _, entry_data in pairs(char_vars) do
+        for mod_id, _ in pairs(entry_data.variants) do
+            candidate[mod_id] = (candidate[mod_id] or 0) + 1
+        end
+    end
+    local full = {}
+    for mod_id, n in pairs(candidate) do
+        if n == #entry_names then
+            table.insert(full, mod_id)
+        end
+    end
+    table.sort(full)
+    return full
 end
 
 return M

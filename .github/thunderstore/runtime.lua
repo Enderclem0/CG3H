@@ -147,6 +147,117 @@ function M.register_gpks(state, builder_data_dir)
     end
 end
 
+-- ── v3.9: variant registration ─────────────────────────────────────────
+
+--- Build state.variants from each character's stock-mesh-entry union.
+--
+-- v3.9 ships scene-entry swapping (NOT custom mod-named variants —
+-- those hang on the second frame, see task #26 RE).  All mods merge
+-- into stock entries the way they did in v3.8, and the picker lets
+-- the user choose WHICH stock entry to render in any scene.  Picking
+-- "Battle" while in Hub installs a remap HecateHub_Mesh -> HecateBattle_Mesh,
+-- so Hecate looks like her battle outfit even in the hub.  Both sides
+-- of every swap are real game-loaded entries, so initialisation /
+-- skeleton linkage / DrawableExt sizing all work natively.
+--
+-- The "variants" of a given entry are simply every OTHER entry the
+-- mods touch on that character.  Stored as { [target_entry] = target_entry }
+-- so the existing UI's `_mod_label` lookup (which falls through to the
+-- raw key if not a known mod id) renders the entry name as the choice.
+function M.register_variants(state, ctx)
+    state.variants = {}
+    for char, entries in pairs(state.char_mesh_entries or {}) do
+        if #entries > 1 then
+            state.variants[char] = {}
+            for _, entry in ipairs(entries) do
+                local opts = {}
+                for _, other in ipairs(entries) do
+                    if other ~= entry then
+                        opts[other] = other
+                    end
+                end
+                state.variants[char][entry] = { stock = entry, variants = opts }
+            end
+        end
+    end
+end
+
+--- Switch the active render entry for ONE source entry of a character.
+-- `target_id == "stock"` / nil → clear remap, render the source itself.
+-- Otherwise install a remap so the game renders `target_id`'s data when
+-- it asks for `entry_name`.  Populates the target's texture handles
+-- (mimicking PrepDraw) before installing the remap so DoDraw3D's
+-- fallback path resolves them on the very first remapped frame.
+function M.swap_entry(character, entry_name, target_id, state)
+    if type(rom.data.swap_to_variant) ~= "function"
+        or type(rom.data.restore_stock) ~= "function" then
+        rom.log.info(LOG_PREFIX .. " [variant] H2M missing v3.9 API")
+        return nil
+    end
+
+    local char_variants = state.variants and state.variants[character]
+    if not char_variants then return nil end
+    local entry_data = char_variants[entry_name]
+    if not entry_data then return nil end
+
+    if target_id == nil or target_id == "stock" or target_id == ""
+       or target_id == entry_name then
+        rom.data.restore_stock(entry_name)
+        rom.log.info(LOG_PREFIX .. " [variant] " .. entry_name .. " -> stock")
+        return "live"
+    end
+
+    local target = entry_data.variants[target_id]
+    if not target then
+        rom.log.info(LOG_PREFIX .. " [variant] " .. entry_name
+            .. " has no swap target " .. target_id)
+        return nil
+    end
+
+    -- Populate target's GMD+0x44 (mirrors PrepDraw).  Safe because the
+    -- target is by construction NOT the currently-drawn entry — picking
+    -- yourself short-circuits to restore_stock above.
+    if type(rom.data.populate_entry_textures) == "function" then
+        rom.data.populate_entry_textures(target)
+    end
+
+    rom.data.swap_to_variant(entry_name, target)
+    rom.log.info(LOG_PREFIX .. " [variant] " .. entry_name .. " -> " .. target)
+    return "live"
+end
+
+--- Apply ONE mod's body to every entry of a character that has a variant
+-- for it.  Skips entries the mod doesn't cover (leaves them at their
+-- current setting).  Used by the "Apply to all scenes" dropdown.
+function M.swap_character_all(character, mod_id, state)
+    local char_variants = state.variants and state.variants[character]
+    if not char_variants then return nil end
+    for entry_name, _ in pairs(char_variants) do
+        M.swap_entry(character, entry_name, mod_id, state)
+    end
+    return "live"
+end
+
+--- On startup, re-apply any persisted per-entry body selections.  Must be
+-- called after register_variants (so state.variants is populated) and
+-- after LoadAllModelAndAnimationData (so entries exist in mModelData).
+function M.apply_active_variants(state)
+    if type(rom.data.swap_to_variant) ~= "function" then return end
+    local applied = 0
+    for char, per_entry in pairs(state.active_variants or {}) do
+        for entry_name, mod_id in pairs(per_entry) do
+            if mod_id and mod_id ~= "stock" and mod_id ~= "" then
+                local outcome = M.swap_entry(char, entry_name, mod_id, state)
+                if outcome == "live" then applied = applied + 1 end
+            end
+        end
+    end
+    if applied > 0 then
+        rom.log.info(LOG_PREFIX .. " [variant] restored " .. applied
+            .. " per-entry selection(s)")
+    end
+end
+
 --- Convenience: run the full runtime pipeline in one call.
 function M.apply(state, ctx)
     for _, mod in ipairs(state.mods) do
@@ -154,6 +265,7 @@ function M.apply(state, ctx)
     end
     M.run_builder(state, ctx.builder_path, ctx.plugins_data_dir)
     M.register_gpks(state, ctx.builder_data_dir)
+    M.register_variants(state, ctx)
 end
 
 -- ── v3.8: draw-call visibility gate ────────────────────────────────────

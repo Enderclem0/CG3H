@@ -22,6 +22,38 @@ import pygltflib
 # backwards-incompatible ways so the Lua reader can degrade gracefully.
 CG3H_STATUS_SCHEMA_VERSION = 1
 
+# v3.9: schema version for cg3h_variants.json
+CG3H_VARIANTS_SCHEMA_VERSION = 2
+
+
+def _sanitize_mod_id(mod_id):
+    """Produce a Granny-safe identifier from a Thunderstore mod id.
+
+    Thunderstore mod ids are ``Author-ModName`` (hyphenated).  The game's
+    model loader treats entry names with long/separator-heavy prefixes
+    unreliably (observed weapon-model corruption with ``___`` in the name).
+    Replace hyphens with underscores and strip whitespace so the variant
+    entry matches the game's own ``{Tag}_Mesh`` convention.
+    """
+    return mod_id.replace('-', '_').replace(' ', '_')
+
+
+def _variant_entry_name(character, mod_id, scene_index):
+    """Canonical variant entry name: ``{Character}_{sanitized_mod_id}_V{N}_Mesh``.
+
+    The leading character name is critical — Hades's model loader uses the
+    entry name prefix to link the mesh to the right skeleton / bone-matrix
+    set at draw time.  Without the prefix, the variant renders for one
+    frame (cached draw state) and then hangs on the next (bone-matrix
+    lookup fails).
+
+    ``scene_index`` is 0, 1, 2... — one per stock entry the mod targets.
+    The (stock_entry, mod_id, variant_name) mapping is recorded in
+    ``cg3h_variants.json`` so the runtime can look it up without parsing
+    the name.
+    """
+    return f"{character}_{_sanitize_mod_id(mod_id)}_V{scene_index}_Mesh"
+
 # Schema version for cg3h_mod_state.json (user-writable per-mod state —
 # enabled flag etc.).  Separate file from cg3h_status.json because one is
 # builder output and one is user input.
@@ -433,6 +465,143 @@ def build_gpk(mod_dir, game_dir=None):
         return False
 
 
+def _build_variant_entries(character, variant_mods, accessory_mods,
+                            output_gpk, original_gpk, sdb_path, dll_path,
+                            builder_dir):
+    """Build per-body variant entries and inject them into ``output_gpk``.
+
+    For each ``mesh_replace`` (body) mod, merges the mod's GLB together
+    with every ``mesh_add`` (accessory) mod's GLB so accessories stay
+    visible regardless of which body the player selects at runtime.
+    The merged GLB is run through ``convert()`` against the stock GPK,
+    and the overwritten target entries are pulled out, renamed to
+    ``{sanitized_mod_id}_V{N}_Mesh``, and injected into ``output_gpk``.
+
+    Returns a dict mapping stock entry names to per-mod variant names, for
+    ``cg3h_variants.json``::
+
+        {
+          "HecateHub_Mesh": {"Enderclem-HecateBiMod": "Enderclem_HecateBiMod_V0_Mesh"},
+          "HecateBattle_Mesh": {"Enderclem-HecateBiMod": "Enderclem_HecateBiMod_V1_Mesh"},
+        }
+    """
+    if not variant_mods:
+        return {}
+
+    from gpk_pack import extract_gpk, pack_gpk
+
+    # Read current entries in the output GPK (we inject into this in-place).
+    main_entries = extract_gpk(output_gpk)
+
+    # Per-character mapping: stock_entry -> {mod_id: variant_name}
+    variants = {}
+
+    for mod_info in variant_mods:
+        mod = mod_info['mod']
+        mod_id = mod_info['id']
+
+        # List of stock entry names this mod provides a variant for, in
+        # the order declared in mod.json.  That order defines the V{N} index.
+        mesh_entries = mod.get('target', {}).get('mesh_entries', [])
+        if not mesh_entries:
+            print(f"    {mod_id}: no target.mesh_entries — skipping variant emit")
+            continue
+
+        # Merge the body's GLB with every accessory GLB so accessories
+        # bake into the variant entry.  If there are no accessories, the
+        # merge is a no-op (just the body).
+        bundle = [mod_info] + list(accessory_mods)
+        variant_glb = None
+        variant_collisions = set()
+        try:
+            if len(bundle) == 1:
+                # Single mod — no merge needed, just use its GLB directly.
+                variant_glb = bundle[0]['glb_path']
+            else:
+                variant_glb, variant_collisions = _merge_glbs(
+                    bundle, builder_dir, f"{character}_{mod_id}"
+                )
+        except Exception as e:
+            print(f"    {mod_id}: variant GLB merge failed: {e}")
+            continue
+        if not variant_glb or not os.path.isfile(variant_glb):
+            print(f"    {mod_id}: variant GLB merge produced no output")
+            continue
+
+        # Merged manifest + routing across body + accessories.
+        variant_manifest = _merge_manifests(
+            bundle, collisions=variant_collisions or None
+        )
+        variant_routing = {}
+        for mi in bundle:
+            routing = mi['mod'].get('target', {}).get('new_mesh_routing', {})
+            for mesh_name, entries in routing.items():
+                key = (f"{mi['id']}_{mesh_name}"
+                       if variant_collisions and mesh_name in variant_collisions
+                       else mesh_name)
+                variant_routing[key] = entries
+
+        # Build a temp GPK containing this mod's body + accessories.
+        # `convert()` overwrites stock entries with the GLB's meshes; we
+        # then pull those entries out and rename them.
+        temp_gpk = os.path.join(builder_dir, f"_tmp_variant_{character}_{mod_id}.gpk")
+        try:
+            convert(
+                glb_path=variant_glb,
+                gpk_path=original_gpk,
+                sdb_path=sdb_path,
+                dll_path=dll_path,
+                output_gpk=temp_gpk,
+                manifest_dict=variant_manifest,
+                allow_topology_change=True,
+                patch_animations=False,
+                new_mesh_routing=variant_routing or None,
+            )
+        except Exception as e:
+            print(f"    {mod_id}: variant build failed: {e}")
+            if os.path.isfile(temp_gpk):
+                os.unlink(temp_gpk)
+            if len(bundle) > 1 and variant_glb and os.path.isfile(variant_glb):
+                os.unlink(variant_glb)
+            continue
+        finally:
+            if len(bundle) > 1 and variant_glb and os.path.isfile(variant_glb):
+                os.unlink(variant_glb)
+
+        if not os.path.isfile(temp_gpk):
+            continue
+
+        try:
+            temp_entries = extract_gpk(temp_gpk)
+        except Exception as e:
+            print(f"    {mod_id}: variant extract failed: {e}")
+            os.unlink(temp_gpk)
+            continue
+
+        acc_tag = f" +{len(accessory_mods)} accessor(ies)" if accessory_mods else ""
+        for scene_idx, entry_name in enumerate(mesh_entries):
+            if entry_name not in temp_entries:
+                print(f"    {mod_id}: entry '{entry_name}' missing in temp GPK — skipping")
+                continue
+            vname = _variant_entry_name(character, mod_id, scene_idx)
+            main_entries[vname] = temp_entries[entry_name]
+            variants.setdefault(entry_name, {})[mod_id] = vname
+            print(f"    {mod_id}: {entry_name} -> {vname}{acc_tag}")
+
+        try:
+            os.unlink(temp_gpk)
+        except OSError:
+            pass
+
+    # Repack the main GPK with the injected variant entries.
+    if variants:
+        pack_gpk(main_entries, output_gpk)
+        print(f"  {character}: injected "
+              f"{sum(len(v) for v in variants.values())} variant entr(ies)")
+
+    return variants
+
+
 def scan_and_build_all(plugins_data_dir, game_dir=None, only_character=None):
     """Scan plugins_data/ for all CG3H mods, group by character, build merged GPKs.
 
@@ -572,6 +741,7 @@ def scan_and_build_all(plugins_data_dir, game_dir=None, only_character=None):
     built = 0
     cached = 0
     failed = 0
+    all_variants = {}  # v3.9: { character: { entry: { mod_id: variant_name } } }
 
     # v3.7: per-character status for cg3h_status.json (consumed by the
     # in-game mod manager UI).  Populated as we iterate so every branch
@@ -685,11 +855,26 @@ def scan_and_build_all(plugins_data_dir, game_dir=None, only_character=None):
                     disabled_mods=char_disabled)
             continue
 
-        print(f"  {character}: building from {len(char_mods)} mod(s)...")
+        # v3.9 reverted: ALL mesh-bearing mods (mesh_add + mesh_replace +
+        # mesh_patch + animation_patch) merge into the stock entries — same
+        # as pre-v3.9.  The outfit-picker dropdown is shelved until the
+        # custom-entry initialization RE (task C) lands; until then,
+        # multiple mesh_replace mods on the same character resolve via
+        # last-wins merge order (controlled by `cg3h_mod_priority.json`).
+        # variant_mods stays here as an empty list so the downstream
+        # variant-injection block becomes a no-op.
+        variant_mods = []
 
-        # Merge all GLBs into one temp GLB, then build once.
-        # This avoids the double-serialize problem where custom MaterialBindings
-        # get lost across multiple convert() calls.
+        print(f"  {character}: building from {len(char_mods)} mod(s)")
+
+        merged_glb = None
+        collisions = set()
+        merged_manifest = None
+        merged_routing = {}
+        allow_topo = False
+        patch_anims = False
+        convert_error = None
+
         try:
             merged_glb, collisions = _merge_glbs(char_mods, builder_dir, character)
         except Exception as e:
@@ -709,10 +894,6 @@ def scan_and_build_all(plugins_data_dir, game_dir=None, only_character=None):
                     disabled_mods=char_disabled)
             continue
 
-        # Collect operations and routing from all mods
-        allow_topo = False
-        patch_anims = False
-        merged_routing = {}
         for mod_info in char_mods:
             mod = mod_info['mod']
             mod_type = mod.get('type', '')
@@ -721,19 +902,17 @@ def scan_and_build_all(plugins_data_dir, game_dir=None, only_character=None):
                 allow_topo = True
             if 'animation_patch' in types:
                 patch_anims = True
-            # Merge new_mesh_routing from all mods (apply dedup renames per-mod)
             routing = mod.get('target', {}).get('new_mesh_routing', {})
             for mesh_name, entries in routing.items():
-                key = f"{mod_info['id']}_{mesh_name}" if collisions and mesh_name in collisions else mesh_name
+                key = (f"{mod_info['id']}_{mesh_name}"
+                       if collisions and mesh_name in collisions else mesh_name)
                 merged_routing[key] = entries
 
-        # Merge manifests from all mods (with collision renames applied per-mod)
         merged_manifest = _merge_manifests(char_mods, collisions=collisions or None)
 
         for mi in char_mods:
             print(f"    - {mi['id']}")
 
-        convert_error = None
         try:
             convert(
                 glb_path=merged_glb,
@@ -753,7 +932,7 @@ def scan_and_build_all(plugins_data_dir, game_dir=None, only_character=None):
             ok = False
             convert_error = str(e)
 
-        if os.path.isfile(merged_glb):
+        if merged_glb and os.path.isfile(merged_glb):
             os.unlink(merged_glb)
 
         duration_ms = (time.monotonic() - char_start) * 1000
@@ -764,6 +943,11 @@ def scan_and_build_all(plugins_data_dir, game_dir=None, only_character=None):
                 f.write(current_key)
             print(f"  {character}: done -> {output_gpk}")
             _extract_entries(character, output_gpk, force=True)
+
+            # v3.9: variant injection is intentionally disabled.  See the
+            # `_build_variant_entries` helper for the implementation; ready to
+            # re-enable once custom-named entries can be initialised by the
+            # game's scene-graph correctly (task C — deeper RE).
             _record(character, "built", char_mods, output_gpk, None, duration_ms,
                     disabled_mods=char_disabled)
         else:
@@ -820,6 +1004,29 @@ def scan_and_build_all(plugins_data_dir, game_dir=None, only_character=None):
             json.dump(status_doc, f, indent=2)
     except OSError as e:
         print(f"  WARNING: could not write {status_path}: {e}")
+
+    # v3.9: write cg3h_variants.json for outfit switching.
+    # Maps original entry names to variant entry names per mod.
+    if all_variants:
+        variants_doc = {
+            "version": CG3H_VARIANTS_SCHEMA_VERSION,
+            "characters": {},
+        }
+        for character, entries in sorted(all_variants.items()):
+            char_entries = {}
+            for entry_name, mods in sorted(entries.items()):
+                char_entries[entry_name] = {
+                    "stock": entry_name,
+                    "variants": {mod_id: vname for mod_id, vname in sorted(mods.items())},
+                }
+            variants_doc["characters"][character] = {"entries": char_entries}
+        variants_path = os.path.join(builder_dir, "cg3h_variants.json")
+        try:
+            with open(variants_path, 'w', encoding='utf-8') as f:
+                json.dump(variants_doc, f, indent=2)
+            print(f"  Variants registry: {variants_path}")
+        except OSError as e:
+            print(f"  WARNING: could not write {variants_path}: {e}")
 
     return failed == 0
 

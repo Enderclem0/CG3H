@@ -124,6 +124,109 @@ local function _draw_characters_tab(state, ctx)
                 ImGui.TextColored(1.0, 0.4, 0.4, 1.0, "Error: " .. rec.error)
             end
 
+            -- v3.9: per-entry body picker + "apply to all" cascade.
+            -- One dropdown per scene entry (Hub, Battle, …), each listing
+            -- only mods that actually ship a variant for that entry.
+            local char_variants = state.variants and state.variants[char]
+            if char_variants and next(char_variants) and ctx.on_set_variant_entry then
+                ImGui.Spacing()
+                ImGui.Text("Body:")
+                ImGui.Indent()
+
+                -- Deterministic entry ordering for a stable UI.
+                local entry_names = {}
+                for entry, _ in pairs(char_variants) do
+                    table.insert(entry_names, entry)
+                end
+                table.sort(entry_names)
+
+                -- Helper: human label for a swap-target id.  Targets are
+                -- stock entry names (v3.9 ships scene-entry swapping); strip
+                -- the `{Char}` prefix and `_Mesh` suffix so labels read
+                -- "Hub" / "Battle" instead of "HecateHub_Mesh".
+                local function _mod_label(mod_id)
+                    for _, mod in ipairs(all_mods) do
+                        if mod.id == mod_id then
+                            return mod.name ~= "" and mod.name or mod.id
+                        end
+                    end
+                    local short = mod_id:match("^" .. char .. "(.-)_Mesh$")
+                    if short and short ~= "" then return short end
+                    return mod_id
+                end
+
+                -- Per-entry dropdown.  Shows only mods with a variant for
+                -- THIS entry — modders shipping partial coverage don't
+                -- pollute dropdowns for scenes they didn't target.
+                for _, entry_name in ipairs(entry_names) do
+                    local entry_data = char_variants[entry_name]
+                    local options = { "stock" }
+                    for mod_id, _ in pairs(entry_data.variants) do
+                        table.insert(options, mod_id)
+                    end
+                    table.sort(options, function(a, b)
+                        if a == "stock" then return true end
+                        if b == "stock" then return false end
+                        return a < b
+                    end)
+
+                    local active = state.get_active_variant(char, entry_name)
+                    local preview = (active == "stock") and "Stock" or _mod_label(active)
+
+                    -- Derive a short scene label from the entry name.
+                    -- "HecateHub_Mesh" → "Hub", "HecateBattle_Mesh" → "Battle".
+                    -- Falls back to the full entry name if no pattern match.
+                    local scene = entry_name:match("^" .. char .. "(.-)_Mesh$")
+                    if not scene or scene == "" then scene = entry_name end
+                    ImGui.Text(scene .. ":")
+                    ImGui.SameLine()
+
+                    if ImGui.BeginCombo("##body_" .. char .. "_" .. entry_name, preview) then
+                        for i, opt in ipairs(options) do
+                            local selected = (opt == active)
+                            local lbl = (opt == "stock") and "Stock" or _mod_label(opt)
+                            if ImGui.Selectable(lbl .. "##body_" .. char .. "_"
+                                    .. entry_name .. "_" .. i, selected) then
+                                if opt ~= active then
+                                    _run_and_banner(function()
+                                        return ctx.on_set_variant_entry(char, entry_name, opt)
+                                    end, char)
+                                end
+                            end
+                        end
+                        ImGui.EndCombo()
+                    end
+                end
+
+                -- "Apply to all scenes" — only lists mods that cover every
+                -- entry of this character.  Cascades the pick to every
+                -- per-entry dropdown in one click.
+                local all_coverers = state.mods_covering_all_entries(char)
+                if #all_coverers > 0 and ctx.on_set_variant_all then
+                    ImGui.Spacing()
+                    ImGui.TextDisabled("Apply to all scenes:")
+                    ImGui.SameLine()
+                    if ImGui.BeginCombo("##body_all_" .. char, "pick one…") then
+                        -- Stock always available.
+                        if ImGui.Selectable("Stock##body_all_stock_" .. char, false) then
+                            _run_and_banner(function()
+                                return ctx.on_set_variant_all(char, "stock")
+                            end, char)
+                        end
+                        for i, mod_id in ipairs(all_coverers) do
+                            local lbl = _mod_label(mod_id)
+                            if ImGui.Selectable(lbl .. "##body_all_" .. char .. "_" .. i, false) then
+                                _run_and_banner(function()
+                                    return ctx.on_set_variant_all(char, mod_id)
+                                end, char)
+                            end
+                        end
+                        ImGui.EndCombo()
+                    end
+                end
+                ImGui.Unindent()
+            end
+
             ImGui.Spacing()
             ImGui.Text("Mods:")
             for _, mod in ipairs(all_mods) do
