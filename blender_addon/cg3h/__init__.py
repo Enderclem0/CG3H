@@ -31,11 +31,23 @@ from bpy.props import BoolProperty, EnumProperty, StringProperty
 from bpy_extras.io_utils import ExportHelper, ImportHelper
 
 # Pure helpers (importable from tests without bpy).
-# Force-reload from disk on every addon load so updates to cg3h_core take
-# effect without restarting Blender (Blender caches submodules in sys.modules
-# across addon disable/enable).
-from . import cg3h_core
-importlib.reload(cg3h_core)
+#
+# Submodule reload uses Blender's standard "bpy in locals" guard: on the
+# INITIAL import of this package `bpy` is not yet bound in module locals
+# (we import it on line 22 but `locals()` checked below reflects the
+# namespace as seen BEFORE this block), so we do a plain import.  On a
+# subsequent reload triggered by addon-disable-then-enable, `bpy` IS
+# already bound and we reload `cg3h_core` from disk so edits take effect
+# without a full Blender restart.
+#
+# Unconditional top-level `importlib.reload(cg3h_core)` triggered a
+# "partially initialized module" ImportError under Python 3.12+ because
+# the reload ran while this package's __init__ was still executing —
+# the import machinery's stricter parent-state check rejected it.
+if "cg3h_core" in locals():
+    importlib.reload(cg3h_core)
+else:
+    from . import cg3h_core
 
 
 # ── Default paths ─────────────────────────────────────────────────────────────
