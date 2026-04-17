@@ -13,7 +13,13 @@ bl_info = {
     "name": "CG3H — Hades II Model Tools",
     "author": "Enderclem",
     "version": (3, 4, 0),
-    "blender": (4, 0, 0),
+    # Minimum Blender version.  4.2 is the current LTS and our floor for
+    # testing / API targets.  Older versions may work but are unsupported.
+    # Blender 4.3+ ships Python 3.12 where the stricter parent-package
+    # import check made an earlier top-level importlib.reload crash with
+    # "partially initialized module" — fixed in this file, but flagging
+    # 4.2 as the verified baseline.
+    "blender": (4, 2, 0),
     "location": "File > Import/Export",
     "description": "Import and export Hades II 3D models (.gpk)",
     "category": "Import-Export",
