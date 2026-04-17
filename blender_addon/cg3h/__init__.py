@@ -720,7 +720,14 @@ class CG3H_OT_Export(bpy.types.Operator):
         all_entries = entries_str.split(",") if entries_str else [f"{character}_Mesh"]
         all_entries = [e for e in all_entries if e]  # filter empties
 
-        original_meshes = set(context.scene.get("cg3h_original_meshes", "").split(","))
+        # Guard: `"".split(",")` returns `['']` (a 1-elem list with an
+        # empty string) — NOT `[]`.  Without the filter, the empty-string
+        # value poisons the `obj.name in original_meshes` check below for
+        # any mesh whose name happens to be the empty string (none, in
+        # practice), and more importantly hides the intent.
+        original_meshes = set(
+            n for n in context.scene.get("cg3h_original_meshes", "").split(",") if n
+        )
 
         # Auto-detect mod type from the selected meshes.  A mesh whose
         # name matches a stock mesh (was in the imported GR2) is a

@@ -22,9 +22,6 @@ import pygltflib
 # backwards-incompatible ways so the Lua reader can degrade gracefully.
 CG3H_STATUS_SCHEMA_VERSION = 1
 
-# v3.9: schema version for cg3h_variants.json
-CG3H_VARIANTS_SCHEMA_VERSION = 2
-
 
 def _sanitize_mod_id(mod_id):
     """Produce a Granny-safe identifier from a Thunderstore mod id.
@@ -48,9 +45,9 @@ def _variant_entry_name(character, mod_id, scene_index):
     lookup fails).
 
     ``scene_index`` is 0, 1, 2... — one per stock entry the mod targets.
-    The (stock_entry, mod_id, variant_name) mapping is recorded in
-    ``cg3h_variants.json`` so the runtime can look it up without parsing
-    the name.
+    The (stock_entry, mod_id, variant_name) mapping is recorded under
+    ``characters[*].variants`` in cg3h_status.json so the runtime can
+    look it up without parsing the name.
     """
     return f"{character}_{_sanitize_mod_id(mod_id)}_V{scene_index}_Mesh"
 
@@ -58,6 +55,29 @@ def _variant_entry_name(character, mod_id, scene_index):
 # enabled flag etc.).  Separate file from cg3h_status.json because one is
 # builder output and one is user input.
 CG3H_MOD_STATE_SCHEMA_VERSION = 1
+
+
+def _classify_mod(mod):
+    """Single source of truth for v3.9 mod classification.
+
+    Returns (is_variant, is_accessory).  Both can be False (e.g. a pure
+    mesh_patch mod).  Both can NOT be True — mesh_add is the dominant
+    signal (any mesh_add presence forces additive).
+
+    Rule:
+      - PURE mesh_replace (mesh_replace in type, mesh_add NOT in type)
+        and non-empty target.mesh_entries → picker variant.
+      - Anything with mesh_add in type (including mixed with
+        mesh_replace) → additive accessory.
+    """
+    mod_type = mod.get('type', '')
+    types = mod_type if isinstance(mod_type, list) \
+        else [mod_type] if mod_type else []
+    has_entries = bool(mod.get('target', {}).get('mesh_entries', []))
+    is_pure_replacer = 'mesh_replace' in types and 'mesh_add' not in types
+    is_variant = is_pure_replacer and has_entries
+    is_accessory = 'mesh_add' in types
+    return is_variant, is_accessory
 
 
 def _load_mod_state(builder_dir):
@@ -477,8 +497,9 @@ def _build_variant_entries(character, variant_mods, accessory_mods,
     and the overwritten target entries are pulled out, renamed to
     ``{sanitized_mod_id}_V{N}_Mesh``, and injected into ``output_gpk``.
 
-    Returns a dict mapping stock entry names to per-mod variant names, for
-    ``cg3h_variants.json``::
+    Returns a dict mapping stock entry names to per-mod variant names,
+    which the caller splices into cg3h_status.json under
+    ``characters[char].variants``::
 
         {
           "HecateHub_Mesh": {"Enderclem-HecateBiMod": "Enderclem_HecateBiMod_V0_Mesh"},
@@ -771,7 +792,6 @@ def scan_and_build_all(plugins_data_dir, game_dir=None, only_character=None):
     built = 0
     cached = 0
     failed = 0
-    all_variants = {}  # v3.9: { character: { entry: { mod_id: variant_name } } }
 
     # v3.7: per-character status for cg3h_status.json (consumed by the
     # in-game mod manager UI).  Populated as we iterate so every branch
@@ -885,12 +905,12 @@ def scan_and_build_all(plugins_data_dir, game_dir=None, only_character=None):
                         (time.monotonic() - char_start) * 1000,
                         disabled_mods=char_disabled)
                 # v3.9: re-populate variants map on cache hit so status.json
-                # stays accurate without re-running convert().  The mapping
-                # is deterministic from mod ids + mesh_entries order.
+                # stays accurate without re-running convert().  Uses the
+                # same classifier as the build path (_classify_mod) so
+                # mixed mesh_add+mesh_replace mods aren't accidentally
+                # treated as variants here.
                 cached_vmap = _variants_map_for(character, [
-                    mi for mi in char_mods
-                    if 'mesh_replace' in (mi['mod'].get('type') or [])
-                    and mi['mod'].get('target', {}).get('mesh_entries')
+                    mi for mi in char_mods if _classify_mod(mi['mod'])[0]
                 ])
                 if cached_vmap:
                     status_characters[character]["variants"] = cached_vmap
@@ -914,35 +934,18 @@ def scan_and_build_all(plugins_data_dir, game_dir=None, only_character=None):
                     disabled_mods=char_disabled)
             continue
 
-        # v3.9: classify mods for the outfit picker.
-        #
-        #   PURE mesh_replace → picker variant (alternative body for the
-        #       targeted entries).  User switches between stock and each
-        #       installed replacer from the ImGui dropdown.
-        #
-        #   anything with mesh_add (including mesh_add + mesh_replace) →
-        #       additive accessory.  Always-on, merged into the default
-        #       stock entry, never appears in the picker.  The "mesh_add
-        #       means always-on" rule holds even for mods that also list
-        #       mesh_replace — v4.x can revisit with GLB-level splitting
-        #       (emit the mesh_replace half as a picker variant while
-        #       keeping the mesh_add half additive) but that's not built.
-        #
-        # Regardless of classification, EVERY mesh-bearing mod merges into
-        # the default stock entry — that's what keeps the drawable
-        # pre-sized for the MAX footprint, so runtime swap to a slim
-        # variant always fits.
+        # v3.9: classify mods for the outfit picker via the shared
+        # _classify_mod helper (same rule used on cache-hit below).
+        # EVERY mesh-bearing mod merges into the default stock entry —
+        # that's what keeps the drawable pre-sized for the MAX footprint,
+        # so runtime swap to a slim variant always fits.
         variant_mods = []
         accessory_mods = []
         for mi in char_mods:
-            mod = mi['mod']
-            mod_type = mod.get('type', '')
-            types = mod_type if isinstance(mod_type, list) else [mod_type] if mod_type else []
-            has_entries = bool(mod.get('target', {}).get('mesh_entries', []))
-            is_pure_replacer = 'mesh_replace' in types and 'mesh_add' not in types
-            if is_pure_replacer and has_entries:
+            is_variant, is_accessory = _classify_mod(mi['mod'])
+            if is_variant:
                 variant_mods.append(mi)
-            elif 'mesh_add' in types:
+            elif is_accessory:
                 accessory_mods.append(mi)
 
         print(f"  {character}: building from {len(char_mods)} mod(s)")
@@ -1102,28 +1105,11 @@ def scan_and_build_all(plugins_data_dir, game_dir=None, only_character=None):
     except OSError as e:
         print(f"  WARNING: could not write {status_path}: {e}")
 
-    # v3.9: write cg3h_variants.json for outfit switching.
-    # Maps original entry names to variant entry names per mod.
-    if all_variants:
-        variants_doc = {
-            "version": CG3H_VARIANTS_SCHEMA_VERSION,
-            "characters": {},
-        }
-        for character, entries in sorted(all_variants.items()):
-            char_entries = {}
-            for entry_name, mods in sorted(entries.items()):
-                char_entries[entry_name] = {
-                    "stock": entry_name,
-                    "variants": {mod_id: vname for mod_id, vname in sorted(mods.items())},
-                }
-            variants_doc["characters"][character] = {"entries": char_entries}
-        variants_path = os.path.join(builder_dir, "cg3h_variants.json")
-        try:
-            with open(variants_path, 'w', encoding='utf-8') as f:
-                json.dump(variants_doc, f, indent=2)
-            print(f"  Variants registry: {variants_path}")
-        except OSError as e:
-            print(f"  WARNING: could not write {variants_path}: {e}")
+    # Note: v3.9 variant data is emitted inline as `variants` on each
+    # character entry in cg3h_status.json — the runtime reads it from
+    # there.  An earlier draft also wrote a separate cg3h_variants.json
+    # fed by `all_variants`; that dict was never populated, the file
+    # never appeared, and no code reads it.  Removed.
 
     return failed == 0
 

@@ -213,26 +213,6 @@ def main():
             for ins in cs.disasm(bytes(data), va):
                 print(f"  0x{ins.address:x}: {ins.mnemonic:8s} {ins.op_str}")
 
-    sess, scope = open_pdb()
-    for name in names:
-        result, tag = lookup_any(sess, scope, name)
-        if not result:
-            print(f"{name}: NOT FOUND")
-            continue
-        rva, length = result
-        va = 0x140000000 + rva
-        tagname = {SymTagFunction: 'func', SymTagPublicSymbol: 'pub', SymTagData: 'data'}.get(tag, '?')
-        print(f"{name}: RVA=0x{rva:x} VA=0x{va:x} len=0x{length:x} ({tagname})")
-        if want_disasm and length > 0:
-            import pefile, capstone
-            pe = pefile.PE(EXE_PATH, fast_load=True)
-            pe.parse_data_directories()
-            data = pe.get_memory_mapped_image()[rva:rva+min(length, size)]
-            cs = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
-            cs.detail = True
-            for ins in cs.disasm(bytes(data), va):
-                print(f"  0x{ins.address:x}: {ins.mnemonic:8s} {ins.op_str}")
-
 
 if __name__ == '__main__':
     main()
