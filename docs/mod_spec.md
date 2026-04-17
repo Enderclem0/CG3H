@@ -237,7 +237,7 @@ When multiple mods target the same character, CG3H detects conflicts per-operati
 | texture_replace (same texture) | texture_replace (same texture) | Yes | Priority order; higher wins |
 | mesh_add (custom texture, same name) | mesh_add (custom texture, same name) | No | Both auto-prefixed with mod id at build time (v3.6) |
 | mesh_add | mesh_add | No | Both appended (same names auto-prefixed with mod id) |
-| mesh_replace | mesh_replace (same meshes) | Yes | Mutually exclusive |
+| mesh_replace | mesh_replace (same meshes) | No (v3.9+) | Both become switchable variants in the outfit picker; merged stock entry holds the union of both |
 | mesh_replace | mesh_add | Maybe | May need manual adjustment |
 | mesh_patch | texture_replace | No | Independent operations |
 | mesh_patch | mesh_replace | Yes | Replace overrides patch |
@@ -270,6 +270,42 @@ Build-time conflict pre-flight is exposed via `tools/mod_info.py:check_conflicts
 and used by the GUI Mods tab.
 
 See [`architecture.md`](architecture.md) for the full merge flow and conflict check details.
+
+### Outfit Switching (v3.9+)
+
+When two or more `mesh_replace` mods target the same character, CG3H
+emits **both** as switchable variants — the player picks which outfit
+they want per scene from the in-game Mod Manager. No more "which mod
+wins"; every installed mod stays accessible.
+
+The picker dropdown per scene entry shows:
+
+- **Stock** — the unmodified game content for that entry (auto-applied
+  on first frame so the game opens on vanilla by default, not a merged
+  view).
+- **<Mod name>** — that one mod's contribution only.
+- **Apply to all scenes** — cascade one choice across every scene the
+  character appears in.
+
+**Builder-side:** for each `mesh_replace` mod declaring
+`target.mesh_entries`, the builder emits a slim variant entry named
+`{Character}_{SanitizedModId}_V{N}_Mesh`, plus one
+`{Character}_Stock_V{N}_Mesh` per targeted entry (raw bytes from the
+game's stock GPK). The default-name stock entry (`HecateHub_Mesh` etc.)
+stays populated with the **union of all mods** so the drawable is
+pre-sized for the maximum footprint at scene-load. Runtime remaps swap
+to a strictly-smaller variant on demand.
+
+**H2M dependency:** v3.9 ships alongside paired pool-size patches in
+Hell2Modding (vertex pool 64 → 128 MB, index pool 32 → 64 MB). Both
+pools live in the DX12 upload heap (system RAM, not VRAM), so the
+extra capacity is cheap. Without the patches, variant entries
+overflow the default budgets and weapons/enemies render as
+placeholder. See `docs/rendering_pipeline.md` Part 3b.
+
+**Persistence:** active picks are saved to `cg3h_mod_state.json`
+under `active_variants` and restored on the first ImGui frame of the
+next session.
 
 ---
 

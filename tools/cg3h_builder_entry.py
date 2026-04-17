@@ -648,7 +648,13 @@ def scan_and_build_all(plugins_data_dir, game_dir=None, only_character=None):
     if getattr(sys, 'frozen', False):
         builder_dir = os.path.dirname(sys.executable)
     else:
-        builder_dir = os.path.join(plugins_data_dir, 'CG3HBuilder')
+        # Dev-only path (direct `python cg3h_builder_entry.py`).  Use a
+        # distinct `_devbuild` subdir so we never write GPKs into a
+        # folder name H2M's startup scan picks up — the real deployed
+        # exe writes to `Enderclem-CG3HBuilder/` and having a second
+        # `CG3HBuilder/` dir nearby causes duplicate add_granny_file
+        # registrations and "Could not open Granny Packfile" errors.
+        builder_dir = os.path.join(plugins_data_dir, '_cg3h_devbuild')
     os.makedirs(builder_dir, exist_ok=True)
 
     # v3.8: read per-mod enable/disable state.  Disabled mods are filtered
