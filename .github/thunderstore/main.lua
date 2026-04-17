@@ -93,6 +93,10 @@ runtime.apply(mod_state, runtime_ctx)
 mod_state.load_status(builder_data_dir)
 runtime_ctx.game_dir = mod_state.game_dir
 
+-- v3.9: populate mod_state.variants from the builder's status output.
+-- Must run AFTER load_status so build_status[char].variants is available.
+runtime.register_variants(mod_state, runtime_ctx)
+
 -- NOTE: apply_visibility is NOT called at startup because HashGuid::Lookup
 -- returns 0 before the first scene loads.  The builder respects mod_state
 -- at build time, so disabled mods are already excluded from the GPK.
@@ -150,11 +154,18 @@ ui.init(mod_state, {
     on_rebuild = function(character)
         return runtime.trigger_rebuild_and_reload(character, runtime_ctx, mod_state)
     end,
+    -- v3.9 Step 4.5: apply default/persisted variant selections on the
+    -- first ImGui frame.  Can't run at plugin-init time because model
+    -- entries aren't in mModelData yet; add_imgui fires AFTER the model
+    -- load, so first-frame is the earliest safe moment.
+    on_first_frame = function()
+        runtime.apply_active_variants(mod_state)
+    end,
 })
 
--- v3.9 picker = swap between stock entries the game already loaded.
--- runtime.register_variants populated state.variants from the union of
--- char_mesh_entries; the existing per-entry dropdown UI in ui.lua picks
--- it up automatically.  swap_entry handles populate-then-remap on click.
+-- v3.9: per-mod outfit picker.  Each mesh_replace mod with declared
+-- target.mesh_entries gets a slim variant entry in the merged GPK; plus
+-- a per-entry "Stock" variant with true-stock bytes.  The picker swaps
+-- between them; default at startup is "Stock" (applied in first frame).
 
 rom.log.info(LOG_PREFIX .. " CG3H Builder ready (" .. mod_state.count() .. " mod(s) loaded)")

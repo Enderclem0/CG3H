@@ -149,34 +149,35 @@ end
 
 -- ── v3.9: variant registration ─────────────────────────────────────────
 
---- Build state.variants from each character's stock-mesh-entry union.
+--- Build state.variants from the builder's per-character variants map
+-- (cg3h_status.json → M.build_status[char].variants).
 --
--- v3.9 ships scene-entry swapping (NOT custom mod-named variants —
--- those hang on the second frame, see task #26 RE).  All mods merge
--- into stock entries the way they did in v3.8, and the picker lets
--- the user choose WHICH stock entry to render in any scene.  Picking
--- "Battle" while in Hub installs a remap HecateHub_Mesh -> HecateBattle_Mesh,
--- so Hecate looks like her battle outfit even in the hub.  Both sides
--- of every swap are real game-loaded entries, so initialisation /
--- skeleton linkage / DrawableExt sizing all work natively.
+-- v3.9 Option A': each mesh_replace mod that declares target.mesh_entries
+-- gets its own slim variant entry emitted by the builder.  The merged
+-- stock entry stays sized for MAX-of-all-mods so the drawable allocated
+-- at scene-load can always accommodate a swap to any variant (which is
+-- strictly <= stock in size).
 --
--- The "variants" of a given entry are simply every OTHER entry the
--- mods touch on that character.  Stored as { [target_entry] = target_entry }
--- so the existing UI's `_mod_label` lookup (which falls through to the
--- raw key if not a known mod id) renders the entry name as the choice.
+-- Shape:
+--   state.variants[char][stock_entry] = {
+--     stock    = stock_entry,
+--     variants = { [mod_id] = variant_entry_name },
+--   }
+--
+-- Picking `mod_id` in the UI installs a hash remap
+-- stock_entry -> variant_entry_name so DoDraw3D reads the variant's
+-- GrannyMeshData (slim single-mod content) instead of stock's merged-all.
 function M.register_variants(state, ctx)
     state.variants = {}
-    for char, entries in pairs(state.char_mesh_entries or {}) do
-        if #entries > 1 then
+    for char, rec in pairs(state.build_status or {}) do
+        local vmap = rec and rec.variants
+        if vmap and next(vmap) then
             state.variants[char] = {}
-            for _, entry in ipairs(entries) do
-                local opts = {}
-                for _, other in ipairs(entries) do
-                    if other ~= entry then
-                        opts[other] = other
-                    end
-                end
-                state.variants[char][entry] = { stock = entry, variants = opts }
+            for stock_entry, mods_for_entry in pairs(vmap) do
+                state.variants[char][stock_entry] = {
+                    stock    = stock_entry,
+                    variants = mods_for_entry,
+                }
             end
         end
     end
@@ -200,10 +201,9 @@ function M.swap_entry(character, entry_name, target_id, state)
     local entry_data = char_variants[entry_name]
     if not entry_data then return nil end
 
-    if target_id == nil or target_id == "stock" or target_id == ""
-       or target_id == entry_name then
+    if target_id == nil or target_id == "" or target_id == entry_name then
         rom.data.restore_stock(entry_name)
-        rom.log.info(LOG_PREFIX .. " [variant] " .. entry_name .. " -> stock")
+        rom.log.info(LOG_PREFIX .. " [variant] " .. entry_name .. " -> merged-stock")
         return "live"
     end
 
@@ -238,34 +238,46 @@ function M.swap_character_all(character, mod_id, state)
     return "live"
 end
 
---- On startup, re-apply any persisted per-entry body selections.  Must be
--- called after register_variants (so state.variants is populated) and
--- after LoadAllModelAndAnimationData (so entries exist in mModelData).
+--- On startup, apply the default view for every variant-bearing entry.
+-- User-persisted picks take precedence; otherwise defaults to "stock"
+-- (the re-serialized true-stock entry) so the game opens with the
+-- unmodified character by default instead of merged-all.
+-- Must be called after register_variants AND after LoadAllModelAndAnimationData.
+-- The UI calls this on its first ImGui frame — by then the scene has loaded.
 function M.apply_active_variants(state)
     if type(rom.data.swap_to_variant) ~= "function" then return end
     local applied = 0
-    for char, per_entry in pairs(state.active_variants or {}) do
-        for entry_name, mod_id in pairs(per_entry) do
-            if mod_id and mod_id ~= "stock" and mod_id ~= "" then
-                local outcome = M.swap_entry(char, entry_name, mod_id, state)
+    for char, entries in pairs(state.variants or {}) do
+        local user_picks = (state.active_variants or {})[char] or {}
+        for entry_name, entry_data in pairs(entries) do
+            local pick = user_picks[entry_name]
+            if not pick or pick == "" then
+                if entry_data.variants and entry_data.variants["stock"] then
+                    pick = "stock"
+                end
+            end
+            if pick and pick ~= "" then
+                local outcome = M.swap_entry(char, entry_name, pick, state)
                 if outcome == "live" then applied = applied + 1 end
             end
         end
     end
     if applied > 0 then
-        rom.log.info(LOG_PREFIX .. " [variant] restored " .. applied
-            .. " per-entry selection(s)")
+        rom.log.info(LOG_PREFIX .. " [variant] applied " .. applied
+            .. " default/persisted selection(s)")
     end
 end
 
 --- Convenience: run the full runtime pipeline in one call.
+-- register_variants is intentionally NOT called here — it depends on
+-- state.build_status which is populated by mod_state.load_status AFTER
+-- the builder writes cg3h_status.json.  main.lua calls it explicitly.
 function M.apply(state, ctx)
     for _, mod in ipairs(state.mods) do
         M.load_textures(mod)
     end
     M.run_builder(state, ctx.builder_path, ctx.plugins_data_dir)
     M.register_gpks(state, ctx.builder_data_dir)
-    M.register_variants(state, ctx)
 end
 
 -- ── v3.8: draw-call visibility gate ────────────────────────────────────

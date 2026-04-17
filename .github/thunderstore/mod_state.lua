@@ -192,11 +192,28 @@ function M.load_status(builder_dir)
         local gpk_path = body:match('"gpk_path"%s*:%s*"([^"]*)"')
         local err = body:match('"error"%s*:%s*"([^"]*)"')
         local duration = tonumber(body:match('"duration_ms"%s*:%s*(%d+)'))
+
+        -- v3.9: per-character "variants" block shape =
+        --   { [stock_entry] = { [mod_id] = variant_entry_name } }
+        -- Emitted by the builder when mesh_replace mods declare
+        -- target.mesh_entries.
+        local variants = {}
+        local v_block = body:match('"variants"%s*:%s*(%b{})')
+        if v_block then
+            for entry, entry_body in v_block:gmatch('"([^"]+)"%s*:%s*(%b{})') do
+                variants[entry] = {}
+                for mod_id, vname in entry_body:gmatch('"([^"]+)"%s*:%s*"([^"]*)"') do
+                    variants[entry][mod_id] = vname
+                end
+            end
+        end
+
         M.build_status[char] = {
             state = state,
             gpk_path = gpk_path,
             error = err,
             duration_ms = duration,
+            variants = variants,
         }
     end
 end

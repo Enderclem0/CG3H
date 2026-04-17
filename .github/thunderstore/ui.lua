@@ -160,7 +160,7 @@ local function _draw_characters_tab(state, ctx)
                 -- pollute dropdowns for scenes they didn't target.
                 for _, entry_name in ipairs(entry_names) do
                     local entry_data = char_variants[entry_name]
-                    local options = { "stock" }
+                    local options = {}
                     for mod_id, _ in pairs(entry_data.variants) do
                         table.insert(options, mod_id)
                     end
@@ -171,6 +171,7 @@ local function _draw_characters_tab(state, ctx)
                     end)
 
                     local active = state.get_active_variant(char, entry_name)
+                    if not active or active == "" then active = "stock" end
                     local preview = (active == "stock") and "Stock" or _mod_label(active)
 
                     -- Derive a short scene label from the entry name.
@@ -207,14 +208,9 @@ local function _draw_characters_tab(state, ctx)
                     ImGui.TextDisabled("Apply to all scenes:")
                     ImGui.SameLine()
                     if ImGui.BeginCombo("##body_all_" .. char, "pick one…") then
-                        -- Stock always available.
-                        if ImGui.Selectable("Stock##body_all_stock_" .. char, false) then
-                            _run_and_banner(function()
-                                return ctx.on_set_variant_all(char, "stock")
-                            end, char)
-                        end
                         for i, mod_id in ipairs(all_coverers) do
-                            local lbl = _mod_label(mod_id)
+                            local lbl = (mod_id == "stock") and "Stock"
+                                        or _mod_label(mod_id)
                             if ImGui.Selectable(lbl .. "##body_all_" .. char .. "_" .. i, false) then
                                 _run_and_banner(function()
                                     return ctx.on_set_variant_all(char, mod_id)
@@ -363,6 +359,14 @@ local function _draw_window(state, ctx)
         end
         ImGui.SameLine()
         ImGui.TextDisabled(string.format("(%d mods)", #state.mods))
+        ImGui.SameLine()
+        if ImGui.Button("Pool stats") then
+            if rom.data.dump_pool_stats then
+                local n = rom.data.dump_pool_stats()
+                banner = { kind = "live",
+                           text = "Dumped " .. n .. " pool(s) to log" }
+            end
+        end
 
         ImGui.Separator()
         _draw_banner()
@@ -400,7 +404,17 @@ function M.init(state, ctx)
         end
     end)
 
+    -- One-shot: on the first ImGui frame, apply the default/persisted
+    -- variant selections.  Deferred to first frame because model entries
+    -- only exist in mModelData after LoadAllModelAndAnimationData — which
+    -- runs BEFORE any ImGui callback fires but AFTER plugin init.  See
+    -- project_loading_timeline.md.
+    local did_init_variants = false
     rom.gui.add_imgui(function()
+        if not did_init_variants then
+            did_init_variants = true
+            if ctx.on_first_frame then ctx.on_first_frame() end
+        end
         if window_open then
             _draw_window(state, ctx)
         end

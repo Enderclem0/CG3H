@@ -593,6 +593,30 @@ def _build_variant_entries(character, variant_mods, accessory_mods,
         except OSError:
             pass
 
+    # Emit a TRUE-STOCK variant per scene entry that at least one
+    # variant_mod targets.  RAW byte-copy from the stock GPK: the merged
+    # GPK preserves byte-identical stock entries for untouched entries
+    # (e.g. HecateHubDream_Mesh), so raw stock bytes are compatible.
+    # The earlier failure was naming ("Stock_HecateHub_Mesh" missed the
+    # character prefix the engine uses for skeleton linkage); using the
+    # `{Character}_Stock_V{N}_Mesh` convention fixes that.
+    stock_entries_touched = set()
+    for mod_info in variant_mods:
+        for e in mod_info['mod'].get('target', {}).get('mesh_entries', []):
+            stock_entries_touched.add(e)
+    if stock_entries_touched:
+        stock_gpk_entries = extract_gpk(original_gpk)
+        sorted_touched = sorted(stock_entries_touched)
+        for idx, stock_entry in enumerate(sorted_touched):
+            if stock_entry not in stock_gpk_entries:
+                print(f"    stock: '{stock_entry}' not in stock GPK — skipping")
+                continue
+            stock_vname = _variant_entry_name(character, "Stock", idx)
+            main_entries[stock_vname] = stock_gpk_entries[stock_entry]
+            variants.setdefault(stock_entry, {})["stock"] = stock_vname
+            print(f"    stock: {stock_entry} -> {stock_vname} "
+                  f"({len(stock_gpk_entries[stock_entry]):,} bytes, raw-copy)")
+
     # Repack the main GPK with the injected variant entries.
     if variants:
         pack_gpk(main_entries, output_gpk)
@@ -781,6 +805,25 @@ def scan_and_build_all(plugins_data_dir, game_dir=None, only_character=None):
     if not by_character:
         print("No CG3H mesh mods found")
 
+    def _variants_map_for(character, variant_mods):
+        """Deterministic {stock_entry -> {mod_id -> variant_name}} for a
+        character's variant_mods list.  Used on cache-hit to re-populate
+        status.json without re-running convert().  Mirrors the shape that
+        `_build_variant_entries` produces, including the "stock" key for
+        each touched entry."""
+        vmap = {}
+        touched = set()
+        for mi in variant_mods:
+            mod = mi['mod']
+            mesh_entries = mod.get('target', {}).get('mesh_entries', [])
+            for idx, entry_name in enumerate(mesh_entries):
+                vname = _variant_entry_name(character, mi['id'], idx)
+                vmap.setdefault(entry_name, {})[mi['id']] = vname
+                touched.add(entry_name)
+        for idx, entry_name in enumerate(sorted(touched)):
+            vmap.setdefault(entry_name, {})["stock"] = _variant_entry_name(character, "Stock", idx)
+        return vmap
+
     def _record(char, state, char_mods, gpk_path, error, duration_ms,
                 disabled_mods=None):
         # mod_details lists ALL mods on this character (enabled + disabled)
@@ -835,6 +878,16 @@ def scan_and_build_all(plugins_data_dir, game_dir=None, only_character=None):
                 _record(character, "cached", char_mods, output_gpk, None,
                         (time.monotonic() - char_start) * 1000,
                         disabled_mods=char_disabled)
+                # v3.9: re-populate variants map on cache hit so status.json
+                # stays accurate without re-running convert().  The mapping
+                # is deterministic from mod ids + mesh_entries order.
+                cached_vmap = _variants_map_for(character, [
+                    mi for mi in char_mods
+                    if 'mesh_replace' in (mi['mod'].get('type') or [])
+                    and mi['mod'].get('target', {}).get('mesh_entries')
+                ])
+                if cached_vmap:
+                    status_characters[character]["variants"] = cached_vmap
                 continue
             else:
                 print(f"  {character}: mods changed, rebuilding...")
@@ -855,15 +908,23 @@ def scan_and_build_all(plugins_data_dir, game_dir=None, only_character=None):
                     disabled_mods=char_disabled)
             continue
 
-        # v3.9 reverted: ALL mesh-bearing mods (mesh_add + mesh_replace +
-        # mesh_patch + animation_patch) merge into the stock entries — same
-        # as pre-v3.9.  The outfit-picker dropdown is shelved until the
-        # custom-entry initialization RE (task C) lands; until then,
-        # multiple mesh_replace mods on the same character resolve via
-        # last-wins merge order (controlled by `cg3h_mod_priority.json`).
-        # variant_mods stays here as an empty list so the downstream
-        # variant-injection block becomes a no-op.
+        # v3.9 Option A': EVERY mesh-bearing mod merges into stock (keeps the
+        # stock entry sized for MAX of all mods — required because the
+        # drawable is pre-sized at scene-load).  Mesh_replace mods with
+        # declared target.mesh_entries ALSO get emitted as slim standalone
+        # variant entries, so the outfit picker can swap to "just this mod"
+        # at runtime.  Safe because variants are strictly <= stock in size.
         variant_mods = []
+        accessory_mods = []
+        for mi in char_mods:
+            mod = mi['mod']
+            mod_type = mod.get('type', '')
+            types = mod_type if isinstance(mod_type, list) else [mod_type] if mod_type else []
+            has_entries = bool(mod.get('target', {}).get('mesh_entries', []))
+            if 'mesh_replace' in types and has_entries:
+                variant_mods.append(mi)
+            elif 'mesh_add' in types and not has_entries:
+                accessory_mods.append(mi)
 
         print(f"  {character}: building from {len(char_mods)} mod(s)")
 
@@ -942,14 +1003,31 @@ def scan_and_build_all(plugins_data_dir, game_dir=None, only_character=None):
             with open(cache_key_path, 'w') as f:
                 f.write(current_key)
             print(f"  {character}: done -> {output_gpk}")
+
+            # v3.9: inject per-mod variant entries into the merged GPK.
+            # Each variant contains only that mod's contribution — strictly
+            # <= stock entry in size, so the drawable allocated at scene-load
+            # (sized for the merged stock) always has room.
+            variants_map = {}
+            if variant_mods:
+                try:
+                    variants_map = _build_variant_entries(
+                        character, variant_mods, accessory_mods,
+                        output_gpk, original_gpk, sdb_path, dll_path,
+                        builder_dir,
+                    )
+                except Exception as e:
+                    print(f"  {character}: WARNING — variant emit failed: {e}")
+                    traceback.print_exc()
+
+            # Extract per-entry .gr2.lz4 AFTER variants are injected so they
+            # show up in the per-entry file set too.
             _extract_entries(character, output_gpk, force=True)
 
-            # v3.9: variant injection is intentionally disabled.  See the
-            # `_build_variant_entries` helper for the implementation; ready to
-            # re-enable once custom-named entries can be initialised by the
-            # game's scene-graph correctly (task C — deeper RE).
             _record(character, "built", char_mods, output_gpk, None, duration_ms,
                     disabled_mods=char_disabled)
+            if variants_map:
+                status_characters[character]["variants"] = variants_map
         else:
             failed += 1
             _record(character, "failed", char_mods, None,

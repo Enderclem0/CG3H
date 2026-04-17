@@ -901,6 +901,41 @@ def build_gr2_bytes(dll, fi: int, gr2_raw: bytes, sdb_dict: dict[str, int],
     return result
 
 
+def reserialize_stock_entry(dll, gr2_bytes: bytes, sdb_bytes: bytes) -> bytes:
+    """Re-serialize a stock GR2 entry through Granny with inline strings.
+
+    Stock GR2 bytes reference an external SDB for string data.  When
+    injected into a merged GPK (which has a different SDB), the engine's
+    GrannyRemapFileStrings reads garbage strings and corrupts model
+    loading.  This function loads the stock bytes with the STOCK SDB,
+    then writes them back using the golden path (param3=0 = inline
+    strings), producing a standalone GR2 that needs no SDB at all.
+
+    CRITICAL: the builder writes the output header with the "auto-
+    conversion" type tag (0x00000000) at offset +0x44.  Stock bytes have
+    0x80000039 (no conversion).  When the game loads our output, it tries
+    to run auto-conversion on already-converted stock content, which
+    corrupts mesh data (renders as blank/purple placeholder and cascades
+    into subsequent LoadAll entries — breaks weapons).  We patch the tag
+    back to match stock so the game treats it as final-layout content.
+    """
+    sdb_file, str_db, sdb_dict, sdb_crc, sdb_buf = load_sdb(dll, sdb_bytes)
+    gr2_file, fi, gr2_buf = load_gr2_entry(dll, gr2_bytes, str_db)
+    try:
+        out = build_gr2_bytes(dll, fi, gr2_bytes, sdb_dict, sdb_crc)
+    finally:
+        dll.GrannyFreeFile(gr2_file)
+        dll.GrannyFreeFile(sdb_file)
+
+    # Patch the runtime type tag at +0x44 to match the original stock
+    # header, preventing the game's auto-conversion path from mangling
+    # already-converted stock content on load.
+    src_tag = struct.unpack_from('<I', gr2_bytes, 0x44)[0]
+    out_mut = bytearray(out)
+    struct.pack_into('<I', out_mut, 0x44, src_tag)
+    return bytes(out_mut)
+
+
 # ── Mesh matching and patching ────────────────────────────────────────────────
 
 # Known character-variant words that appear in GR2 mesh names but not in the
