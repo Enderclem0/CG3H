@@ -223,6 +223,40 @@ local function _draw_characters_tab(state, ctx)
                 ImGui.Unindent()
             end
 
+            -- Accessories: mesh_add mods.  Each checkbox toggles that
+            -- accessory on/off.  Toggle rebuilds the merged GPK (the
+            -- draw-gate only hides whole mesh entries, not individual
+            -- meshes within one — mesh-level visibility is a v4.x goal).
+            local accessory_mods = {}
+            for _, m in ipairs(all_mods) do
+                if m.has_mesh_add then
+                    table.insert(accessory_mods, m)
+                end
+            end
+            if #accessory_mods > 0 then
+                ImGui.Spacing()
+                ImGui.Text("Accessories:")
+                ImGui.Indent()
+                for _, mod in ipairs(accessory_mods) do
+                    local enabled = state.is_enabled(mod.id)
+                    local new_val, clicked = ImGui.Checkbox("##acc_" .. mod.id, enabled)
+                    if clicked and new_val ~= enabled then
+                        _run_and_banner(function()
+                            return ctx.on_toggle_mod and ctx.on_toggle_mod(mod.id, new_val)
+                        end, char)
+                    end
+                    ImGui.SameLine()
+                    local lbl = mod.name ~= "" and mod.name or mod.id
+                    if enabled then
+                        ImGui.Text(lbl)
+                    else
+                        local d = _decor("disabled")
+                        ImGui.TextColored(d.r, d.g, d.b, 1.0, lbl .. " [off]")
+                    end
+                end
+                ImGui.Unindent()
+            end
+
             ImGui.Spacing()
             ImGui.Text("Mods:")
             for _, mod in ipairs(all_mods) do

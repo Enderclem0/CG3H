@@ -311,6 +311,15 @@ function M.toggle_mod_visibility(mod_id, enabled, state)
         return nil
     end
 
+    -- mesh_add mods merge their meshes INTO the stock entry alongside the
+    -- body, so entry-level draw-gate would hide the body too.  Force
+    -- rebuild path for these — mesh-level visibility isn't built yet.
+    if target_mod.has_mesh_add then
+        rom.log.info(LOG_PREFIX .. " [draw-gate] skipping for mesh_add mod '"
+            .. mod_id .. "' — rebuild required")
+        return nil
+    end
+
     local character = target_mod.character
 
     if enabled then

@@ -12,7 +12,7 @@
 
 local M = {}
 
-M.mods = {}            -- array of { id, name, version, author, character, path, has_textures, has_glb, glb_name, mesh_entries }
+M.mods = {}            -- array of { id, name, version, author, character, path, has_textures, has_glb, glb_name, mesh_entries, has_mesh_add, has_mesh_replace }
 M.by_character = {}    -- { [character] = { mod, ... } }
 M.build_status = {}    -- { [character] = { state, gpk_path, error, duration_ms, mod_details } }
 M.mod_state = {}       -- { [mod_id] = { enabled = bool } }   — user-writable
@@ -108,17 +108,25 @@ function M.scan(plugins_data_dir)
                     file:close()
                     local format = _field(content, "format")
                     if format and format:find("cg3h%-mod") then
+                        -- Scope the type lookup to the "type" JSON field
+                        -- so a "mesh_add" substring elsewhere (e.g. in a
+                        -- description) doesn't mis-flag the mod.
+                        local type_block = content:match('"type"%s*:%s*(%b[])')
+                                        or content:match('"type"%s*:%s*"[^"]*"')
+                                        or ""
                         local mod = {
-                            id           = dir_name,
-                            name         = _field(content, "name") or "",
-                            version      = _field(content, "version") or "",
-                            author       = _field(content, "author") or "",
-                            character    = _field(content, "character") or "",
-                            path         = mod_data_dir,
-                            has_textures = content:find('"textures"') ~= nil,
-                            has_glb      = content:find('"glb"') ~= nil,
-                            glb_name     = _field(content, "glb"),
-                            mesh_entries = _string_array(content, "mesh_entries"),
+                            id               = dir_name,
+                            name             = _field(content, "name") or "",
+                            version          = _field(content, "version") or "",
+                            author           = _field(content, "author") or "",
+                            character        = _field(content, "character") or "",
+                            path             = mod_data_dir,
+                            has_textures     = content:find('"textures"') ~= nil,
+                            has_glb          = content:find('"glb"') ~= nil,
+                            glb_name         = _field(content, "glb"),
+                            mesh_entries     = _string_array(content, "mesh_entries"),
+                            has_mesh_add     = type_block:find('"mesh_add"') ~= nil,
+                            has_mesh_replace = type_block:find('"mesh_replace"') ~= nil,
                         }
                         if mod.character ~= "" and mod.id then
                             table.insert(M.mods, mod)
