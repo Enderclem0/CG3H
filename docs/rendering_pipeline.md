@@ -274,8 +274,78 @@ stock's textures. No special casing either way.
   and the GMD layout hold
 
 Pool usage per variant: roughly `sum(variant_vcount × 40 + variant_icount × 2)`
-across all the variant's meshes. Practical budget is ample — the current static
-buffer is ~64 MB per shader effect.
+across all the variant's meshes.
+
+## Drawable pre-sizing (why "stock" entry must be the biggest)
+
+Per-drawable state (bone palette capacity, per-mesh scratch) is allocated
+when the scene spawns a Thing bound to an entry name — sized for **whatever
+entry is currently in the merged GPK under that name**. Swapping the entry's
+mesh data at runtime (via hash remap) works as long as the new target fits
+in the pre-allocated drawable state; swapping to a LARGER entry overflows
+and instant-crashes. This is why the builder emits:
+
+- Default-name entry (e.g. `HecateHub_Mesh`) = **merged-all-mods**, so the
+  drawable is pre-sized for maximum capacity at scene-load.
+- Slim variants (per-mod and `{Character}_Stock_V{N}_Mesh`) = strictly
+  smaller — always fit when remapped onto the merged drawable.
+
+---
+
+# Part 3b — Static buffer pool sizes
+
+Default budgets from the shipped binary:
+
+- Per-shader-effect vertex buffer: **64 MB** (0x04000000) — hardcoded as
+  the 5th arg of `sgg::addShaderEffect → sgg::addStaticVertexBuffers`.
+- Single global index buffer: **32 MB** (0x02000000) — hardcoded inside
+  `sgg::addStaticVertexBuffers`, allocated once via null-check on
+  `sgg::gStaticIndexBuffers`.
+
+Both live in DX12 upload heap (persistent-mapped, so `Buffer+0x00` is a
+valid CPU pointer). That means the capacity cost is **system RAM, not
+VRAM** — cheap to grow on modern PCs.
+
+## Why the defaults aren't enough for mods
+
+Every mod variant emitted by CG3H adds an entry to `mModelData` and
+commits its vertex/index bytes into these pools during `AddModelData`.
+Shipping with only vanilla characters fits easily; shipping with
+per-mod slim variants + true-stock variants overflows the budget.
+Symptom: `Granny3D.cpp:519 RequestBufferUpdate failed` +
+`ForgeRenderer.cpp:5352 Ran out of static index buffer memory`;
+later-loaded meshes (weapons, enemies) fall back to a `Blank_Mesh`
+placeholder.
+
+## H2M pool patches (Hell2Modding/src/main.cpp::my_main)
+
+Two byte-patches applied at DLL attach (before `InitForgeRenderer`
+fires):
+
+| Pool | Default | Raised | Scan pattern | Patch |
+|---|---|---|---|---|
+| Vertex (per-shader) | 64 MB | 128 MB | `48 C7 44 24 20 00 00 00 04 E8` | imm32 high byte `04`→`08` at scan+8 |
+| Index (global) | 32 MB | 64 MB | `48 C7 44 24 40 00 00 00 02 48` | imm32 high byte `02`→`04` at scan+8 |
+
+Patterns are currently unique (1 match each). If a future game update
+reshuffles the allocator, the patches fail safely (logged warning, no
+effect).
+
+## Runtime inspection
+
+`rom.data.dump_pool_stats()` walks `gStaticDrawBuffers` and
+`gStaticIndexBuffers` and logs per-pool usage / capacity /
+percentage. Note: the `stride` field at `gShaderEffects+0x95c` used
+in the % calculation is a bookkeeping counter, NOT the physical
+40-byte vertex size, so the "%" numbers print >100% when content is
+actually well under capacity. Reliable signals:
+
+- Zero `RequestBufferUpdate failed` lines in `Hades II.log` → vertex
+  pool fine.
+- Zero `Ran out of static index buffer memory` lines → index pool
+  fine.
+- Raw `index buf: X MB / Y MB` line in `LogOutput.log` → true index
+  usage (`cursor × 2` bytes).
 
 ---
 
@@ -300,6 +370,8 @@ longer match — see [`address_recovery_after_update.md`](address_recovery_after
 | `sgg::GameAssetManager::GetTexture` | **GMD+0x44 population** for variants |
 | `sgg::ForgeRenderer::RequestBufferUpdate` | GR2 upload path |
 | `sgg::DrawManager::DoDraw3D` / `DoDrawShadow3D` / `DoDraw3DThumbnail` / `DoDrawShadowCast3D` | Draw-call detour hooks (v3.8 visibility gate) |
+| `sgg::addShaderEffect` | v3.9 pool-size patch anchor (vertex pool: 64→128 MB) |
+| `sgg::addStaticVertexBuffers` | v3.9 pool-size patch anchor (index pool: 32→64 MB, inside this function) |
 | `sgg::RenderCommands::DRAWABLES` / `DRAWABLE_EXTS` / `sDraw3DCmds` | Pipeline understanding only (not used directly) |
 
 ---
