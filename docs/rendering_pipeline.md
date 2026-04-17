@@ -399,3 +399,121 @@ GrannyCopyMeshIndices(granny_mesh*, int bytes_per_index, void* dest)
 | Large mesh indices corrupt | Reading raw `Indices16` — misses 32-bit sources | Use `GrannyCopyMeshIndices(mesh, 2, buf)` |
 | LSLib fails on Hades II rigid models | LSLib respects Granny metadata (32 bytes); engine has 40 | Use CG3H with hardcoded 40-byte override |
 | Variant geometry renders white | `GMD+0x44` never populated for non-rendered entries | Call `rom.data.populate_entry_textures(variant_name)` once at load |
+
+---
+
+# Appendix A — Hardcoded offset registry
+
+Single source of truth for every struct offset the CG3H / H2M code
+assumes. A game update that shifts any of these silently breaks the
+corresponding feature. The `Runtime check?` column flags whether we
+detect drift automatically (today: no — see task #47 follow-up).
+
+## GrannyMeshData (GMD) — 0x50-byte entry in the model's mesh vector
+
+Symbol: `sgg::Granny3D::AddModelData` writes each field. Read by
+`DoDraw3D` (main render) and `ModelAnimation::PrepDraw` (texture
+handle refresh).
+
+| Offset | Size | Field | Used by | Runtime check? |
+|---|---|---|---|---|
+| +0x00 | 8 | `MeshBinding*` | AddModelData, bone pipeline | no |
+| +0x08 | 8 | `mBoneIndices*` | AddModelData | no |
+| +0x10 | 4 | `mBoneBindingCount` | AddModelData | no |
+| +0x18 | 8 | bone-binding OBB array | AddModelData | no |
+| +0x30 | 4 | `vertex_handle` (vh) | DoDraw3D | no |
+| +0x34 | 4 | `index_handle` (ih) | DoDraw3D | no |
+| +0x38 | 4 | `index_count` | DoDraw3D | no |
+| +0x3C | 4 | `vertex_count` | DoDraw3D | no |
+| +0x40 | 4 | `tex_name_hash` | PrepDraw (as key), DoDraw3D fallback | no |
+| +0x44 | 4 | `texture_handle` (TextureHandle) | DoDraw3D fallback; `populate_entry_textures` writes | no |
+| +0x48 | 4 | `mesh_name_hash` | `set_mesh_visible` filter (matches target) | no |
+| +0x4C | 1 | `mesh_type` byte enum (0=main, 1=outline, 2=shadow) | DoDraw3D switch; `set_mesh_visible` flips to 2 to hide | no |
+
+GMD stride (0x50) is hardcoded in `set_mesh_visible` and
+`populate_entry_textures` — both iterate `vec_begin + i * 0x50`.
+
+## ForgeGeometryBuffers — 72-byte entry in `gStaticDrawBuffers` vector
+
+| Offset | Size | Field | Used by | Runtime check? |
+|---|---|---|---|---|
+| +0x20 | 8 | `Buffer*` (vertex) | RequestBufferUpdate, `dump_pool_stats` | no |
+| +0x40 | 4 | uint vertex cursor | RequestBufferUpdate, `dump_pool_stats` | no |
+
+Vector stride 72 bytes (`rax * 9 * 8` in dispatch code).
+
+## The Forge Buffer struct (DX12)
+
+| Offset | Size | Field | Used by | Runtime check? |
+|---|---|---|---|---|
+| +0x00 | 8 | `void* pCpuMappedAddress` | Option 4 memcpy path | no |
+| +0x08 | 8 | `D3D12_GPU_VIRTUAL_ADDRESS mDxGpuAddress` | — | no |
+| +0x28 | 8 | `ID3D12Resource* pDxResource` | — | no |
+| +0x38 | 8 | uint64 — low 32 = mSize | Bounds check in RBU | no |
+
+## `sgg::gShaderEffects` entry — 0xF28-byte stride
+
+| Offset | Size | Field | Used by | Runtime check? |
+|---|---|---|---|---|
+| +0x95c | 4 | stride (per-shader byte/bookkeeping counter) | RequestBufferUpdate size check | no |
+| +0x960 | 4 | `geo_idx` (index into gStaticDrawBuffers) | RequestBufferUpdate | no |
+
+`dump_pool_stats` used to use +0x95c as "physical vertex stride" but
+that field is a bookkeeping counter, not real byte-stride — fixed to
+estimate at 40 B/vert.
+
+## sDraw3DCmds entry — 48-byte stride in the dispatch command list
+
+| Offset | Size | Field | Used by | Runtime check? |
+|---|---|---|---|---|
+| +0x1c | 4 | drawable_idx (arg1) | DoDraw3D | no |
+| +0x24 | 4 | bone count (arg4) | DoDraw3D | no |
+| +0x28 | 4 | HashGuid.mId (arg5) | Shadow-cast code cave reads/overwrites this | no |
+| +0x2c | 1 | outline flag | DoDraw3D | no |
+| +0x2d | 1 | shadow-cast flag | Code cave pivots on this | no |
+| +0x2e | 1 | thumbnail flag (literal 0) | DoDraw3D | no |
+
+Base: `sgg::RenderCommands::sDraw3DCmds`, double-buffered via
+`WRITE_CMD_INDEX` / `READ_CMD_INDEX` globals.
+
+## GR2 file header
+
+| Offset | Size | Field | Used by | Runtime check? |
+|---|---|---|---|---|
+| +0x20 | 4 | section count | `build_gr2_bytes` passes to `GrannyBeginFile` | no |
+| +0x44 | 4 | runtime type tag (`0x80000039` stock, `0x00000000` convert-pending) | Game's auto-conversion path; `reserialize_stock_entry` patches back to stock | no |
+
+## Granny material chain (inside MeshBinding → MaterialBindings)
+
+| Struct | Offset | Size | Field | Used by | Runtime check? |
+|---|---|---|---|---|---|
+| Model | +0x54 | 8 | `MeshBindings*` | `gltf_to_gr2._apply_patch` | no |
+| Material | +0x0C | 4 | maps count | material chain walk | no |
+| Material | +0x10 | 8 | `MaterialMap*` | material chain walk | no |
+| MaterialMap | +0x08 | 8 | `Material*` (nested) | material chain walk | no |
+| Material | +0x14 | 8 | `Texture*` | material chain walk | no |
+
+Most derived offsets for the material walk come from `granny_types.py`
+at runtime via `GrannyGetTotalObjectSize` but a handful of Python
+paths (gltf_to_gr2.py lines ~1340, 1350, 1677, 1720) still use
+literals. They're the most fragile set post-update.
+
+## H2M byte-pattern patches
+
+| Patch | Where | Pattern (hex) | Patch byte | Runtime check? |
+|---|---|---|---|---|
+| Vertex pool 64→128 MB | `sgg::addShaderEffect` call site | `48 C7 44 24 20 00 00 00 04 E8` | `+8`: `0x04` → `0x08` | **yes** — patch-status summary log |
+| Index pool 32→64 MB | `sgg::addStaticVertexBuffers` one-shot alloc | `48 C7 44 24 40 00 00 00 02 48` | `+8`: `0x02` → `0x04` | **yes** — patch-status summary log |
+| Shadow-cast code cave | `DoDraw3D + 0x148E4` | cmp/je 7-byte sequence | jmp to allocated cave | partial — byte signature check, fail-open |
+
+## Follow-up (task #47)
+
+Consider a plugin-init "canary" check that reads a known entry (e.g.
+`HecateHub_Mesh`) and asserts:
+- GMD stride = 0x50 (vector size divisible by 0x50)
+- `mesh_type` byte at +0x4C is 0, 1, or 2 on the first mesh
+- `tex_name_hash` at +0x40 is non-zero
+- ForgeGeometryBuffers Buffer* at +0x20 is non-null, mSize (Buffer+0x38) > 0
+
+If any fails, log a single ERROR and disable variant/accessory
+features so the symptoms are "picker missing" instead of "game corrupted".

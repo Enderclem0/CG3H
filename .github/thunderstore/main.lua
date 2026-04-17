@@ -159,6 +159,14 @@ ui.init(mod_state, {
     -- entries aren't in mModelData yet; add_imgui fires AFTER the model
     -- load, so first-frame is the earliest safe moment.
     on_first_frame = function()
+        -- Canary: if the GMD layout drifted in a game update, surface
+        -- it as a single ERROR line before features start failing in
+        -- downstream ways.  Harmless if it passes.  Hecate_Mesh is
+        -- always present so use it; if it isn't, fall through and let
+        -- the variant apply log the entry-missing path.
+        if rom.data.sanity_check_gmd then
+            rom.data.sanity_check_gmd("HecateHub_Mesh")
+        end
         runtime.apply_active_variants(mod_state)
     end,
 })
