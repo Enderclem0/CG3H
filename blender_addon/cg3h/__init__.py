@@ -704,12 +704,19 @@ class CG3H_OT_Export(bpy.types.Operator):
 
         original_meshes = set(context.scene.get("cg3h_original_meshes", "").split(","))
 
+        # Auto-detect mod type from the selected meshes.  A mesh whose
+        # name matches a stock mesh (was in the imported GR2) is a
+        # replacement; any other mesh is a new addition.
+        has_replace = False
+        has_add = False
         new_mesh_routing = {}
         for obj in context.selected_objects:
             if obj.type != 'MESH':
                 continue
             if obj.name in original_meshes:
+                has_replace = True
                 continue  # Original meshes routed by manifest
+            has_add = True
             # Auto-init if no entry properties (mesh added without clicking Init)
             mesh_entries = []
             has_props = False
@@ -731,6 +738,17 @@ class CG3H_OT_Export(bpy.types.Operator):
         if new_mesh_routing:
             target["new_mesh_routing"] = new_mesh_routing
 
+        # type field shape: single string when only one, list when both.
+        # Fallback to "mesh_replace" when neither (selection contained no
+        # meshes — shouldn't happen in practice) so existing builder
+        # classification still routes it correctly.
+        if has_replace and has_add:
+            mod_type = ["mesh_add", "mesh_replace"]
+        elif has_add:
+            mod_type = "mesh_add"
+        else:
+            mod_type = "mesh_replace"
+
         mod_json = {
             "format": "cg3h-mod/1.0",
             "metadata": {
@@ -739,7 +757,7 @@ class CG3H_OT_Export(bpy.types.Operator):
                 "version": "1.0.0",
                 "description": f"{mod_name} for {character}",
             },
-            "type": "mesh_replace",
+            "type": mod_type,
             "target": target,
             "assets": {
                 "glb": f"{character}.glb",
