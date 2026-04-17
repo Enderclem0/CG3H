@@ -312,12 +312,33 @@ function M.toggle_mod_visibility(mod_id, enabled, state)
     end
 
     -- mesh_add mods merge their meshes INTO the stock entry alongside the
-    -- body, so entry-level draw-gate would hide the body too.  Force
-    -- rebuild path for these — mesh-level visibility isn't built yet.
+    -- body, so entry-level draw-gate would hide the body too.  Use the
+    -- finer-grained per-mesh API to flip just the accessory's meshes.
     if target_mod.has_mesh_add then
-        rom.log.info(LOG_PREFIX .. " [draw-gate] skipping for mesh_add mod '"
-            .. mod_id .. "' — rebuild required")
-        return nil
+        if type(rom.data.set_mesh_visible) ~= "function" then
+            rom.log.info(LOG_PREFIX
+                .. " [mesh-gate] set_mesh_visible missing — rebuild required")
+            return nil
+        end
+        local routing = target_mod.new_mesh_routing or {}
+        local count = 0
+        for mesh_name, entries in pairs(routing) do
+            for _, entry in ipairs(entries) do
+                if rom.data.set_mesh_visible(entry, mesh_name, enabled) then
+                    count = count + 1
+                end
+            end
+        end
+        if count == 0 then
+            rom.log.info(LOG_PREFIX
+                .. " [mesh-gate] no meshes toggled for '" .. mod_id
+                .. "' — rebuild required")
+            return nil
+        end
+        rom.log.info(LOG_PREFIX .. " [mesh-gate] " .. mod_id
+            .. " (" .. (enabled and "show" or "hide") .. ") "
+            .. count .. " mesh(es)")
+        return "live"
     end
 
     local character = target_mod.character

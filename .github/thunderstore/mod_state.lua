@@ -72,6 +72,32 @@ local function _string_array(content, key)
     return result
 end
 
+-- Parse the target.new_mesh_routing object, shape:
+--     { "TorusHubMesh": ["HecateHub_Mesh"], "TorusBattleMesh": [...] }
+-- Returns { [mesh_name] = { entry1, entry2, ... } }.  Each mesh_name maps
+-- to the list of stock mesh entries the mod's added mesh gets merged
+-- into at build time.  Runtime uses this for per-mesh visibility toggle.
+local function _parse_new_mesh_routing(content)
+    local result = {}
+    -- Find target's balanced object, then within it the new_mesh_routing
+    -- balanced object.  The balanced-match (%b{}) handles nested braces.
+    local target_block = content:match('"target"%s*:%s*(%b{})')
+    if not target_block then return result end
+    local routing_block = target_block:match('"new_mesh_routing"%s*:%s*(%b{})')
+    if not routing_block then return result end
+    -- For each `"mesh_name": [ ... ]` pair inside routing_block.
+    for mesh_name, entries_arr in routing_block:gmatch('"([^"]+)"%s*:%s*(%b[])') do
+        local entries = {}
+        for v in entries_arr:gmatch('"([^"]*)"') do
+            table.insert(entries, v)
+        end
+        if #entries > 0 then
+            result[mesh_name] = entries
+        end
+    end
+    return result
+end
+
 -- ── Public API ─────────────────────────────────────────────────────────
 
 --- Scan plugins_data/ for CG3H mods.  Populates M.mods and M.by_character.
@@ -127,6 +153,7 @@ function M.scan(plugins_data_dir)
                             mesh_entries     = _string_array(content, "mesh_entries"),
                             has_mesh_add     = type_block:find('"mesh_add"') ~= nil,
                             has_mesh_replace = type_block:find('"mesh_replace"') ~= nil,
+                            new_mesh_routing = _parse_new_mesh_routing(content),
                         }
                         if mod.character ~= "" and mod.id then
                             table.insert(M.mods, mod)
