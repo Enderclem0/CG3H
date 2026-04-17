@@ -14,11 +14,6 @@ local window_open = false
 -- { kind = "live"|"transition"|"restart"|"error", text = "..." }
 local banner = nil
 
--- v3.8: session reload counter.  Each successful hot-reload bumps this.
--- Over a threshold the UI shows a soft pool-pressure warning.
-local session_reload_count = 0
-local POOL_PRESSURE_THRESHOLD = 10
-
 -- Status → (icon, color).  Kept tiny so adding new states later is a
 -- one-line change.
 local STATE_DECOR = {

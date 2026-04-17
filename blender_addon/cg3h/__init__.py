@@ -30,6 +30,7 @@ import importlib
 import json
 import os
 import re
+import shutil
 import struct
 import subprocess
 import tempfile
@@ -92,11 +93,15 @@ def _find_game_path():
                 continue
     except ImportError:
         pass  # winreg not available (non-Windows) — fall through to path scan
-    # Fallback
+    # Fallback paths — keep in sync with tools/cg3h_constants.py::_FALLBACK_PATHS.
+    # (The Blender addon lives in a separate Python environment and can't
+    # import tools/, so we duplicate the list here.)
     for p in [
         r"C:\Program Files (x86)\Steam\steamapps\common\Hades II",
         r"C:\Program Files\Steam\steamapps\common\Hades II",
+        r"D:\Steam\steamapps\common\Hades II",
         r"D:\SteamLibrary\steamapps\common\Hades II",
+        r"E:\SteamLibrary\steamapps\common\Hades II",
     ]:
         if os.path.isdir(p):
             return p
@@ -800,7 +805,6 @@ class CG3H_OT_Export(bpy.types.Operator):
         if not os.path.isfile(icon_src):
             icon_src = os.path.join(_addon_dir(), "..", "..", "icon.png")
         if os.path.isfile(icon_src):
-            import shutil
             shutil.copy2(icon_src, os.path.join(workspace, "icon.png"))
 
         # Run exporter to generate manifest.json (for mesh routing)
@@ -823,7 +827,6 @@ class CG3H_OT_Export(bpy.types.Operator):
                 # Exporter writes manifest.json in the same dir as the output GLB
                 manifest_src = os.path.join(os.path.dirname(manifest_glb), "manifest.json")
                 if os.path.isfile(manifest_src):
-                    import shutil
                     shutil.copy2(manifest_src, os.path.join(workspace, "manifest.json"))
                     os.unlink(manifest_src)
             except Exception as e:
@@ -838,7 +841,6 @@ class CG3H_OT_Export(bpy.types.Operator):
         zip_path = None
         build_script = os.path.join(_addon_dir(), "cg3h_build.py")
         if os.path.isfile(build_script):
-            import shutil
             system_python = shutil.which("python") or shutil.which("python3") or shutil.which("py")
             if system_python:
                 try:

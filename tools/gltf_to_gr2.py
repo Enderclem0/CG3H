@@ -1644,7 +1644,11 @@ def patch_vertex_data(
                 custom_mat_ptr = None
                 glb_tex = glb_m.get('texture_name')
                 if glb_tex and glb_tex not in existing_tex_names:
-                    tex_filename = f"D:/mod/{glb_tex}.png"
+                    # The texture PKG lookup hashes the name-stem, so the
+                    # directory portion of this path is irrelevant at
+                    # runtime — only the stem (glb_tex) is load-bearing.
+                    # Use a neutral placeholder.
+                    tex_filename = f"{glb_tex}.png"
                     custom_mat_ptr = _create_granny_material_chain(
                         dll, glb_m['name'].split(':')[-1], tex_filename)
                     print(f"  Custom material for '{glb_m['name']}': texture={glb_tex}")

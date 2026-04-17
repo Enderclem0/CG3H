@@ -6,14 +6,30 @@ Usage:
     python pdb_lookup.py --disasm <symbol> [--size N]
 """
 
+import os
 import sys
 import ctypes
 from ctypes import c_void_p, c_ulong, c_wchar_p, POINTER, byref, HRESULT
 from comtypes import GUID
 
-PDB_PATH = r'C:\Program Files (x86)\Steam\steamapps\common\Hades II\Ship\Hades2.pdb'
-EXE_PATH = r'C:\Program Files (x86)\Steam\steamapps\common\Hades II\Ship\Hades2.exe'
-DIA_DLL  = r'C:\Program Files\Microsoft Visual Studio\2022\Community\DIA SDK\bin\amd64\msdia140.dll'
+# Paths can be overridden via env vars so the tool works outside the default
+# Steam / Visual Studio install layout.  Priority: env var > hardcoded default.
+PDB_PATH = os.environ.get('HADES2_PDB_PATH',
+    r'C:\Program Files (x86)\Steam\steamapps\common\Hades II\Ship\Hades2.pdb')
+EXE_PATH = os.environ.get('HADES2_EXE_PATH',
+    r'C:\Program Files (x86)\Steam\steamapps\common\Hades II\Ship\Hades2.exe')
+# DIA SDK ships with Visual Studio.  Try Community → Professional → Enterprise
+# under VS 2022 as fallback; allow env override for non-default installs or
+# older/newer VS versions.
+_DIA_CANDIDATES = [
+    os.environ.get('DIA_SDK_DLL'),  # explicit override (may be None)
+    r'C:\Program Files\Microsoft Visual Studio\2022\Community\DIA SDK\bin\amd64\msdia140.dll',
+    r'C:\Program Files\Microsoft Visual Studio\2022\Professional\DIA SDK\bin\amd64\msdia140.dll',
+    r'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\DIA SDK\bin\amd64\msdia140.dll',
+    r'C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\DIA SDK\bin\amd64\msdia140.dll',
+]
+DIA_DLL = next((p for p in _DIA_CANDIDATES if p and os.path.isfile(p)),
+               _DIA_CANDIDATES[1])  # default to VS2022 Community path if none exist
 
 CLSID_DiaSource    = GUID('{E6756135-1E65-4D17-8576-610761398C3C}')
 IID_IClassFactory  = GUID('{00000001-0000-0000-C000-000000000046}')
