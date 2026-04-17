@@ -237,8 +237,8 @@ When multiple mods target the same character, CG3H detects conflicts per-operati
 | texture_replace (same texture) | texture_replace (same texture) | Yes | Priority order; higher wins |
 | mesh_add (custom texture, same name) | mesh_add (custom texture, same name) | No | Both auto-prefixed with mod id at build time (v3.6) |
 | mesh_add | mesh_add | No | Both appended (same names auto-prefixed with mod id) |
-| mesh_replace | mesh_replace (same meshes) | No (v3.9+) | Both become switchable variants in the outfit picker; merged stock entry holds the union of both |
-| mesh_replace | mesh_add | Maybe | May need manual adjustment |
+| mesh_replace (pure) | mesh_replace (pure, same meshes) | No (v3.9+) | Both become switchable variants in the outfit picker; merged stock entry holds the union |
+| mesh_replace | mesh_add | No | mesh_add is additive (always visible); mesh_replace becomes a picker variant |
 | mesh_patch | texture_replace | No | Independent operations |
 | mesh_patch | mesh_replace | Yes | Replace overrides patch |
 | animation_patch (same filter) | animation_patch (same filter) | Yes | Mutually exclusive |
@@ -283,9 +283,25 @@ The picker dropdown per scene entry shows:
 - **Stock** — the unmodified game content for that entry (auto-applied
   on first frame so the game opens on vanilla by default, not a merged
   view).
-- **<Mod name>** — that one mod's contribution only.
+- **<Mod name>** — that one body-replacer's contribution.
 - **Apply to all scenes** — cascade one choice across every scene the
   character appears in.
+
+**What shows up in the picker (v3.9 rule):**
+
+- A mod that is **purely `mesh_replace`** (no `mesh_add` in its type
+  list) gets an entry in the picker — it offers an alternative body.
+- A mod that includes **`mesh_add`** (even alongside `mesh_replace`)
+  is treated as **additive**: its meshes are always merged into the
+  default stock entry and always render, regardless of the picker
+  choice. It does NOT appear as a picker option.
+
+This means `["mesh_add", "mesh_replace"]` mods like "Hecate with an
+added chest piece" are always-on accessories — the picker is reserved
+for choosing between *whole alternative bodies*. Splitting a mixed
+mod's GLB into add-only / replace-only halves (so the replace half
+becomes a picker variant while the add half stays additive) is a
+v4.x goal — not built.
 
 **Builder-side:** for each `mesh_replace` mod declaring
 `target.mesh_entries`, the builder emits a slim variant entry named

@@ -914,12 +914,24 @@ def scan_and_build_all(plugins_data_dir, game_dir=None, only_character=None):
                     disabled_mods=char_disabled)
             continue
 
-        # v3.9 Option A': EVERY mesh-bearing mod merges into stock (keeps the
-        # stock entry sized for MAX of all mods — required because the
-        # drawable is pre-sized at scene-load).  Mesh_replace mods with
-        # declared target.mesh_entries ALSO get emitted as slim standalone
-        # variant entries, so the outfit picker can swap to "just this mod"
-        # at runtime.  Safe because variants are strictly <= stock in size.
+        # v3.9: classify mods for the outfit picker.
+        #
+        #   PURE mesh_replace → picker variant (alternative body for the
+        #       targeted entries).  User switches between stock and each
+        #       installed replacer from the ImGui dropdown.
+        #
+        #   anything with mesh_add (including mesh_add + mesh_replace) →
+        #       additive accessory.  Always-on, merged into the default
+        #       stock entry, never appears in the picker.  The "mesh_add
+        #       means always-on" rule holds even for mods that also list
+        #       mesh_replace — v4.x can revisit with GLB-level splitting
+        #       (emit the mesh_replace half as a picker variant while
+        #       keeping the mesh_add half additive) but that's not built.
+        #
+        # Regardless of classification, EVERY mesh-bearing mod merges into
+        # the default stock entry — that's what keeps the drawable
+        # pre-sized for the MAX footprint, so runtime swap to a slim
+        # variant always fits.
         variant_mods = []
         accessory_mods = []
         for mi in char_mods:
@@ -927,9 +939,10 @@ def scan_and_build_all(plugins_data_dir, game_dir=None, only_character=None):
             mod_type = mod.get('type', '')
             types = mod_type if isinstance(mod_type, list) else [mod_type] if mod_type else []
             has_entries = bool(mod.get('target', {}).get('mesh_entries', []))
-            if 'mesh_replace' in types and has_entries:
+            is_pure_replacer = 'mesh_replace' in types and 'mesh_add' not in types
+            if is_pure_replacer and has_entries:
                 variant_mods.append(mi)
-            elif 'mesh_add' in types and not has_entries:
+            elif 'mesh_add' in types:
                 accessory_mods.append(mi)
 
         print(f"  {character}: building from {len(char_mods)} mod(s)")
