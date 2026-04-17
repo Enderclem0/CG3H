@@ -727,8 +727,12 @@ class CG3H_OT_Export(bpy.types.Operator):
                 has_props = True
                 if obj[prop_name]:
                     mesh_entries.append(entry)
-            # Only add routing if not all entries are checked (partial assignment)
-            if has_props and mesh_entries and set(mesh_entries) != set(all_entries):
+            # Always write routing for new meshes so runtime per-mesh
+            # visibility can locate them (rom.data.set_mesh_visible).
+            # The routing's value may be the full entry list — that's
+            # fine; partial vs full is distinguished by content, not by
+            # the presence of the key.
+            if has_props and mesh_entries:
                 new_mesh_routing[obj.name] = mesh_entries
 
         target = {
