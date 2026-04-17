@@ -12,7 +12,7 @@ no external Python or dependencies required.
 bl_info = {
     "name": "CG3H — Hades II Model Tools",
     "author": "Enderclem",
-    "version": (3, 4, 0),
+    "version": (3, 9, 0),
     # Minimum Blender version.  4.2 is the current LTS and our floor for
     # testing / API targets.  Older versions may work but are unsupported.
     # Blender 4.3+ ships Python 3.12 where the stricter parent-package

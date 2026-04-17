@@ -4,6 +4,56 @@ All notable changes to CG3H are documented here.
 
 ---
 
+## v3.9.0
+
+Outfit switching.  Install multiple `mesh_replace` mods on the same character and pick between them in-game from the mod manager dropdown — swap happens instantly, no rebuild, no restart.  Install `mesh_add` accessories and toggle each one individually; the checkbox flips visibility within the same frame.
+
+### Added
+
+- **Per-mod outfit picker** — the mod manager's Characters tab shows a **Body** dropdown per scene entry (Hub, Battle, etc.) listing every pure `mesh_replace` mod installed for that character.  Picking one swaps the entry instantly.  Backed by `rom.data.swap_to_variant(stock_entry, variant_entry)` which installs a hash remap at `[sDraw3DCmds+0x28]` so DoDraw3D reads the variant's `GrannyMeshData` instead of the stock entry's.
+- **Variant textures** — variants render with their own textures automatically via `rom.data.populate_entry_textures(entry)` which mirrors `ModelAnimation::PrepDraw` by calling `GameAssetManager::GetTexture` to fill `GMD+0x44`.  No vcount/topology limit; modded materials survive.
+- **True-stock slim variants** — the builder emits a `{Character}_Stock_V{N}_Mesh` entry per targeted scene entry containing true-stock bytes from the game's GPK.  Auto-applied on the first ImGui frame so the game opens on vanilla content by default rather than on the merged-all view.  User picks persist via `active_variants` in `cg3h_mod_state.json`.
+- **Apply to all scenes** — a cascade dropdown picks one mod and applies it across every scene entry the mod covers.
+- **Instant accessory toggle** — the Characters tab gains an **Accessories** section with a checkbox per installed `mesh_add` mod.  Toggling hides/shows the mod's contribution within one frame via `rom.data.set_mesh_visible(entry, mesh_name, visible)`, which flips the target mesh's `GMD+0x4C` (mesh_type) between the original value and `2` (shadow) — DoDraw3D's own switch treats type 2 as skip-to-next-iteration, so no cmdDrawIndexed fires.
+- **Blender addon auto-classifies mod type** — exporting from Blender now sets `type` to `mesh_add`, `mesh_replace`, or `["mesh_add", "mesh_replace"]` based on whether the selected meshes match stock entry names (tracked via `cg3h_original_meshes`).  Previously hardcoded to `mesh_replace` regardless.
+- **`new_mesh_routing` always written** — was previously omitted when a new mesh went to every entry; runtime mesh-visibility needs the routing to locate meshes by (entry, mesh_name) so it's now always emitted.
+- **Static pool capacity raised** (Hell2Modding) — `sgg::addShaderEffect`'s vertex-pool allocation bumped from 64 MB → 128 MB, and `sgg::gStaticIndexBuffers` from 32 MB → 64 MB, via two mov-imm32 byte patches at DLL attach.  Both pools live in the DX12 upload heap (system RAM, not VRAM) so the extra capacity is cheap.  Without this, mods that add variant entries overflow the default budget and weapons/enemies fall back to the `Blank_Mesh` placeholder.
+- **Patch-status summary log** — plugin init now logs each CG3H patch as `[OK  ]` or `[SKIP]` with a follow-up warning if any skipped — game updates that shift byte patterns surface immediately.
+- **Runtime offset sanity canary** — `rom.data.sanity_check_gmd("HecateHub_Mesh")` validates the hardcoded `GrannyMeshData` layout on first frame.  Logs a single `LOG(ERROR)` if the GMD stride, mesh count, or per-mesh fields drift from expected, instead of failing in mystery ways downstream.
+- **Pool-usage inspection** — `rom.data.dump_pool_stats()` walks `gStaticDrawBuffers` and logs per-shader-effect cursor + capacity.  Exposed via a "Pool stats" button in the mod manager for diagnosing OOM-ish regressions.
+- **Offset registry** in `docs/rendering_pipeline.md` Appendix A — single table of every struct offset CG3H/H2M depends on, plus byte patterns for the H2M patches.
+
+### Changed
+
+- **Default render is now true-stock** — v3.8 rendered the merged-all-mods view by default; v3.9 auto-applies the `"stock"` variant on first frame so the game opens looking vanilla and the user opts IN to each mod via the picker.  Persisted picks survive restart.
+- **Mod classification rule** — a mod is a picker variant only if it's **pure** `mesh_replace` (no `mesh_add` in its `type` list).  Anything with `mesh_add`, including mixed `["mesh_add", "mesh_replace"]`, becomes an always-on additive accessory.  v4.x may revisit with GLB-level splitting (treat the replace half as a variant while keeping the add half additive) but that's not built.
+- **Blender addon minimum version** — bumped to 4.2 (current LTS) from 4.0.  4.2 is our verified baseline; 4.0/4.1 users now get a clear install-time error instead of mysterious runtime failures.
+
+### Fixed
+
+- **Blender addon "partially initialized cg3h" ImportError on Python 3.12+** — the top-level `importlib.reload(cg3h_core)` ran while the parent package's `__init__` was still executing.  Python 3.12 tightened parent-package state checks and rejects this.  Switched to the Blender-standard `"bpy in locals"` guard — plain import on first load, reload only on addon disable-then-enable.
+- **Weapons/enemies rendering as placeholder when variants installed** — static vertex/index pools exhausted by the extra entries (see pool patches above).
+- **Duplicate `plugins_data/CG3HBuilder/` write path** — the Python builder's dev-only invocation (`python cg3h_builder_entry.py ...`) wrote to `<plugins_data>/CG3HBuilder/` while the deployed exe writes to `<plugins_data>/Enderclem-CG3HBuilder/`.  H2M's startup GPK scan picked up both → duplicate registrations + "Could not open Granny Packfile" errors.  Dev path now writes to `_cg3h_devbuild/` (not scanned).
+- **`dump_pool_stats` reported impossible "%used"** — was multiplying cursor by `gShaderEffects+0x95c` (a bookkeeping counter) instead of the physical vertex stride.  Now reports raw cursor + capacity plus an estimate at 40 B/vert (the character-mesh stride).
+- **v3.9 classification fix: mesh_add is additive, not variant-worthy** — an earlier draft treated mixed `mesh_add + mesh_replace` mods (HecateBiMod-style) as picker variants.  Corrected: any presence of `mesh_add` forces additive.
+
+### Known limitations
+
+- **Re-enabling an accessory mid-session** that was disabled at the last build still requires a rebuild.  The runtime mesh-gate hides meshes that ARE in the merged GPK, but can't show meshes that aren't there.  Toggle-within-a-session (where the mod was enabled at build time) is instant.
+- **Sanity canary hardcodes `HecateHub_Mesh`** as the probe entry.  Benign warning in the log if Hecate isn't installed / available; no runtime impact.
+- **Shadow-cast code cave fails open on game updates** that shift the `cmp byte [r10+0x2d], 0; je` byte sequence.  Detected via signature check; without the cave, hash remap doesn't apply to the shadow-cast pass (visible as stock shadow on a modded body).  Not fatal.
+- **Stock variant bytes are raw stock clones**, not re-serialized — design choice.  We have `reserialize_stock_entry` (golden-path `build_gr2_bytes`) for future work, but the current ship uses raw byte-clones under the `{Character}_Stock_V{N}_Mesh` naming convention the engine's skeleton linkage expects.  Works; nothing to fix.
+
+### Architecture notes
+
+The v3.9 draw-path RE + offset registry is in `docs/rendering_pipeline.md`.  Key v3.9 points:
+
+- The drawable's bone palette / per-mesh scratch is sized at scene-load time for the entry currently bound to it.  Swapping to a LARGER entry at runtime overflows.  This is why the builder merges all mods into the default stock entry (keeps the drawable pre-sized for max) and emits per-mod variants as strictly-smaller slim entries.
+- PrepDraw only populates `GMD+0x44` (texture handle) for entries the active scene is actively rendering.  Variants aren't walked by PrepDraw, so we pre-populate them via `populate_entry_textures` before installing the remap.
+- Mesh-type 2 in the GMD's `+0x4C` byte routes DoDraw3D's per-mesh switch to the loop-end label.  That's the skip mechanism used by `set_mesh_visible`.
+
+---
+
 ## v3.8.0
 
 Instant in-game mesh visibility toggle.  Enable/disable mods from the mod manager and see the result immediately — no rebuild, no restart.  Built on a new `rom.data.set_draw_visible` H2M API that hooks the game's draw dispatch to suppress draw calls per model entry.

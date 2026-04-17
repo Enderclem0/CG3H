@@ -13,7 +13,8 @@ Build non-destructive mod packages for [Hell2Modding (H2M)](https://github.com/S
 - Replace or edit textures (PNG/DDS)
 - Edit animation curves
 - Target specific mesh entries (battle-only, hub-only for multi-entry characters)
-- Install multiple mods on the same character (auto-merged at runtime)
+- **Install multiple body mods on the same character and pick between them in-game** (v3.9)
+- **Toggle accessories (glasses, capes, etc.) individually** — checkbox in the in-game mod manager, instant effect (v3.9)
 
 ## Getting Started
 
@@ -41,6 +42,17 @@ python tools/converter_gui.py
 
 Install the [CG3HBuilder](https://thunderstore.io/c/hades-ii/p/Enderclem/CG3HBuilder/) plugin via r2modman. It handles everything at runtime — no Python needed.
 
+## In-Game Mod Manager (v3.9)
+
+Open the **CG3H Mod Manager** from the menu bar.  Under the **Characters** tab, each character expands to two picker sections:
+
+- **Body** — dropdown per scene (Hub, Battle, …) listing **Stock** + every pure `mesh_replace` mod.  Pick one to swap bodies instantly — no rebuild, no restart.
+  - **Apply to all scenes** cascades one pick across every scene entry the mod covers.
+  - Default is **Stock** (auto-applied on the first frame); your picks persist to the next session.
+- **Accessories** — checkbox per installed `mesh_add` mod.  Toggle on/off to show/hide the added meshes within the same frame.
+
+Two mods of the same type on the same character are **not a conflict in v3.9** — both get picker entries.  The only true conflict is two pure `mesh_replace` mods targeting the *same mesh*, which resolve via the picker (user chooses).
+
 ## Mod Types
 
 | Type | Description |
@@ -57,7 +69,8 @@ See [`docs/mod_spec.md`](docs/mod_spec.md) for the full mod specification.
 - **New mesh bone bindings** — new meshes inherit bone bindings from the best-matching existing mesh. Bone binding expansion planned for v4.0.
 - **65,535 vertices max per mesh** — engine limitation (uint16 index buffers).
 - **Adding/removing bones** is not supported — the skeleton is read-only.
-- **Requires H2M patches** — `rom.data.add_granny_file` API and GPK exact-match fix (PRs pending).
+- **Re-enabling an accessory mid-session** requires a rebuild if the mod was disabled at the last build (runtime mesh-gate can hide what's in the merged GPK but can't add meshes that aren't there).  Toggling within a session where the mod was enabled at build time is instant.
+- **Requires H2M patches** — `rom.data.add_granny_file` API, GPK exact-match fix, v3.9 draw-path bindings (`set_mesh_visible`, `swap_to_variant`, `populate_entry_textures`), and static-pool size patches.  All ship in the Hell2Modding build paired with CG3HBuilder.
 
 ## Requirements
 
