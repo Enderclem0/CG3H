@@ -87,6 +87,53 @@ def _copy_plugin(r2_dir):
     print(f"  plugins_data/{CG3H_BUILDER_FOLDER}/cg3h_builder.exe")
 
 
+def _populate_r2modman_cache(r2_dir):
+    """Mirror the deployed plugin into r2modman's cache so the UI has an
+    icon, a manifest, and installable payload matching the profile state.
+
+    Without a cache entry r2modman's mod list displays the profile entry
+    without an icon (broken-image placeholder).  Matches the layout r2modman
+    creates when it installs a mod from Thunderstore:
+
+        cache/<Namespace>-<Name>/<version>/
+            icon.png
+            manifest.json
+            plugins/<Namespace>-<Name>/...
+            plugins_data/<Namespace>-<Name>/...
+    """
+    # r2modman's cache root lives one level up from the ReturnOfModding dir,
+    # inside the HadesII/ profile root (sibling of profiles/).
+    profiles_idx = r2_dir.lower().find(os.sep + 'profiles' + os.sep)
+    if profiles_idx < 0:
+        print("  (cache skipped — couldn't derive r2modman root from r2_dir)")
+        return
+    r2_root = r2_dir[:profiles_idx]
+    cache_dir = os.path.join(r2_root, 'cache', CG3H_BUILDER_FOLDER, CG3H_VERSION)
+    if os.path.isdir(cache_dir):
+        shutil.rmtree(cache_dir)
+    os.makedirs(os.path.join(cache_dir, 'plugins', CG3H_BUILDER_FOLDER))
+    os.makedirs(os.path.join(cache_dir, 'plugins_data', CG3H_BUILDER_FOLDER))
+
+    # Top-level manifest + icon (what r2modman reads for the tile).
+    shutil.copy2(os.path.join(THUNDERSTORE_SRC, 'manifest.json'),
+                 os.path.join(cache_dir, 'manifest.json'))
+    icon = os.path.join(THUNDERSTORE_SRC, 'icon.png')
+    if os.path.isfile(icon):
+        shutil.copy2(icon, os.path.join(cache_dir, 'icon.png'))
+
+    # Mirror the deployed plugin + exe so the cache is a complete copy
+    # (enables r2modman to reinstall from cache on profile rebuilds).
+    for f in LUA_FILES + ['manifest.json']:
+        src = os.path.join(r2_dir, 'plugins', CG3H_BUILDER_FOLDER, f)
+        if os.path.isfile(src):
+            shutil.copy2(src, os.path.join(cache_dir, 'plugins', CG3H_BUILDER_FOLDER, f))
+    exe = os.path.join(r2_dir, 'plugins_data', CG3H_BUILDER_FOLDER, 'cg3h_builder.exe')
+    if os.path.isfile(exe):
+        shutil.copy2(exe, os.path.join(cache_dir, 'plugins_data',
+                                        CG3H_BUILDER_FOLDER, 'cg3h_builder.exe'))
+    print(f"  cache/{CG3H_BUILDER_FOLDER}/{CG3H_VERSION}/ populated")
+
+
 def main():
     ap = argparse.ArgumentParser(description="Install CG3HBuilder locally for testing")
     ap.add_argument('--no-build', action='store_true', help='skip PyInstaller rebuild')
@@ -102,6 +149,7 @@ def main():
 
     print(f"[install] Copying plugin to {args.r2_dir}")
     _copy_plugin(args.r2_dir)
+    _populate_r2modman_cache(args.r2_dir)
     print(f"[install] Done — CG3HBuilder {CG3H_VERSION} installed as "
           f"{CG3H_BUILDER_FOLDER}")
 
