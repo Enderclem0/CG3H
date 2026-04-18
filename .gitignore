@@ -50,3 +50,6 @@ CG3H-Python-Tools.zip
 blender_addon/cg3h/cg3h_exporter.exe
 blender_addon/cg3h/cg3h_importer.exe
 blender_addon/cg3h/cg3h_builder.exe
+
+# GUI-local config (saved game path, author name, etc.)
+tools/.cg3h_config.json
