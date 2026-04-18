@@ -37,7 +37,7 @@ symbols (`GrannyFileInfoType`, `GrannyMeshType`, etc.). No hardcoded offsets exc
 | Lua GrannyTexture override parsing | Done |
 | End-to-end DLL verification | Done |
 | In-game testing | Done |
-| Test suite (25 unit + 34 integration + 15 e2e = 74 tests) | Done |
+| Test suite (109 tests via `tests/test_core.py`) | Done |
 | GitHub Actions release pipeline | Done |
 
 ## Key Design Decisions

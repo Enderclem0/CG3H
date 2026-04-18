@@ -24,10 +24,10 @@ installs.
 5. Expected behaviour:
    - For `mesh_add` mods — runtime uses the new **mesh-gate**
      (per-mesh) path, not draw-gate.  Log: `[mesh-gate] ... (hide)`.
-   - For `mesh_replace` (pure) mods — NO draw-gate, handled by the
-     picker.  Unchecking disables the mod for build-time; triggers
-     rebuild.
-   - For `mesh_patch` / `animation_patch` — rebuild path fires.
+   - For `mesh_replace` (pure) mods — handled by the v3.9 picker; the
+     Mods-tab checkbox acts as the variant-set-to-stock control.
+   - For `animation_patch` — entry-level draw-gate (rare in practice;
+     usually combined with mesh_add/replace anyway).
 6. The v3.8 `rom.data.set_draw_visible` API is still present
    (exposed by H2M's `draw.cpp`) and callable from Lua if needed,
    but CG3H runtime no longer triggers it directly for mesh_add

@@ -6,7 +6,7 @@ This is the definitive reference for CG3H mod authors. It covers mod types, the 
 
 ## Mod Types
 
-CG3H supports 5 mod types. The build system infers operations from assets, so a single mod can combine multiple types.
+CG3H supports 4 mod types. The build system infers operations from assets, so a single mod can combine multiple types.
 
 ### texture_replace
 
@@ -74,26 +74,6 @@ Replace a character's meshes entirely with new ones.
 
 **Distribution note**: ships the modified geometry as a GLB inside the Thunderstore package. CG3HBuilder rebuilds the GPK on the user's machine using their game files, so no copyrighted base geometry is redistributed.
 
-### mesh_patch
-
-Modify existing mesh vertices (reshape, sculpt) without adding or removing meshes.
-
-```json
-{
-  "format": "cg3h-mod/1.0",
-  "metadata": {"name": "MelReshape", "author": "YourName", "version": "1.0.0"},
-  "type": "mesh_patch",
-  "target": {"character": "Melinoe"},
-  "assets": {
-    "glb": "MelinoeEdited.glb"
-  }
-}
-```
-
-**Build**: Loads the original GPK, matches GLB meshes to GR2 meshes by name, patches vertex positions/normals/UVs in-place.
-
-**Distribution note**: ships the edited GLB; CG3HBuilder repatches the user's local GPK at runtime.
-
 ### animation_patch
 
 Replace or modify specific animation curves on a character.
@@ -133,7 +113,7 @@ A mod can perform multiple operations:
 {
   "format": "cg3h-mod/1.0",
   "metadata": {"name": "MelCombo", "author": "YourName", "version": "1.0.0"},
-  "type": ["mesh_patch", "animation_patch"],
+  "type": ["mesh_replace", "animation_patch"],
   "target": {"character": "Melinoe"},
   "assets": {
     "glb": "Melinoe_edited.glb",
@@ -235,12 +215,10 @@ When multiple mods target the same character, CG3H detects conflicts per-operati
 | Mod A | Mod B | Conflict? | Resolution |
 |-------|-------|-----------|------------|
 | texture_replace (same texture) | texture_replace (same texture) | Yes | Priority order; higher wins |
-| mesh_add (custom texture, same name) | mesh_add (custom texture, same name) | No | Both auto-prefixed with mod id at build time (v3.6) |
+| mesh_add (custom texture, same name) | mesh_add (custom texture, same name) | No | Both auto-prefixed with mod id at build time |
 | mesh_add | mesh_add | No | Both appended (same names auto-prefixed with mod id) |
-| mesh_replace (pure) | mesh_replace (pure, same meshes) | No (v3.9+) | Both become switchable variants in the outfit picker; merged stock entry holds the union |
+| mesh_replace (pure) | mesh_replace (pure, same meshes) | No | Both become switchable variants in the outfit picker |
 | mesh_replace | mesh_add | No | mesh_add is additive (always visible); mesh_replace becomes a picker variant |
-| mesh_patch | texture_replace | No | Independent operations |
-| mesh_patch | mesh_replace | Yes | Replace overrides patch |
 | animation_patch (same filter) | animation_patch (same filter) | Yes | Mutually exclusive |
 | animation_patch (different filter) | animation_patch (different filter) | No | Non-overlapping |
 | animation_patch | mesh_replace | No | Independent (mesh vs anim) |
@@ -252,76 +230,31 @@ When multiple mods target the same character, CG3H detects conflicts per-operati
 - Auto-generated, editable via the GUI Mods tab or by hand
 - Higher index = applied later = wins conflicts
 
-### Multi-mod merging (runtime)
+### Multi-mod merging
 
-CG3H is not just a build tool — the **CG3HBuilder plugin** runs on end-user
-machines to fuse multiple mods into one GPK per character at game launch.
-Two mods cannot each ship their own `Melinoe.gpk`; the runtime merger
-resolves this automatically.
+Multiple mods targeting the same character are automatically merged at
+game launch — each mod ships only its own contribution; CG3HBuilder
+combines them into a single working GPK on the end user's machine.
+Players never have to resolve conflicts manually, and no mod ships
+copyrighted base geometry.
 
-The merger:
-1. Scans all installed CG3H mods in `plugins_data/`
-2. Groups mods by target character
-3. Single-pass GLB merge via `_merge_glbs()` (meshes + animations + materials)
-4. Single `convert()` call produces the final `{character}.gpk`
-5. Registers the GPK via `rom.data.add_granny_file`
+### Outfit switching
 
-Build-time conflict pre-flight is exposed via `tools/mod_info.py:check_conflicts()`
-and used by the GUI Mods tab.
+When two or more `mesh_replace` mods target the same character, both
+appear as switchable **body variants** in the in-game Mod Manager —
+the player picks per scene (Hub, Battle, Overlook, …) which one to
+render. Pure body mods are picker options; mods that also add meshes
+(`mesh_add` present in their type) are always-on accessories that
+stack on top of whichever body is selected.
 
-See [`architecture.md`](architecture.md) for the full merge flow and conflict check details.
+The default on first launch is **Stock** — the unmodified game
+content. Players opt in to each mod from the dropdown; their
+selection persists across sessions.
 
-### Outfit Switching (v3.9+)
-
-When two or more `mesh_replace` mods target the same character, CG3H
-emits **both** as switchable variants — the player picks which outfit
-they want per scene from the in-game Mod Manager. No more "which mod
-wins"; every installed mod stays accessible.
-
-The picker dropdown per scene entry shows:
-
-- **Stock** — the unmodified game content for that entry (auto-applied
-  on first frame so the game opens on vanilla by default, not a merged
-  view).
-- **<Mod name>** — that one body-replacer's contribution.
-- **Apply to all scenes** — cascade one choice across every scene the
-  character appears in.
-
-**What shows up in the picker (v3.9 rule):**
-
-- A mod that is **purely `mesh_replace`** (no `mesh_add` in its type
-  list) gets an entry in the picker — it offers an alternative body.
-- A mod that includes **`mesh_add`** (even alongside `mesh_replace`)
-  is treated as **additive**: its meshes are always merged into the
-  default stock entry and always render, regardless of the picker
-  choice. It does NOT appear as a picker option.
-
-This means `["mesh_add", "mesh_replace"]` mods like "Hecate with an
-added chest piece" are always-on accessories — the picker is reserved
-for choosing between *whole alternative bodies*. Splitting a mixed
-mod's GLB into add-only / replace-only halves (so the replace half
-becomes a picker variant while the add half stays additive) is a
-v4.x goal — not built.
-
-**Builder-side:** for each `mesh_replace` mod declaring
-`target.mesh_entries`, the builder emits a slim variant entry named
-`{Character}_{SanitizedModId}_V{N}_Mesh`, plus one
-`{Character}_Stock_V{N}_Mesh` per targeted entry (raw bytes from the
-game's stock GPK). The default-name stock entry (`HecateHub_Mesh` etc.)
-stays populated with the **union of all mods** so the drawable is
-pre-sized for the maximum footprint at scene-load. Runtime remaps swap
-to a strictly-smaller variant on demand.
-
-**H2M dependency:** v3.9 ships alongside paired pool-size patches in
-Hell2Modding (vertex pool 64 → 128 MB, index pool 32 → 64 MB). Both
-pools live in the DX12 upload heap (system RAM, not VRAM), so the
-extra capacity is cheap. Without the patches, variant entries
-overflow the default budgets and weapons/enemies render as
-placeholder. See `docs/rendering_pipeline.md` Part 3b.
-
-**Persistence:** active picks are saved to `cg3h_mod_state.json`
-under `active_variants` and restored on the first ImGui frame of the
-next session.
+Requires the `Enderclem-Hell2ModdingCG3H` Thunderstore package
+(temporary fork of Hell2Modding) until upstream merges the draw-path
+bindings. r2modman pulls it in automatically as a dependency of any
+CG3H mod built with v3.9 tools.
 
 ---
 
@@ -347,22 +280,3 @@ CG3H operates at two stages of the mod lifecycle:
 5. For multiple mods on the same character: CG3HBuilder merges them into one GPK
 6. Built GPKs are cached and only rebuilt when mods change
 
-### Build internals
-
-```
-mod.json + assets
-    |
-    +-- Read original GPK from game install (not shipped)
-    |
-    +-- Apply operations:
-    |     texture_replace -> build standalone .pkg
-    |     mesh_add        -> append to GPK + build .pkg
-    |     mesh_replace    -> patch GPK + build .pkg
-    |     mesh_patch      -> patch vertices in GPK
-    |     animation_patch -> patch curves in GPK
-    |
-    +-- Generate manifest.json (Thunderstore, depends on CG3HBuilder)
-    +-- Smart strip: remove unchanged assets from distribution
-    |
-    +-- Output H2M-compatible folder structure
-```

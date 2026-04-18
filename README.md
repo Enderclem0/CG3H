@@ -70,7 +70,7 @@ See [`docs/mod_spec.md`](docs/mod_spec.md) for the full mod specification.
 - **65,535 vertices max per mesh** — engine limitation (uint16 index buffers).
 - **Adding/removing bones** is not supported — the skeleton is read-only.
 - **Re-enabling an accessory mid-session** requires a rebuild if the mod was disabled at the last build (runtime mesh-gate can hide what's in the merged GPK but can't add meshes that aren't there).  Toggling within a session where the mod was enabled at build time is instant.
-- **Requires H2M patches** — `rom.data.add_granny_file` API, GPK exact-match fix, v3.9 draw-path bindings (`set_mesh_visible`, `swap_to_variant`, `populate_entry_textures`), and static-pool size patches.  All ship in the Hell2Modding build paired with CG3HBuilder.
+- **Requires the `Enderclem-Hell2ModdingCG3H` fork of Hell2Modding** — a temporary fork shipped on Thunderstore with the v3.9 draw-path bindings and buffer-pool patches CG3H depends on.  r2modman pulls it in automatically as a dependency of any CG3H mod.  Will be retired once upstream Hell2Modding merges the patches.
 
 ## Requirements
 

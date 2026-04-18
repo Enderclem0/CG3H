@@ -29,9 +29,8 @@ establish baseline state the lower rows depend on.
 |---- | ---------------------------------------------------------------------------- | -------------------------------------- | ---- |
 | A.1 | [`TEST_mod_type_mesh_add.md`](TEST_mod_type_mesh_add.md)                     | `mesh_add` — always-visible accessory  | [ ]  |
 | A.2 | [`TEST_mod_type_mesh_replace.md`](TEST_mod_type_mesh_replace.md)             | pure `mesh_replace` — picker variant   | [ ]  |
-| A.3 | [`TEST_mod_type_mesh_patch.md`](TEST_mod_type_mesh_patch.md)                 | `mesh_patch` — vertex position edits   | [ ]  |
-| A.4 | [`TEST_mod_type_texture_replace.md`](TEST_mod_type_texture_replace.md)       | `texture_replace` — standalone PKG     | [ ]  |
-| A.5 | [`TEST_mod_type_animation_patch.md`](TEST_mod_type_animation_patch.md)       | `animation_patch` — curve tweak        | [ ]  |
+| A.3 | [`TEST_mod_type_texture_replace.md`](TEST_mod_type_texture_replace.md)       | `texture_replace` — standalone PKG     | [ ]  |
+| A.4 | [`TEST_mod_type_animation_patch.md`](TEST_mod_type_animation_patch.md)       | `animation_patch` — curve tweak        | [ ]  |
 
 ### B. v3.9 picker behaviour
 
