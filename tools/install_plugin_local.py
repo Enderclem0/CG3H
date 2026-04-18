@@ -62,18 +62,22 @@ def _copy_plugin(r2_dir):
         shutil.copy2(src, os.path.join(plugins, f))
         print(f"  plugins/{CG3H_BUILDER_FOLDER}/{f}")
 
-    # Plugin manifest — write the folder-matching name so H2M's hyphen
-    # check passes and the in-game UI shows the right version.
-    manifest = (
-        '{"name":"' + CG3H_BUILDER_FOLDER + '",'
-        '"version_number":"' + CG3H_VERSION + '",'
-        '"website_url":"https://github.com/Enderclem0/CG3H",'
-        '"description":"CG3H Runtime Builder",'
-        '"dependencies":["Hell2Modding-Hell2Modding-0.2.0"]}'
-    )
-    with open(os.path.join(plugins, 'manifest.json'), 'w') as f:
-        f.write(manifest)
-    print(f"  plugins/{CG3H_BUILDER_FOLDER}/manifest.json")
+    # Plugin manifest — single source of truth is .github/thunderstore/
+    # manifest.json.  Override the `name` field to the folder-matching
+    # form (Enderclem-CG3HBuilder) so H2M's hyphen check passes and the
+    # in-game UI resolves the right plugin; everything else (version,
+    # dependencies, website_url, description) comes verbatim from the
+    # Thunderstore manifest so the local install can't drift from what
+    # Thunderstore ships.
+    import json
+    ts_manifest_path = os.path.join(THUNDERSTORE_SRC, 'manifest.json')
+    with open(ts_manifest_path, 'r') as f:
+        manifest_dict = json.load(f)
+    manifest_dict['name'] = CG3H_BUILDER_FOLDER
+    with open(os.path.join(plugins, 'manifest.json'), 'w', encoding='utf-8') as f:
+        json.dump(manifest_dict, f, ensure_ascii=False, indent=2)
+    print(f"  plugins/{CG3H_BUILDER_FOLDER}/manifest.json"
+          f"  (dep: {manifest_dict.get('dependencies', [])})")
 
     # Builder exe goes under plugins_data/{folder}/
     exe_src = os.path.join(_repo, 'dist', 'builder', 'cg3h_builder.exe')
