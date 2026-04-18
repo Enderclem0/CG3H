@@ -953,8 +953,9 @@ def _normalize_mesh_name(name: str) -> str:
     n = name.split(':')[-1].split('|')[-1].split('/')[-1]
     # Strip Blender duplicate suffixes (.001, .002, etc.)
     n = re.sub(r'\.\d{3,}$', '', n)
-    # Strip part suffixes (_1, _2, _3 and legacy _LOD1, _LOD2, _LOD3)
-    n = re.sub(r'_(?:LOD)?[1-9]$', '', n, flags=re.IGNORECASE)
+    # Strip part suffixes (_1, _2, _3) — same-name mesh splits that the
+    # exporter labels as parts of one original mesh.
+    n = re.sub(r'_[1-9]$', '', n)
     return n.lower()
 
 

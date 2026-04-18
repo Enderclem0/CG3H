@@ -16,6 +16,7 @@ import sys
 import time
 import traceback
 
+import numpy as np
 import pygltflib
 
 # Schema version for cg3h_status.json.  Bump when fields change in
@@ -61,8 +62,9 @@ def _classify_mod(mod):
     """Single source of truth for v3.9 mod classification.
 
     Returns (is_variant, is_accessory).  Both can be False (e.g. a pure
-    mesh_patch mod).  Both can NOT be True — mesh_add is the dominant
-    signal (any mesh_add presence forces additive).
+    texture_replace or animation_patch mod).  Both can NOT be True —
+    mesh_add is the dominant signal (any mesh_add presence forces
+    additive).
 
     Rule:
       - PURE mesh_replace (mesh_replace in type, mesh_add NOT in type)
@@ -247,44 +249,288 @@ def _merge_animations(base_gltf, base_blob, other_gltf, other_blob,
             base_gltf.animations.append(new_anim)
 
 
-def _merge_glbs(char_mods, output_dir, character):
+def _triage_mod_meshes(mod_info):
+    """Classify each mesh in a mod's GLB as 'reference', 'replaced', or 'new'.
+
+    - 'reference': position data matches the baseline exported at import time
+      (author included this mesh for scene context but didn't edit it — the
+      classic case is an accessory mod shipping unchanged stock meshes
+      alongside its one new mesh).  These are DROPPED from the merge.
+
+    - 'replaced': mesh name is known-stock AND positions differ from the
+      baseline → the author edited this stock mesh.  Keeps the stock name
+      so convert() patches the stock GR2.
+
+    - 'new': mesh name is not a known-stock name → genuinely added mesh
+      that needs new_mesh_routing to place it.
+
+    The baseline is the ``.baseline_positions.npz`` the Blender addon
+    preserves from import to export.  If it's missing (author exported
+    by hand without the addon), fall back to the manifest's stock mesh
+    names: treat a stock-named mesh as 'replaced' (safe default — we'd
+    rather ship an unnecessary patch than silently drop a real edit)
+    and non-stock names as 'new'.
+
+    Returns a dict {mesh_name: 'reference' | 'replaced' | 'new'}.
+    """
+    gltf = pygltflib.GLTF2().load(mod_info['glb_path'])
+    blob = gltf.binary_blob()
+
+    # mod_dir is optional for test harnesses that feed in synthetic GLBs
+    # with no on-disk workspace.  Without mod_dir we have no baseline and
+    # no manifest — triage falls through to "every mesh is 'new'".
+    mod_dir = mod_info.get('mod_dir')
+    baseline = {}
+    if mod_dir:
+        baseline_path = os.path.join(mod_dir, '.baseline_positions.npz')
+        if os.path.isfile(baseline_path):
+            try:
+                baseline = dict(np.load(baseline_path))
+            except Exception as e:
+                print(f"    {mod_info['id']}: baseline load failed ({e}) — "
+                      f"triage falls back to manifest-name heuristic")
+
+    manifest_stock_names = set()
+    manifest_path = mod_info.get('manifest_path')
+    if not manifest_path and mod_dir:
+        manifest_path = os.path.join(mod_dir, 'manifest.json')
+    if manifest_path and os.path.isfile(manifest_path):
+        try:
+            with open(manifest_path) as f:
+                manifest = json.load(f)
+            manifest_stock_names = {m['name'] for m in manifest.get('meshes', [])}
+        except Exception:
+            pass  # manifest missing/unreadable — fine, we'll treat everything as new
+
+    result = {}
+    for mesh in gltf.meshes:
+        baseline_pos = baseline.get(mesh.name)
+
+        if baseline_pos is not None:
+            if not mesh.primitives or mesh.primitives[0].attributes.POSITION is None:
+                result[mesh.name] = 'new'
+                continue
+            prim = mesh.primitives[0]
+            acc = gltf.accessors[prim.attributes.POSITION]
+            bv = gltf.bufferViews[acc.bufferView]
+            pos_bytes = blob[bv.byteOffset:bv.byteOffset + bv.byteLength]
+            vc = acc.count
+
+            if baseline_pos.shape != (vc, 3):
+                # Vertex count changed — definitive edit (or topology change).
+                result[mesh.name] = 'replaced'
+                continue
+            cur_pos = np.frombuffer(pos_bytes, dtype=np.float32).reshape(vc, 3)
+            max_diff = float(np.max(np.abs(cur_pos - baseline_pos)))
+            # Same threshold as _is_mesh_changed in cg3h_build.py (1e-4
+            # is well above Blender's ~1e-5 export noise and catches any
+            # visible vertex edit).
+            result[mesh.name] = 'replaced' if max_diff > 1e-4 else 'reference'
+        elif mesh.name in manifest_stock_names:
+            result[mesh.name] = 'replaced'
+        else:
+            result[mesh.name] = 'new'
+
+    return result
+
+
+def _resolve_merge_keep_map(char_mods, primary_mod_id):
+    """Decide per-mod which meshes to keep in the merge and what to call them.
+
+    Returns a dict {mod_id: {mesh_name: keep_name | None}} where keep_name
+    is the name to use in the merged GLB (same as original, or prefixed
+    for collision-renamed new meshes), or None if the mesh should be
+    dropped entirely.
+
+    Also returns the set of original mesh names that had to be
+    prefix-renamed for collision (consumed downstream by _merge_manifests
+    and new_mesh_routing remapping so they keep pointing at the right
+    meshes).
+
+    Resolution rules:
+      - 'reference' class: always dropped (it's authoring scaffolding).
+      - 'replaced' class with no cross-mod collision: kept unprefixed.
+      - 'replaced' class with cross-mod collision:
+          - variant merge (primary_mod_id set): only the primary's copy
+            survives, others drop.  Accessories can't silently override
+            the active variant's edits.
+          - main merge (primary_mod_id=None): biggest-by-vertex-count
+            wins the unprefixed stock name; losers drop from main and
+            will instead appear in their own variant build.
+      - 'new' class with no cross-mod collision: kept unprefixed.
+      - 'new' class with cross-mod collision: prefix-renamed on every
+        side (coincidental same-name across unrelated mods, today's
+        behaviour preserved).
+    """
+    per_mod_classes = {mi['id']: _triage_mod_meshes(mi) for mi in char_mods}
+    per_mod_gltf = {mi['id']: pygltflib.GLTF2().load(mi['glb_path']) for mi in char_mods}
+
+    # Accessory policy: mods without `mesh_replace` in their declared type
+    # never contribute 'replaced' meshes.  Their stock-named meshes are
+    # always reference geometry (Blender re-exports the scene alongside
+    # the new accessory mesh), and without a baseline the triage can't
+    # always tell apart unchanged-stock from a real edit.  Downgrading
+    # `replaced` to `reference` for non-replacer mods fixes this at the
+    # policy level — matches the v3.9 design where accessories only add.
+    for mi in char_mods:
+        mod_type = mi['mod'].get('type', '') if 'mod' in mi else ''
+        types = (mod_type if isinstance(mod_type, list)
+                 else [mod_type] if mod_type else [])
+        if 'mesh_replace' not in types:
+            classes = per_mod_classes[mi['id']]
+            for name, cls in list(classes.items()):
+                if cls == 'replaced':
+                    classes[name] = 'reference'
+
+    # Group mesh occurrences by (class, name) for collision detection.
+    replaced_occurrences = {}  # name -> [(mod_id, vertex_count), ...]
+    new_occurrences = {}       # name -> [mod_id, ...]
+    for mi in char_mods:
+        classes = per_mod_classes[mi['id']]
+        gltf = per_mod_gltf[mi['id']]
+        mesh_vc = {}
+        for mesh in gltf.meshes:
+            if not mesh.primitives or mesh.primitives[0].attributes.POSITION is None:
+                mesh_vc[mesh.name] = 0
+                continue
+            acc_idx = mesh.primitives[0].attributes.POSITION
+            mesh_vc[mesh.name] = gltf.accessors[acc_idx].count
+        for name, cls in classes.items():
+            if cls == 'replaced':
+                replaced_occurrences.setdefault(name, []).append(
+                    (mi['id'], mesh_vc.get(name, 0)))
+            elif cls == 'new':
+                new_occurrences.setdefault(name, []).append(mi['id'])
+
+    replaced_winners = {}  # stock_name -> winning mod_id
+    for name, occ in replaced_occurrences.items():
+        if len(occ) == 1:
+            replaced_winners[name] = occ[0][0]
+        elif primary_mod_id is not None:
+            # Variant merge: primary wins if it's in the contenders; else
+            # none of the accessories' edits land (we only want the
+            # variant's replaces, not accidental overrides).
+            ids = [mid for mid, _ in occ]
+            if primary_mod_id in ids:
+                replaced_winners[name] = primary_mod_id
+            # else: no winner — all get dropped.  Rare path, but safe.
+        else:
+            # Main merge: biggest vertex count wins.  Ties broken by
+            # alphabetical mod id for determinism.
+            occ_sorted = sorted(occ, key=lambda t: (-t[1], t[0]))
+            replaced_winners[name] = occ_sorted[0][0]
+            losers = [mid for mid, _ in occ_sorted[1:]]
+            print(f"    main-merge: '{name}' replaced by {len(occ)} mods; "
+                  f"winner={occ_sorted[0][0]} ({occ_sorted[0][1]} verts); "
+                  f"losers deferred to their own variants: {', '.join(losers)}")
+
+    new_collisions = {name for name, ids in new_occurrences.items() if len(ids) > 1}
+    if new_collisions:
+        for name in sorted(new_collisions):
+            print(f"    new-mesh collision: '{name}' used by "
+                  f"{', '.join(new_occurrences[name])} — prefix-renaming")
+
+    keep_map = {}
+    for mi in char_mods:
+        mod_id = mi['id']
+        classes = per_mod_classes[mod_id]
+        per_mesh = {}
+        for name, cls in classes.items():
+            if cls == 'reference':
+                per_mesh[name] = None
+            elif cls == 'replaced':
+                if replaced_winners.get(name) == mod_id:
+                    per_mesh[name] = name  # keep stock name; convert() will patch
+                else:
+                    per_mesh[name] = None  # loser or primary-absent case
+            else:  # 'new'
+                if name in new_collisions:
+                    per_mesh[name] = f"{mod_id}_{name}"
+                else:
+                    per_mesh[name] = name
+        keep_map[mod_id] = per_mesh
+
+    return keep_map, new_collisions
+
+
+def _merge_glbs(char_mods, output_dir, character, primary_mod_id=None):
     """Merge meshes, materials, textures, and animations from multiple GLBs.
 
-    Takes the first mod's GLB as the base, then appends NEW meshes and
-    animations from subsequent mods.  When two mods use the same mesh name,
-    both are kept with a ``{mod_id}_`` prefix (collision-only deduplication).
+    Triage each mod's meshes (via _triage_mod_meshes + _resolve_merge_keep_map)
+    before merging.  'reference' meshes drop; 'replaced' keep stock names for
+    convert() to patch; 'new' merge through, prefix-renamed only on cross-mod
+    name collision.
 
-    Returns (merged_path, collisions) where collisions is a set of original
-    mesh names that appeared in multiple mods and were prefixed.
+    primary_mod_id: set for variant builds (the one active mesh_replace mod
+    in the bundle).  Ensures the active variant wins any 'replaced' tiebreak
+    instead of an accessory accidentally overriding it.
+
+    Returns (merged_path, collisions) where collisions is the set of
+    originally-named 'new' meshes that had to be prefix-renamed because
+    multiple mods coincidentally used the same name.  'replaced' collisions
+    DON'T appear here — they're resolved in-place by the winner rule and
+    downstream code doesn't need to know.
     """
-    # ── Pre-scan: detect mesh name collisions across all mods ──
-    name_to_mods = {}
-    for mod_info in char_mods:
-        gltf = pygltflib.GLTF2().load(mod_info['glb_path'])
-        for mesh in gltf.meshes:
-            name_to_mods.setdefault(mesh.name, []).append(mod_info['id'])
-    collisions = {name for name, mods in name_to_mods.items() if len(mods) > 1}
+    keep_map, collisions = _resolve_merge_keep_map(char_mods, primary_mod_id)
 
-    if collisions:
-        for name in sorted(collisions):
-            mods_list = name_to_mods[name]
-            print(f"    WARNING: mesh '{name}' used by {', '.join(mods_list)} "
-                  f"— renaming to avoid collision")
+    def _kept(mod_id, name):
+        """Return the target name for this mesh in the merged GLB, or None
+        if it should be skipped.  Any mesh not mentioned in keep_map (test
+        harnesses that feed minimal mod_info dicts) falls through
+        unchanged."""
+        per_mesh = keep_map.get(mod_id, {})
+        return per_mesh.get(name, name) if name not in per_mesh else per_mesh[name]
 
     # ── Load base GLB ──
     base_mod = char_mods[0]
     base_gltf = pygltflib.GLTF2().load(base_mod['glb_path'])
 
-    # Retroactive rename of base mod's colliding meshes
-    if collisions:
+    # Drop base mod's dropped-class meshes, rename collision-renamed ones.
+    # Work backwards so indices stay valid while we mutate base_gltf.meshes.
+    base_rename_map = {}  # old_mesh_idx -> new_name (or None to drop)
+    for i in range(len(base_gltf.meshes) - 1, -1, -1):
+        mesh = base_gltf.meshes[i]
+        target = _kept(base_mod['id'], mesh.name)
+        if target is None:
+            base_rename_map[i] = None
+        elif target != mesh.name:
+            base_rename_map[i] = target
+            mesh.name = target
+
+    if any(v is None for v in base_rename_map.values()):
+        # Rebuild meshes/nodes/scenes without the dropped ones.
+        dropped_indices = {i for i, v in base_rename_map.items() if v is None}
+        kept_meshes = []
+        old_to_new_mesh_idx = {}
         for i, mesh in enumerate(base_gltf.meshes):
-            if mesh.name in collisions:
-                new_name = f"{base_mod['id']}_{mesh.name}"
-                mesh.name = new_name
-                for node in base_gltf.nodes:
-                    if node.mesh == i:
-                        node.name = new_name
-                        break
+            if i in dropped_indices:
+                continue
+            old_to_new_mesh_idx[i] = len(kept_meshes)
+            kept_meshes.append(mesh)
+        base_gltf.meshes = kept_meshes
+
+        kept_nodes = []
+        old_to_new_node_idx = {}
+        for i, node in enumerate(base_gltf.nodes):
+            if node.mesh is not None and node.mesh in dropped_indices:
+                continue
+            old_to_new_node_idx[i] = len(kept_nodes)
+            if node.mesh is not None:
+                node.mesh = old_to_new_mesh_idx[node.mesh]
+            kept_nodes.append(node)
+        base_gltf.nodes = kept_nodes
+
+        for scene in (base_gltf.scenes or []):
+            scene.nodes = [old_to_new_node_idx[n]
+                           for n in scene.nodes
+                           if n in old_to_new_node_idx]
+
+    # Rename nodes whose mesh got renamed (for authoring cleanliness only)
+    for node in base_gltf.nodes:
+        if node.mesh is None:
+            continue
+        if node.mesh < len(base_gltf.meshes):
+            node.name = base_gltf.meshes[node.mesh].name
 
     base_mesh_names = {m.name for m in base_gltf.meshes}
 
@@ -335,16 +581,23 @@ def _merge_glbs(char_mods, output_dir, character):
                 base_gltf.materials = []
             base_gltf.materials.append(new_mat)
 
-        # Copy new meshes with correct material remapping
+        # Copy each mesh the triage said we should keep.  Dropped meshes
+        # (reference geometry, main-merge replace-losers, variant-merge
+        # non-primary replaces) are skipped outright.
         for mesh in other_gltf.meshes:
             original_name = mesh.name
-            merge_name = original_name
-            if original_name in collisions:
-                merge_name = f"{mod_info['id']}_{original_name}"
+            merge_name = _kept(mod_info['id'], original_name)
+            if merge_name is None:
+                continue
 
             if merge_name in base_mesh_names:
-                # Shouldn't happen after dedup, but guard against it
-                print(f"    WARNING: mesh '{merge_name}' already exists, skipping")
+                # With the triage, two mods emitting the same mesh name is
+                # only possible when (a) it's a 'replaced' winner that the
+                # base mod and another mod both produced (shouldn't happen —
+                # winner is unique), or (b) a genuine same-name clash we
+                # missed.  Either way, skip with a diagnostic.
+                print(f"    WARNING: mesh '{merge_name}' already in merged "
+                      f"GLB, skipping {mod_info['id']}'s copy")
                 continue
 
             for prim in mesh.primitives:
@@ -539,8 +792,12 @@ def _build_variant_entries(character, variant_mods, accessory_mods,
                 # Single mod — no merge needed, just use its GLB directly.
                 variant_glb = bundle[0]['glb_path']
             else:
+                # Pass mod_id as the primary so accessory-supplied reference
+                # geometry (their replaced copies of stock meshes) loses
+                # any collision tiebreak to the variant's actual edits.
                 variant_glb, variant_collisions = _merge_glbs(
-                    bundle, builder_dir, f"{character}_{mod_id}"
+                    bundle, builder_dir, f"{character}_{mod_id}",
+                    primary_mod_id=mod_id,
                 )
         except Exception as e:
             print(f"    {mod_id}: variant GLB merge failed: {e}")
@@ -727,6 +984,7 @@ def scan_and_build_all(plugins_data_dir, game_dir=None, only_character=None):
             'mod': mod,
             'mod_dir': mod_dir,
             'glb_path': glb_path,
+            'mod_json_path': mod_json_path,
             'manifest_path': os.path.join(mod_dir, 'manifest.json'),
         }
 
@@ -850,6 +1108,40 @@ def scan_and_build_all(plugins_data_dir, game_dir=None, only_character=None):
             vmap.setdefault(entry_name, {})["stock"] = _variant_entry_name(character, "Stock", idx)
         return vmap
 
+    def _verify_variants_in_gpk(vmap, gpk_path, character):
+        """Drop claimed variants whose entry names aren't actually in the
+        merged GPK on disk.  Guards against the trap where a previous
+        build produced a variant-less GPK (e.g. because mod.json.type was
+        temporarily clobbered to "") but the cache key was still valid,
+        leaving status.json claiming variants the runtime can't resolve
+        — observed as swap_to_variant hash=0 with no user-visible error.
+        Returns the filtered map."""
+        try:
+            from gpk_pack import extract_gpk_raw
+            gpk_entries = set(extract_gpk_raw(gpk_path).keys())
+        except Exception as e:
+            print(f"  {character}: WARNING could not verify variants "
+                  f"against GPK: {e}")
+            return vmap
+        filtered = {}
+        dropped = []
+        for stock_entry, variants in vmap.items():
+            kept = {k: v for k, v in variants.items() if v in gpk_entries}
+            for k, v in variants.items():
+                if v not in gpk_entries:
+                    dropped.append(f"{k}->{v}")
+            if kept:
+                filtered[stock_entry] = kept
+        if dropped:
+            print(f"  {character}: WARNING {len(dropped)} claimed "
+                  f"variant(s) missing from GPK, stripped from "
+                  f"status.json: {', '.join(dropped[:3])}"
+                  f"{'...' if len(dropped) > 3 else ''}")
+            print(f"  {character}: GPK is likely stale — delete "
+                  f"{os.path.basename(gpk_path)}.cache_key and relaunch "
+                  f"to force rebuild")
+        return filtered
+
     def _record(char, state, char_mods, gpk_path, error, duration_ms,
                 disabled_mods=None):
         # mod_details lists ALL mods on this character (enabled + disabled)
@@ -886,7 +1178,13 @@ def scan_and_build_all(plugins_data_dir, game_dir=None, only_character=None):
         current_key = ""
         for mi in sorted(char_mods, key=lambda m: m['id']):
             glb_mtime = os.path.getmtime(mi['glb_path']) if os.path.isfile(mi['glb_path']) else 0
-            current_key += f"{mi['id']}:{glb_mtime}\n"
+            mod_json_mtime = (os.path.getmtime(mi['mod_json_path'])
+                              if os.path.isfile(mi.get('mod_json_path', '')) else 0)
+            # Include mod.json mtime so type/routing edits invalidate
+            # the cache.  Without this, a user whose mod.json type
+            # field gets repaired (e.g. "" -> "mesh_replace") sees the
+            # OLD broken GPK reused because only glb_mtime was tracked.
+            current_key += f"{mi['id']}:{glb_mtime}:{mod_json_mtime}\n"
         for mi in sorted(char_disabled, key=lambda m: m['id']):
             current_key += f"disabled:{mi['id']}\n"
 
@@ -912,16 +1210,17 @@ def scan_and_build_all(plugins_data_dir, game_dir=None, only_character=None):
                 cached_vmap = _variants_map_for(character, [
                     mi for mi in char_mods if _classify_mod(mi['mod'])[0]
                 ])
+                # Cross-check against the GPK's real entry list — see
+                # _verify_variants_in_gpk docstring for the failure mode
+                # this guards against.
+                cached_vmap = _verify_variants_in_gpk(
+                    cached_vmap, output_gpk, character)
                 if cached_vmap:
                     status_characters[character]["variants"] = cached_vmap
                 continue
             else:
                 print(f"  {character}: mods changed, rebuilding...")
                 os.unlink(output_gpk)
-        elif os.path.isfile(output_gpk):
-            # No cache key file — legacy cache, rebuild
-            print(f"  {character}: no cache key, rebuilding...")
-            os.unlink(output_gpk)
 
         original_gpk = os.path.join(gpk_dir, f"{character}.gpk")
         sdb_path = os.path.join(sdb_dir, f"{character}.sdb")
@@ -1049,7 +1348,10 @@ def scan_and_build_all(plugins_data_dir, game_dir=None, only_character=None):
             _record(character, "built", char_mods, output_gpk, None, duration_ms,
                     disabled_mods=char_disabled)
             if variants_map:
-                status_characters[character]["variants"] = variants_map
+                variants_map = _verify_variants_in_gpk(
+                    variants_map, output_gpk, character)
+                if variants_map:
+                    status_characters[character]["variants"] = variants_map
         else:
             failed += 1
             _record(character, "failed", char_mods, None,

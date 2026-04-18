@@ -36,30 +36,15 @@ function M.load_textures(mod)
         return
     end
 
-    -- v3.7 renamed the PKG prefix from "CG3HBuilder-" to "Enderclem-CG3HBuilder-"
-    -- so H2M's LoadPackages filename check can find a registered module
-    -- GUID in the stem.  Loading a legacy-named PKG would HARD CRASH the
-    -- game (H2M calls TerminateProcess on a bad filename), so we do a
-    -- one-time on-disk rename when we see the legacy name.  After the
-    -- migration the mod is indistinguishable from a v3.7 build.
+    -- PKG filename must start with "Enderclem-CG3HBuilder-" so H2M's
+    -- LoadPackages filename check can find a registered module GUID in
+    -- the stem — bad filenames hard-crash the game (TerminateProcess).
     local pkg_name = PKG_PREFIX .. "-" .. mod.id
     local pkg_path = rom.path.combine(mod.path, pkg_name)
     local pkg_file = pkg_path .. ".pkg"
 
     if not rom.path.exists(pkg_file) then
-        local legacy_file = rom.path.combine(mod.path, "CG3HBuilder-" .. mod.id .. ".pkg")
-        if rom.path.exists(legacy_file) then
-            local ok = os.rename(legacy_file, pkg_file)
-            if ok then
-                rom.log.info(LOG_PREFIX .. "   Migrated legacy PKG for " .. mod.name)
-            else
-                rom.log.info(LOG_PREFIX .. "   WARN: could not migrate legacy PKG for "
-                    .. mod.name .. " — rebuild the mod with v3.7 cg3h_build.py")
-                return
-            end
-        else
-            return
-        end
+        return
     end
 
     -- Method A: biome overrides (new texture names)
@@ -285,8 +270,10 @@ end
 -- rom.data.set_draw_visible to suppress draw calls per mesh entry.
 -- Instant, no rebuild, no restart, no data mutation.
 
---- Check whether the H2M draw-gate API is available.  Returns false on
--- older H2M builds that lack the DoDraw3D hook.
+--- Check whether the H2M draw-gate API is available.  The fork DLL
+-- exposes it via draw.cpp; if this returns false, the fork failed to
+-- load (user installed upstream Hell2Modding instead of our fork, or
+-- the DLL in Ship/ is stale).
 function M.has_draw_gate()
     return type(rom.data.set_draw_visible) == "function"
 end
@@ -401,56 +388,10 @@ function M.apply_visibility(state)
     end
 end
 
--- ── v3.8: per-character rebuild ────────────────────────────────────────
-
---- Force-rebuild one character.  Blocks until the builder subprocess
--- returns.  The builder deletes the cache key first, so this always
--- fires a fresh build regardless of cache state.
-function M.rebuild_character(character, ctx)
-    if not rom.path.exists(ctx.builder_path) then
-        rom.log.info(LOG_PREFIX .. " ERROR: cg3h_builder.exe not found at "
-            .. ctx.builder_path)
-        return false
-    end
-    rom.log.info(LOG_PREFIX .. " Rebuilding " .. character .. "...")
-    local cmd = 'cmd /c ""' .. ctx.builder_path .. '" --scan-all "'
-        .. ctx.plugins_data_dir .. '" --character "' .. character .. '""'
-    os.execute(cmd)
-    rom.log.info(LOG_PREFIX .. " Rebuild complete for " .. character)
-    return true
-end
-
---- Rebuild + register GPK redirect for next launch.  The rebuilt GPK
--- takes effect on the next game restart (LoadModelData not safe
--- mid-session).
-function M.hot_reload_character(character, ctx, state)
-    local gpk_file = character .. ".gpk"
-    local gpk_path = rom.path.combine(ctx.builder_data_dir, gpk_file)
-
-    if rom.path.exists(gpk_path) then
-        rom.data.add_granny_file(gpk_file, gpk_path)
-        rom.log.info(LOG_PREFIX .. " [rebuild] re-registered GPK redirect: " .. gpk_file)
-    end
-
-    rom.log.info(LOG_PREFIX .. " [rebuild] " .. character
-        .. " rebuilt — restart the game to see mesh changes")
-    return "restart"
-end
-
---- Single-call path used by the UI Rebuild button: rebuild the
--- character, re-read status.  Returns outcome string.
-function M.trigger_rebuild_and_reload(character, ctx, state)
-    local ok = M.rebuild_character(character, ctx)
-    if not ok then
-        return nil
-    end
-
-    -- Re-read the status JSON so the UI sees fresh per-character state.
-    if state then
-        state.load_status(ctx.builder_data_dir)
-    end
-
-    return M.hot_reload_character(character, ctx, state)
-end
+-- v3.9 removed mid-session rebuild path.  LoadModelData isn't safe after
+-- the initial load, so a runtime rebuild couldn't take effect until the
+-- next game restart anyway — and the builder already runs on plugin init
+-- every launch (see run_builder above).  Toggles are handled by the
+-- draw-gate; adding/removing mods takes effect on the next restart.
 
 return M

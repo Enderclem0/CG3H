@@ -253,14 +253,8 @@ def test_duplicate_mesh_names():
 # 4. Importer mesh name normalization
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def test_normalize_strips_lod():
-    """Legacy _LOD suffixes should be stripped."""
-    from gltf_to_gr2 import _normalize_mesh_name
-    assert _normalize_mesh_name('Melinoe_MeshShape_LOD1') == 'melinoe_meshshape'
-
-
 def test_normalize_strips_numeric():
-    """New _1, _2 suffixes should be stripped."""
+    """_1, _2 part-split suffixes should be stripped."""
     from gltf_to_gr2 import _normalize_mesh_name
     assert _normalize_mesh_name('Melinoe_MeshShape_2') == 'melinoe_meshshape'
 

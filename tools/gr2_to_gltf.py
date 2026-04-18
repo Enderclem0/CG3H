@@ -823,7 +823,7 @@ def extract_animations(dll, gpk_entries, sdb_bytes, anim_filter=None,
 # ─────────────────────────── glTF export ─────────────────────────────────────
 
 def build_gltf(character_name, mesh_data_list, mesh_names, bones, animations=None,
-               texture_png_bytes=None, texture_map=None):
+               texture_map=None):
     gltf = GLTF2()
     gltf.scene = 0
     gltf.scenes = [Scene(nodes=[])]
@@ -892,13 +892,11 @@ def build_gltf(character_name, mesh_data_list, mesh_names, bones, animations=Non
     skin_idx = 0
 
     # ── Textures + Materials ──
-    # texture_map: {tex_base_name: (png_bytes, mesh_indices)} — multi-texture support
-    # texture_png_bytes: legacy single-texture (backwards compat)
+    # texture_map: {tex_base_name: (png_bytes, mesh_indices)} from PKG extraction
     tex_name_to_mat = {}  # tex_base_name → glTF material index
     mesh_idx_to_mat = {}  # GR2 mesh index → glTF material index
 
     if texture_map:
-        # Multi-texture: each unique texture gets its own image/material
         for tex_name, (png_bytes, mesh_indices) in texture_map.items():
             png_bv_offset = sum(len(b) for b in all_buffers)
             pad = (4 - (len(png_bytes) % 4)) % 4
@@ -929,38 +927,6 @@ def build_gltf(character_name, mesh_data_list, mesh_names, bones, animations=Non
             tex_name_to_mat[tex_name] = mat_idx
             for mi in mesh_indices:
                 mesh_idx_to_mat[mi] = mat_idx
-
-    elif texture_png_bytes is not None:
-        # Legacy single-texture fallback
-        png_bv_offset = sum(len(b) for b in all_buffers)
-        pad = (4 - (len(texture_png_bytes) % 4)) % 4
-        all_buffers.append(texture_png_bytes + b'\x00' * pad)
-        png_bv_idx = len(gltf.bufferViews)
-        gltf.bufferViews.append(BufferView(
-            buffer=0, byteOffset=png_bv_offset, byteLength=len(texture_png_bytes),
-        ))
-
-        img_idx = len(gltf.images)
-        gltf.images.append(pygltflib.Image(
-            bufferView=png_bv_idx, mimeType="image/png", name=f"{character_name}_Color",
-        ))
-
-        tex_idx = len(gltf.textures)
-        gltf.textures.append(pygltflib.Texture(source=img_idx))
-
-        default_mat = len(gltf.materials)
-        gltf.materials.append(pygltflib.Material(
-            name=f"Mat_{character_name}",
-            pbrMetallicRoughness=pygltflib.PbrMetallicRoughness(
-                baseColorTexture=pygltflib.TextureInfo(index=tex_idx),
-                metallicFactor=0.0,
-                roughnessFactor=1.0,
-            ),
-            doubleSided=True,
-        ))
-        # Assign to all non-outline/shadow meshes
-        for i in range(len(mesh_names)):
-            mesh_idx_to_mat[i] = default_mat
 
     # ── Mesh nodes ──
     for mesh_i, (mesh_data, mesh_name) in enumerate(zip(mesh_data_list, mesh_names)):
@@ -1862,7 +1828,6 @@ def main():
 
     # ── Textures ──
     texture_map = None  # {tex_name: (png_bytes, [mesh_indices])}
-    texture_png = None  # legacy single-texture fallback
     if args.textures:
         print("[*] Extracting 3D model textures", flush=True)
         pkg_dir = args.pkg_dir
@@ -1964,12 +1929,11 @@ def main():
     step = "6/6" if (args.animations or args.anim_filter) else "5/5"
     print(f"[{step}] Building glTF -> {out_path}", flush=True)
     gltf = build_gltf(args.name, mesh_data_list, mesh_names, bones,
-                       animations=anim_data, texture_png_bytes=texture_png,
-                       texture_map=texture_map)
+                       animations=anim_data, texture_map=texture_map)
     print("  Saving GLB file...", flush=True)
     gltf.save(out_path)
     anim_msg = f", {len(anim_data)} animations" if anim_data else ""
-    tex_msg = ", textured" if (texture_map or texture_png) else ""
+    tex_msg = ", textured" if texture_map else ""
     print(f"\nDone!  {len(mesh_data_list)} meshes, {len(bones)} bones{anim_msg}{tex_msg} -> {out_path}")
 
     # Write manifest for reimport

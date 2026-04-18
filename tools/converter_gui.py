@@ -88,6 +88,49 @@ class App:
                 return c
         return None
 
+    def _populate_r2modman_cache(self, r2_dir, mod_id, version, mod_dir, build_dir):
+        """Mirror the deployed plugin + icon + manifest into r2modman's
+        cache so the profile UI renders the tile with an icon and
+        display name.  r2modman derives cache root from the profile
+        layout — one level up from the ReturnOfModding dir."""
+        profiles_idx = r2_dir.lower().find(os.sep + "profiles" + os.sep)
+        if profiles_idx < 0:
+            return  # unfamiliar layout — skip silently
+        r2_root = r2_dir[:profiles_idx]
+        cache_dir = os.path.join(r2_root, "cache", mod_id, version)
+        if os.path.isdir(cache_dir):
+            shutil.rmtree(cache_dir)
+        os.makedirs(cache_dir, exist_ok=True)
+        # Don't pre-create plugins/<mod_id>/ or plugins_data/<mod_id>/ —
+        # shutil.copytree below will create them, and a pre-existing
+        # destination makes it error on Windows.
+
+        # Top-level manifest the r2modman UI reads for title/author/etc.
+        # Prefer the one the build pipeline already generated.
+        manifest_src = os.path.join(build_dir, "manifest.json")
+        if not os.path.isfile(manifest_src):
+            manifest_src = os.path.join(mod_dir, "manifest.json")
+        if os.path.isfile(manifest_src):
+            shutil.copy2(manifest_src, os.path.join(cache_dir, "manifest.json"))
+
+        # Icon: build/ > workspace > default CG3H icon (repo root).
+        for candidate in (
+            os.path.join(build_dir, "icon.png"),
+            os.path.join(mod_dir, "icon.png"),
+            os.path.join(SCRIPT_DIR, "..", "icon.png"),
+        ):
+            if os.path.isfile(candidate):
+                shutil.copy2(candidate, os.path.join(cache_dir, "icon.png"))
+                break
+
+        # Mirror the deployed plugin + plugins_data under the cache so
+        # r2modman can reinstall from cache on profile rebuild.
+        for subdir in ("plugins", "plugins_data"):
+            src = os.path.join(r2_dir, subdir, mod_id)
+            if os.path.isdir(src):
+                dst = os.path.join(cache_dir, subdir, mod_id)
+                shutil.copytree(src, dst)
+
     # -- Config persistence ----------------------------------------------------
 
     def _load_config(self):
@@ -568,13 +611,17 @@ class App:
                 m.setdefault("metadata", {})["name"] = mod_name
             m.setdefault("metadata", {})["author"] = author
 
-            # Write new_mesh_routing from GUI checkboxes
+            # Write new_mesh_routing from GUI checkboxes.  Always write
+            # an entry per new mesh — even when it covers every
+            # mesh_entries value — because the runtime per-mesh
+            # visibility gate (rom.data.set_mesh_visible) looks the mesh
+            # name up via this map.  Empty selection is the only case we
+            # skip; a full-coverage list is valid and required.
             if self._build_routing_vars:
-                mesh_entries = m.get("target", {}).get("mesh_entries", [])
                 routing = {}
                 for mesh_name, entry_vars in self._build_routing_vars.items():
                     selected = [e for e, v in entry_vars.items() if v.get()]
-                    if selected and set(selected) != set(mesh_entries):
+                    if selected:
                         routing[mesh_name] = selected
                 if routing:
                     m.setdefault("target", {})["new_mesh_routing"] = routing
@@ -688,6 +735,24 @@ class App:
         mod_json_dst = os.path.join(r2_dir, "plugins_data", mod_id, "mod.json")
         if os.path.isfile(mod_json_src):
             shutil.copy2(mod_json_src, mod_json_dst)
+
+        # Populate r2modman's cache so the mod tile shows an icon + name in
+        # the profile UI.  Without this, r2modman renders the mod with a
+        # broken-image placeholder and the namespace-hyphen-name slug
+        # instead of the authored display name.  Mirrors the layout
+        # r2modman creates when it installs a mod from Thunderstore:
+        #
+        #     cache/<Namespace>-<Name>/<version>/
+        #         icon.png
+        #         manifest.json
+        #         plugins/<mod_id>/...
+        #         plugins_data/<mod_id>/...
+        try:
+            self._populate_r2modman_cache(r2_dir, mod_id, version, mod_dir, build_dir)
+        except Exception as e:
+            self._log_write_ui(self._build_log,
+                               f"\n(cache population failed: {e} — "
+                               f"mod still installed; icon will be missing)\n")
 
         # Register in r2modman's mods.yml so it appears in the mod list
         try:

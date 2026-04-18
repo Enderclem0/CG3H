@@ -752,17 +752,6 @@ def test_conflict_different_textures_ok():
     assert len(errors) == 0
 
 
-def test_conflict_texture_replace_plus_mesh_patch_ok():
-    """texture_replace + mesh_patch = independent, no conflict."""
-    from mod_info import check_conflicts
-    group = _make_mod_group([
-        ('mod_a', 'ModA', 'texture_replace', ['SomeTex']),
-        ('mod_b', 'ModB', 'mesh_patch', []),
-    ])
-    warnings, errors = check_conflicts(group)
-    assert len(errors) == 0
-
-
 # =============================================================================
 # Runner
 # =============================================================================

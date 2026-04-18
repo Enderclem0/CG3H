@@ -16,12 +16,10 @@ local LOG_PREFIX = "[CG3H]"
 
 -- ── Path discovery ─────────────────────────────────────────────────────
 -- _PLUGIN.plugins_data_mod_folder_path is unreliable under r2modman
--- folder renames, so derive the data folder from the plugin folder.
--- We support both layouts:
---   flat (v3.7+):       plugins/Enderclem-CG3HBuilder/main.lua
---   legacy (pre-v3.7):  plugins/Enderclem-CG3HBuilder/CG3HBuilder/main.lua
--- Anchoring on the "plugins_data" segment handles both without the
--- fragile "strip N segments" trick used earlier.
+-- folder renames, so derive the data folder from the plugin folder
+-- by swapping the "/plugins/" segment to "/plugins_data/".  Works
+-- regardless of whatever nesting r2modman happens to apply on ZIP
+-- import (see project_r2modman_layout.md).
 
 local plugin_folder = _PLUGIN.plugins_mod_folder_path
 local data_folder = plugin_folder:gsub("[/\\]plugins[/\\]", "/plugins_data/")
@@ -101,10 +99,9 @@ runtime.register_variants(mod_state, runtime_ctx)
 -- returns 0 before the first scene loads.  The builder respects mod_state
 -- at build time, so disabled mods are already excluded from the GPK.
 
-if runtime.has_draw_gate() then
-    rom.log.info(LOG_PREFIX .. " Draw-gate available — toggle is instant")
-else
-    rom.log.info(LOG_PREFIX .. " Draw-gate unavailable — toggle requires rebuild + restart")
+if not runtime.has_draw_gate() then
+    rom.log.info(LOG_PREFIX
+        .. " ERROR: draw-gate binding missing — Enderclem-Hell2ModdingCG3H fork is required")
 end
 
 local variant_count = 0
@@ -128,15 +125,11 @@ ui.init(mod_state, {
         if not character then
             return nil
         end
-
-        -- Try the draw-gate for instant visual toggle.  Falls back to
-        -- rebuild + restart on older H2M without the DoDraw3D hook.
-        local outcome = runtime.toggle_mod_visibility(mod_id, enabled, mod_state)
-        if outcome then
-            return outcome
-        end
-
-        return runtime.trigger_rebuild_and_reload(character, runtime_ctx, mod_state)
+        -- Draw-gate is always available (the fork is a hard dependency as
+        -- of v3.9), so toggles are live.  Mid-session GPK rebuilds were
+        -- never useful anyway — LoadModelData is not safe mid-session and
+        -- the plugin-init path already rebuilds GPKs on every restart.
+        return runtime.toggle_mod_visibility(mod_id, enabled, mod_state)
     end,
     -- v3.9: per-entry body picker.
     on_set_variant_entry = function(character, entry_name, mod_id)
@@ -150,9 +143,6 @@ ui.init(mod_state, {
             mod_state.set_active_variant(character, entry_name, mod_id, builder_data_dir)
         end
         return runtime.swap_character_all(character, mod_id, mod_state)
-    end,
-    on_rebuild = function(character)
-        return runtime.trigger_rebuild_and_reload(character, runtime_ctx, mod_state)
     end,
     -- v3.9 Step 4.5: apply default/persisted variant selections on the
     -- first ImGui frame.  Can't run at plugin-init time because model

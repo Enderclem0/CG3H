@@ -25,6 +25,7 @@ bl_info = {
     "category": "Import-Export",
 }
 
+import base64
 import bpy
 import importlib
 import json
@@ -598,6 +599,25 @@ class CG3H_OT_Import(bpy.types.Operator, ImportHelper):
             except OSError:
                 pass  # temp manifest cleanup is best-effort
 
+        # Capture the baseline positions file the exporter writes alongside
+        # the manifest.  cg3h_build.py::_is_mesh_changed uses it for a
+        # position-tolerance edit check; without it, every Blender-authored
+        # mesh_replace looks "unchanged" and auto-detection collapses to
+        # vertex-count comparison.  We base64 it onto a scene prop because
+        # it's a binary .npz and Blender StringProperty is utf-8 only; the
+        # export operator decodes + writes it next to the exported GLB.
+        baseline_path = os.path.join(os.path.dirname(tmp_glb), ".baseline_positions.npz")
+        if os.path.isfile(baseline_path):
+            try:
+                with open(baseline_path, "rb") as bf:
+                    context.scene.cg3h_baseline_b64 = base64.b64encode(bf.read()).decode("ascii")
+            except Exception as e:
+                self.report({'WARNING'}, f"Baseline read failed: {e}")
+            try:
+                os.unlink(baseline_path)
+            except OSError:
+                pass
+
         bpy.ops.import_scene.gltf(filepath=tmp_glb)
 
         try:
@@ -720,6 +740,20 @@ class CG3H_OT_Export(bpy.types.Operator):
             self.report({'ERROR'}, "glTF export produced no file. Select meshes + armature first.")
             return {'CANCELLED'}
 
+        # Emit the baseline positions the importer captured onto the scene,
+        # so cg3h_build.py's position-tolerance edit check has a reference
+        # to compare against.  Without this, the build stage has no way to
+        # tell a vertex-reshape apart from an untouched stock mesh (vertex
+        # count is the only signal left), and the mesh_replace type-detect
+        # collapses.
+        baseline_b64 = context.scene.get("cg3h_baseline_b64", "")
+        if baseline_b64:
+            try:
+                with open(os.path.join(workspace, ".baseline_positions.npz"), "wb") as bf:
+                    bf.write(base64.b64decode(baseline_b64))
+            except Exception as e:
+                self.report({'WARNING'}, f"Baseline write failed: {e}")
+
         # Build mesh entry list and per-mesh routing from CG3H panel properties
         entries_str = context.scene.get("cg3h_entries", "")
         all_entries = entries_str.split(",") if entries_str else [f"{character}_Mesh"]
@@ -734,9 +768,16 @@ class CG3H_OT_Export(bpy.types.Operator):
             n for n in context.scene.get("cg3h_original_meshes", "").split(",") if n
         )
 
-        # Auto-detect mod type from the selected meshes.  A mesh whose
-        # name matches a stock mesh (was in the imported GR2) is a
-        # replacement; any other mesh is a new addition.
+        # Auto-detect mod type from the selected meshes.  A stock-named
+        # mesh whose vertex count differs from the manifest is an edit
+        # (mesh_replace); count-match is treated as untouched reference
+        # geometry (the build stage re-checks against baseline and will
+        # heal a stale mesh_replace tag either way).  Any non-stock mesh
+        # is a new addition (mesh_add).
+        manifest = _get_manifest(context) or {}
+        manifest_vc = {m['name']: m.get('vertex_count')
+                       for m in manifest.get('meshes', [])}
+
         has_replace = False
         has_add = False
         new_mesh_routing = {}
@@ -744,7 +785,10 @@ class CG3H_OT_Export(bpy.types.Operator):
             if obj.type != 'MESH':
                 continue
             if obj.name in original_meshes:
-                has_replace = True
+                expected_vc = manifest_vc.get(obj.name)
+                cur_vc = len(obj.data.vertices) if obj.data else 0
+                if expected_vc is not None and cur_vc != expected_vc:
+                    has_replace = True
                 continue  # Original meshes routed by manifest
             has_add = True
             # Auto-init if no entry properties (mesh added without clicking Init)
@@ -1196,6 +1240,7 @@ def register():
     bpy.types.Scene.cg3h_character = StringProperty(default="")
     bpy.types.Scene.cg3h_original_meshes = StringProperty(default="")
     bpy.types.Scene.cg3h_manifest_json = StringProperty(default="")
+    bpy.types.Scene.cg3h_baseline_b64 = StringProperty(default="")
     bpy.types.Scene.cg3h_bone_preset = EnumProperty(
         name="Bone Preset",
         description="Hide/show bones by entry or template — pick a preset to "
@@ -1221,7 +1266,7 @@ def unregister():
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
     for prop in ("cg3h_entries", "cg3h_character", "cg3h_original_meshes",
-                 "cg3h_manifest_json", "cg3h_bone_preset"):
+                 "cg3h_manifest_json", "cg3h_baseline_b64", "cg3h_bone_preset"):
         if hasattr(bpy.types.Scene, prop):
             delattr(bpy.types.Scene, prop)
     for cls in reversed(classes):

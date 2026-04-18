@@ -33,9 +33,9 @@ local function _colored_state(state)
     ImGui.TextColored(d.r, d.g, d.b, 1.0, d.icon .. " " .. state)
 end
 
---- Invoke a context callback that returns a hot-reload outcome string,
--- then turn that outcome into a transient banner the window shows until
--- the next refresh.  Centralised so toggle + rebuild share behaviour.
+--- Invoke a context callback that returns a toggle outcome string, then
+-- turn that outcome into a transient banner the window shows until the
+-- next refresh.
 local function _run_and_banner(cb, label)
     if not cb then return end
     local outcome = cb()
@@ -45,15 +45,9 @@ local function _run_and_banner(cb, label)
     elseif outcome == "transition" then
         banner = { kind = "transition",
                    text = label .. ": changes apply on next area transition." }
-    elseif outcome == "restart" then
-        banner = { kind = "transition",
-                   text = label .. ": rebuilt — restart the game to see changes." }
-    elseif outcome == "error" then
+    elseif outcome == "error" or outcome == nil then
         banner = { kind = "error",
-                   text = label .. ": hot-reload failed (see console)." }
-    elseif outcome == nil then
-        banner = { kind = "error",
-                   text = label .. ": rebuild failed (see console)." }
+                   text = label .. ": toggle failed (see console)." }
     else
         banner = { kind = "error",
                    text = label .. ": unknown outcome (" .. tostring(outcome) .. ")" }
@@ -101,13 +95,6 @@ local function _draw_characters_tab(state, ctx)
         if ImGui.CollapsingHeader(label) then
             ImGui.Indent()
             _colored_state(rec.state)
-
-            ImGui.SameLine()
-            if ImGui.SmallButton("Rebuild##" .. char) then
-                _run_and_banner(function()
-                    return ctx.on_rebuild and ctx.on_rebuild(char)
-                end, char)
-            end
 
             if rec.gpk_path then
                 ImGui.TextDisabled("GPK: " .. rec.gpk_path)
@@ -423,7 +410,7 @@ end
 
 --- Register the ImGui callbacks with H2M.
 -- @param state   the mod_state table (read-only from here on)
--- @param ctx     { on_refresh = fn, on_toggle_mod = fn(id, enabled), on_rebuild = fn(char) }
+-- @param ctx     { on_refresh = fn, on_toggle_mod = fn(id, enabled), ... }
 function M.init(state, ctx)
     ctx = ctx or {}
 

@@ -263,16 +263,17 @@ def _infer_operations(mod):
     meshes = mod.get('meshes', [])
     textures = assets.get('textures', [])
 
-    # Explicit type (backwards compat)
+    # `type` may be a single string or a list of strings (for mods that
+    # declare multiple ops, e.g. `["mesh_add", "mesh_replace"]`).
     if isinstance(mod_type, list):
         for t in mod_type:
             if t == 'mesh_add': ops.add('adds_meshes')
-            elif t == 'mesh_replace' or t == 'mesh_patch': ops.add('replaces_meshes')
+            elif t == 'mesh_replace': ops.add('replaces_meshes')
             elif t == 'texture_replace': ops.add('replaces_textures')
             elif t == 'animation_patch': ops.add('patches_animations')
     elif mod_type:
         if mod_type == 'mesh_add': ops.add('adds_meshes')
-        elif mod_type == 'mesh_replace' or mod_type == 'mesh_patch': ops.add('replaces_meshes')
+        elif mod_type == 'mesh_replace': ops.add('replaces_meshes')
         elif mod_type == 'texture_replace': ops.add('replaces_textures')
         elif mod_type == 'animation_patch': ops.add('patches_animations')
 
@@ -464,6 +465,7 @@ def _sync_mod_json(mod_dir):
                 baseline = dict(np.load(baseline_path)) if os.path.isfile(baseline_path) else {}
             except Exception:
                 baseline = {}
+            baseline_available = bool(baseline)
 
             has_new = False
             has_edited = False
@@ -482,6 +484,18 @@ def _sync_mod_json(mod_dir):
                 changed = True
             if has_edited and 'mesh_replace' not in types:
                 types.add('mesh_replace')
+                changed = True
+            # Heal spurious mesh_replace only when we have POSITIVE
+            # evidence of no edit — i.e., a baseline file was present
+            # and positions matched within tolerance.  The Blender
+            # export pipeline doesn't ship a baseline today, so without
+            # this guard every Blender-authored replacer would lose the
+            # tag and build as "type": "" (unclassified, invisible to
+            # the picker).  mod_dir has a baseline only when the mod
+            # was imported through `gr2_to_gltf.py` (CLI path) which
+            # writes one alongside the GLB.
+            if baseline_available and not has_edited and 'mesh_replace' in types:
+                types.discard('mesh_replace')
                 changed = True
         except Exception as e:
             print(f"  WARNING: mesh change detection failed: {e}")
@@ -623,13 +637,33 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
     has_mesh_ops = ops & {'adds_meshes', 'replaces_meshes'}
     has_mesh_or_anim_ops = has_mesh_ops or has_anim_ops
     if has_mesh_or_anim_ops and os.path.isfile(glb_path):
-        shutil.copy2(glb_path, os.path.join(plugins_data, glb_name))
-        print(f"\n  Included GLB: {glb_name}")
+        # Strip unchanged stock meshes before deploying.  Keeps the
+        # runtime-builder input small (fewer meshes → faster merge),
+        # and — more importantly — lets `_triage_mod_meshes` at runtime
+        # classify cleanly without re-doing this work every time.  Falls
+        # back to copying the full GLB if stripping isn't possible
+        # (missing manifest/baseline, parse failure, etc).
+        deploy_glb = os.path.join(plugins_data, glb_name)
+        stripped = _strip_unchanged_data(glb_path, mod_dir)
+        if stripped:
+            with open(deploy_glb, 'wb') as f:
+                f.write(stripped)
+            print(f"\n  Included GLB: {glb_name} (stripped)")
+        else:
+            shutil.copy2(glb_path, deploy_glb)
+            print(f"\n  Included GLB: {glb_name} (full — no strip baseline)")
 
         # Copy export manifest if present (for mesh name routing)
         manifest_path = os.path.join(mod_dir, 'manifest.json')
         if os.path.isfile(manifest_path):
             shutil.copy2(manifest_path, os.path.join(plugins_data, 'manifest.json'))
+
+        # Copy baseline so the runtime triage has the position oracle.
+        # Without it, `_triage_mod_meshes` falls back to manifest-names
+        # and can't distinguish 'reference' from 'replaced' precisely.
+        baseline_path = os.path.join(mod_dir, '.baseline_positions.npz')
+        if os.path.isfile(baseline_path):
+            shutil.copy2(baseline_path, os.path.join(plugins_data, '.baseline_positions.npz'))
 
     # ── Build PKG (if mod has custom textures) ──
     # Auto-detect textures from the GLB if not listed in mod.json
@@ -703,7 +737,7 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
         tex['name'] = new_name
     if texture_renames:
         for old, new in texture_renames.items():
-            print(f"  INFO: texture {old!r} auto-prefixed → {new!r}")
+            print(f"  INFO: texture {old!r} auto-prefixed -> {new!r}")
 
     if custom_textures:
         # PKG filename must contain a registered H2M module GUID.  Data-
@@ -820,14 +854,32 @@ def package_thunderstore(mod_dir):
         }
         zf.writestr('manifest.json', json.dumps(ts_manifest, indent=2))
 
-        # Icon — mod's own or default CG3H icon
-        icon_path = os.path.join(mod_dir, meta.get('preview', 'icon.png'))
-        if not os.path.isfile(icon_path):
-            icon_path = os.path.join(mod_dir, 'icon.png')
-        if not os.path.isfile(icon_path):
-            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'icon.png')
-        if os.path.isfile(icon_path):
-            zf.write(icon_path, 'icon.png')
+        # Icon — mod's own > alongside this script (Blender addon
+        # bundles icon.png here) > repo root (CLI invocation case).
+        # Missing icon is a hard error: r2modman treats icon-less ZIPs
+        # as legacy (non-Thunderstore) packages and double-nests their
+        # extraction under plugins_data/<mod>/<mod>/, which breaks both
+        # CG3HBuilder's scan and the H2M plugin loader.  We'd rather
+        # fail the build loudly than ship a quietly-broken ZIP.
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        candidates = [
+            os.path.join(mod_dir, meta.get('preview', 'icon.png')),
+            os.path.join(mod_dir, 'icon.png'),
+            os.path.join(script_dir, 'icon.png'),         # bundled alongside this script
+            os.path.join(script_dir, '..', 'icon.png'),   # repo root (CLI case)
+        ]
+        icon_path = next((c for c in candidates if os.path.isfile(c)), None)
+        if not icon_path:
+            raise SystemExit(
+                "ERROR: no icon.png found for Thunderstore package.\n"
+                "  Searched (in order):\n    "
+                + "\n    ".join(candidates)
+                + "\n  Every ZIP needs a root icon.png or r2modman "
+                "mis-extracts it.  Drop any 256x256 PNG at any of the "
+                "paths above (the repo's default icon.png is the usual "
+                "fallback)."
+            )
+        zf.write(icon_path, 'icon.png')
 
         # README
         readme_path = os.path.join(mod_dir, 'README.md')

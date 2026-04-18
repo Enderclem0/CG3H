@@ -33,6 +33,13 @@ BUNDLE_SOURCES = [
     ('tools/cg3h_build.py',             'addon'),
     ('tools/cg3h_constants.py',         'addon'),
     ('tools/pkg_texture.py',            'addon'),
+    # Default CG3H icon — used by package_thunderstore as the final
+    # fallback when a mod workspace doesn't ship its own icon.png.
+    # Without it, the produced Thunderstore ZIP has no root icon,
+    # which makes r2modman treat it as a legacy (non-Thunderstore)
+    # package and double-nest the extracted files under
+    # plugins_data/<mod_id>/<mod_id>/... breaking CG3HBuilder's scan.
+    ('icon.png',                        'addon'),
     # PyInstaller build artifacts (rebuild if --no-build is NOT passed):
     ('dist/addon/cg3h_exporter.exe',    'addon'),
     ('dist/addon/cg3h_importer.exe',    'addon'),

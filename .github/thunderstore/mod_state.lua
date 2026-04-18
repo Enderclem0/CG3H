@@ -18,9 +18,8 @@ M.build_status = {}    -- { [character] = { state, gpk_path, error, duration_ms,
 M.mod_state = {}       -- { [mod_id] = { enabled = bool } }   — user-writable
 M.char_mesh_entries = {}  -- { [character] = { "HecateBattle_Mesh", "HecateHub_Mesh", ... } }
                           -- Union of mesh_entries from all installed mods for this character.
-                          -- Used by runtime.lua hot_reload_character to drive per-entry reloads,
-                          -- because sgg::Granny3D::mModelData is keyed by MESH ENTRY name, not
-                          -- by character name.  Multi-entry characters (Hecate Battle/Hub,
+                          -- sgg::Granny3D::mModelData is keyed by MESH ENTRY name, not by
+                          -- character name.  Multi-entry characters (Hecate Battle/Hub,
                           -- Melinoe Hat/Body/Overlook) have multiple entries each.
 M.builder_version = "" -- from cg3h_status.json
 M.built_at = ""        -- ISO timestamp from cg3h_status.json

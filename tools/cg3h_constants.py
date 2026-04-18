@@ -14,7 +14,13 @@ CG3H_BUILDER_AUTHOR = "Enderclem"
 CG3H_BUILDER_NAME = "CG3HBuilder"
 CG3H_BUILDER_FOLDER = f"{CG3H_BUILDER_AUTHOR}-{CG3H_BUILDER_NAME}"
 CG3H_BUILDER_DEPENDENCY = f"{CG3H_BUILDER_FOLDER}-{CG3H_VERSION}"
-H2M_DEPENDENCY = "Hell2Modding-Hell2Modding-0.2.0"
+# Until upstream Hell2Modding merges our patches we ship a temporary fork
+# as `Enderclem-Hell2ModdingCG3H`.  Mesh mods list it so r2modman installs
+# it automatically, and so H2M's lua_manager.hpp file-existence dependency
+# check resolves to the fork's stub plugin folder (cg3h_stub in the fork's
+# Thunderstore package).  Revert to "Hell2Modding-Hell2Modding-<ver>" once
+# the upstream release contains our draw.cpp bindings + pool patches.
+H2M_DEPENDENCY = f"Enderclem-Hell2ModdingCG3H-{CG3H_VERSION}"
 
 HADES2_APP_ID = "1145350"
 
