@@ -83,7 +83,7 @@ jobs:
           }
           $pluginManifest | ConvertTo-Json | Set-Content "thunderstore/plugins/manifest.json"
 
-          Compress-Archive -Path thunderstore/* -DestinationPath "CG3H-Merger-$version.zip"
+          Compress-Archive -Path thunderstore/* -DestinationPath "Enderclem-CG3HBuilder-$version.zip"
         shell: pwsh
 
       - name: Create Blender addon ZIP
@@ -108,7 +108,7 @@ jobs:
           name: release-assets
           path: |
             CG3H-Python-Tools.zip
-            CG3H-Merger-*.zip
+            Enderclem-CG3HBuilder-*.zip
             CG3H-Blender-Addon.zip
 
       - name: Create GitHub Release
@@ -116,5 +116,5 @@ jobs:
         with:
           files: |
             CG3H-Python-Tools.zip
-            CG3H-Merger-*.zip
+            Enderclem-CG3HBuilder-*.zip
             CG3H-Blender-Addon.zip
