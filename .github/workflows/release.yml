@@ -36,18 +36,19 @@ jobs:
       - name: Create Thunderstore package
         run: |
           $version = "${{ github.ref_name }}".TrimStart("v")
+          $pluginFolder = "Enderclem-CG3HBuilder"
 
           # r2modman places ZIP contents under plugins/{Author-ModName}/
           # (inferred from the Thunderstore package name).  We therefore
           # ship the plugin files at the ZIP's plugins/ root — NOT inside
           # an inner CG3HBuilder/ subfolder, otherwise the final layout
           # ends up with an inner folder that fails H2M's hyphen check
-          # in lua_manager.cpp:89.
-          $pluginFolder = "Enderclem-CG3HBuilder"
+          # in lua_manager.hpp.
 
           New-Item -ItemType Directory -Force -Path "thunderstore/plugins"
           New-Item -ItemType Directory -Force -Path "thunderstore/plugins_data"
 
+          # Root Thunderstore manifest — stamp the release version in.
           $manifest = Get-Content .github/thunderstore/manifest.json | ConvertFrom-Json
           $manifest.version_number = $version
           $manifest | ConvertTo-Json | Set-Content thunderstore/manifest.json
@@ -55,7 +56,7 @@ jobs:
           Copy-Item dist/builder/cg3h_builder.exe "thunderstore/plugins_data/"
           Copy-Item .github/thunderstore/README.md thunderstore/
 
-          # Copy every Lua module that makes up the v3.7 modular plugin.
+          # Copy every Lua module that makes up the modular plugin.
           Copy-Item .github/thunderstore/main.lua      "thunderstore/plugins/"
           Copy-Item .github/thunderstore/mod_state.lua "thunderstore/plugins/"
           Copy-Item .github/thunderstore/runtime.lua   "thunderstore/plugins/"
@@ -67,23 +68,33 @@ jobs:
             Copy-Item icon.png thunderstore/
           }
 
-          @"
-          {"name":"$pluginFolder","version_number":"$version","website_url":"https://github.com/Enderclem0/CG3H","description":"CG3H Runtime Builder — scans and loads CG3H mods","dependencies":["Hell2Modding-Hell2Modding-0.2.0"]}
-          "@ | Set-Content "thunderstore/plugins/manifest.json"
+          # H2M plugin-level manifest (what lua_manager.hpp reads for
+          # dep resolution).  Shape mirrors the Thunderstore manifest
+          # but the `name` is the folder slug (`Enderclem-CG3HBuilder`),
+          # not the Thunderstore short name (`CG3HBuilder`).  Dep list
+          # comes verbatim from the root manifest so CI-produced ZIPs
+          # can never drift from what Thunderstore ships.
+          $pluginManifest = [ordered]@{
+            name           = $pluginFolder
+            version_number = $version
+            website_url    = $manifest.website_url
+            description    = $manifest.description
+            dependencies   = $manifest.dependencies
+          }
+          $pluginManifest | ConvertTo-Json | Set-Content "thunderstore/plugins/manifest.json"
 
           Compress-Archive -Path thunderstore/* -DestinationPath "CG3H-Merger-$version.zip"
         shell: pwsh
 
       - name: Create Blender addon ZIP
         run: |
-          New-Item -ItemType Directory -Force -Path blender_addon_build/cg3h
-          Copy-Item blender_addon/cg3h/__init__.py blender_addon_build/cg3h/
-          Copy-Item dist/addon/cg3h_exporter.exe blender_addon_build/cg3h/
-          Copy-Item dist/addon/cg3h_importer.exe blender_addon_build/cg3h/
-          Copy-Item dist/builder/cg3h_builder.exe blender_addon_build/cg3h/
-          Copy-Item tools/cg3h_build.py blender_addon_build/cg3h/
-          Copy-Item tools/pkg_texture.py blender_addon_build/cg3h/
-          Compress-Archive -Path blender_addon_build/cg3h -DestinationPath CG3H-Blender-Addon.zip
+          # Use the same script the local dev workflow runs so CI and
+          # local builds stay in sync.  --no-build skips PyInstaller (the
+          # prior step already produced the exes into dist/).  BUNDLE_SOURCES
+          # in the script is the single source of truth for what ends up
+          # inside the addon zip.
+          python tools/build_blender_addon.py --no-build
+          Copy-Item dist/cg3h_blender_addon.zip CG3H-Blender-Addon.zip
         shell: pwsh
 
       - name: Create tools ZIP for Python users
