@@ -624,6 +624,14 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
     build_dir = os.path.join(mod_dir, 'build')
     plugins_data = os.path.join(build_dir, 'plugins_data', mod_id)
     plugins = os.path.join(build_dir, 'plugins', mod_id)
+    # Wipe the mod's prior build content so renames (e.g. v3.7 PKG prefix
+    # change) don't leave stale artifacts that get packaged alongside the
+    # current ones — r2modman falls back to legacy extraction when the
+    # plugins_data payload looks anomalous, producing double-nested installs.
+    if os.path.isdir(plugins_data):
+        shutil.rmtree(plugins_data)
+    if os.path.isdir(plugins):
+        shutil.rmtree(plugins)
     os.makedirs(plugins_data, exist_ok=True)
     os.makedirs(plugins, exist_ok=True)
 

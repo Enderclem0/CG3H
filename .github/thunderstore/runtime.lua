@@ -307,12 +307,29 @@ function M.toggle_mod_visibility(mod_id, enabled, state)
                 .. " [mesh-gate] set_mesh_visible missing — rebuild required")
             return nil
         end
+        -- For each (mesh_name, entry) the mod routes to, flip the mesh
+        -- in the stock entry AND in every variant entry that mirrors it.
+        -- The builder merges the accessory into every variant at build
+        -- time, so when a body variant is active DoDraw3D reads the
+        -- variant's GMD, not stock's — toggling only stock would leave
+        -- the accessory visible under any picked variant.
+        local char_variants = (state.variants or {})[target_mod.character] or {}
         local routing = target_mod.new_mesh_routing or {}
         local count = 0
         for mesh_name, entries in pairs(routing) do
             for _, entry in ipairs(entries) do
+                -- Stock entry.
                 if rom.data.set_mesh_visible(entry, mesh_name, enabled) then
                     count = count + 1
+                end
+                -- All variants (stock + per-body-mod) that shadow this entry.
+                local vdata = char_variants[entry]
+                if vdata and vdata.variants then
+                    for _, variant_entry in pairs(vdata.variants) do
+                        if rom.data.set_mesh_visible(variant_entry, mesh_name, enabled) then
+                            count = count + 1
+                        end
+                    end
                 end
             end
         end
