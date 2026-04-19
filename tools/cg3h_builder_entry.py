@@ -534,6 +534,19 @@ def _merge_glbs(char_mods, output_dir, character, primary_mod_id=None):
 
     base_mesh_names = {m.name for m in base_gltf.meshes}
 
+    # Skin-joint index → name, used to remap JOINTS_0 buffers from every
+    # merged mod whose own skin orders bones differently (e.g. one mod
+    # exported 122 joints, another 123 with `Hat_Mesh` prepended).
+    # Without remapping, the merged node still references `skin=0` but the
+    # vertex joint indices silently point at the wrong bone in the base
+    # skin, producing visibly-wrong bone bindings at convert() time.
+    base_skin_joint_names = []
+    if base_gltf.skins:
+        base_skin_joint_names = [
+            base_gltf.nodes[ni].name for ni in base_gltf.skins[0].joints
+        ]
+    base_joint_idx_by_name = {n: i for i, n in enumerate(base_skin_joint_names)}
+
     # ── Merge each subsequent mod ──
     for mod_info in char_mods[1:]:
         other_gltf = pygltflib.GLTF2().load(mod_info['glb_path'])
@@ -542,6 +555,29 @@ def _merge_glbs(char_mods, output_dir, character, primary_mod_id=None):
 
         bv_offset_map = {}
         acc_offset_map = {}
+        joints_remapped_accessors = set()
+
+        # Source skin joint names for this mod — same lookup the base did,
+        # against the mod's own node/skin graph.  Values not present in the
+        # base skin fall through to themselves (there is no meaningful base
+        # index), which is fine since those bones also aren't in convert()'s
+        # template bb_names and get filtered out of bb_entries.
+        src_skin_joint_names = []
+        if other_gltf.skins:
+            src_skin_joint_names = [
+                other_gltf.nodes[ni].name for ni in other_gltf.skins[0].joints
+            ]
+        joint_remap_needed = False
+        joint_remap = np.arange(max(len(src_skin_joint_names), 1), dtype=np.uint16)
+        for src_idx, name in enumerate(src_skin_joint_names):
+            base_idx = base_joint_idx_by_name.get(name)
+            if base_idx is not None and base_idx != src_idx:
+                joint_remap[src_idx] = base_idx
+                joint_remap_needed = True
+            elif base_idx is None:
+                # Bone dropped from base skin — leave the index alone;
+                # convert() will filter it when building bone bindings.
+                pass
 
         # Copy images/textures/materials FIRST so we know the material offset
         mat_offset = len(base_gltf.materials or [])
@@ -618,6 +654,38 @@ def _merge_glbs(char_mods, output_dir, character, primary_mod_id=None):
                 for acc_idx in acc_indices:
                     _copy_accessor(base_gltf, base_blob, other_gltf, other_blob,
                                    acc_idx, bv_offset_map, acc_offset_map)
+
+                # Remap JOINTS_0 indices into the base skin's joint order.
+                # Done after _copy_accessor so we can rewrite the bytes that
+                # actually landed in base_blob (keyed by new accessor idx).
+                j0 = prim.attributes.JOINTS_0
+                if (joint_remap_needed and j0 is not None
+                        and j0 in acc_offset_map
+                        and acc_offset_map[j0] not in joints_remapped_accessors):
+                    new_acc_idx = acc_offset_map[j0]
+                    new_acc = base_gltf.accessors[new_acc_idx]
+                    new_bv = base_gltf.bufferViews[new_acc.bufferView]
+                    if new_acc.componentType == 5121:
+                        dtype = np.uint8
+                    elif new_acc.componentType == 5123:
+                        dtype = np.uint16
+                    else:
+                        dtype = None
+                    if dtype is not None:
+                        off = new_bv.byteOffset + (new_acc.byteOffset or 0)
+                        nbytes = new_acc.count * 4 * np.dtype(dtype).itemsize
+                        arr = np.frombuffer(
+                            bytes(base_blob[off:off + nbytes]),
+                            dtype=dtype,
+                        ).reshape(new_acc.count, 4).copy()
+                        max_src = int(arr.max()) if arr.size else 0
+                        lookup_sz = max(max_src + 1, len(joint_remap))
+                        lookup = np.arange(lookup_sz, dtype=dtype)
+                        n = min(len(joint_remap), lookup_sz)
+                        lookup[:n] = joint_remap[:n].astype(dtype)
+                        remapped = lookup[arr]
+                        base_blob[off:off + nbytes] = remapped.tobytes()
+                    joints_remapped_accessors.add(new_acc_idx)
 
             # Build all primitives with remapped accessors and materials
             new_prims = []

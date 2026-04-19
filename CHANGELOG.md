@@ -4,6 +4,20 @@ All notable changes to CG3H are documented here.
 
 ---
 
+## v3.9.1
+
+Bugfix release for accessory bone bindings on the Stock outfit picker.
+
+### Fixed
+
+- **Accessories bound to the wrong bone on the Stock variant** when multiple accessory mods were installed and their source GLBs had differently-ordered skin joint lists. Example: `MelinoeLArmRing`'s ring appeared on the side of the arm (not the hand) when `MelinoeGlasses` was also installed, because the GLB merger copied `JOINTS_0` buffers byte-for-byte while the merged node silently referenced the first accessory's skin. Bodies/variants were unaffected — their GLBs happened to share the ring's joint order. The merger now remaps joint indices by bone name so every merged mesh resolves against the base skeleton correctly.
+
+### Internal
+
+- `H2M_FORK_VERSION` split from `CG3H_VERSION` in `tools/cg3h_constants.py` so CG3H patch releases don't force a re-tag of the Hell2Modding fork. The fork stays pinned at `3.9.0`.
+
+---
+
 ## v3.9.0
 
 **Outfit switching.**  Install multiple body-replacement mods for the same character and pick between them in-game — no restart, no rebuild.  Install accessories alongside and toggle each one individually.  Requires the temporary `Enderclem-Hell2ModdingCG3H` fork on Thunderstore until upstream Hell2Modding merges the draw-path bindings.

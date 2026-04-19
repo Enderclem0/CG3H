@@ -5,7 +5,7 @@ import re
 # Single source of truth for the CG3H release version.  Bump this on
 # release; tests/test_core.py::test_version_consistency enforces that
 # .github/thunderstore/manifest.json matches.
-CG3H_VERSION = "3.9.0"
+CG3H_VERSION = "3.9.1"
 
 # Thunderstore dependency string.  The folder name AuthorName-ModName
 # is required by Hell2Modding's plugin loader (lua_manager.cpp:89
@@ -20,7 +20,11 @@ CG3H_BUILDER_DEPENDENCY = f"{CG3H_BUILDER_FOLDER}-{CG3H_VERSION}"
 # check resolves to the fork's stub plugin folder (cg3h_stub in the fork's
 # Thunderstore package).  Revert to "Hell2Modding-Hell2Modding-<ver>" once
 # the upstream release contains our draw.cpp bindings + pool patches.
-H2M_DEPENDENCY = f"Enderclem-Hell2ModdingCG3H-{CG3H_VERSION}"
+#
+# Pinned independently of CG3H_VERSION — CG3H patch releases don't
+# require re-tagging the H2M fork, since the fork's C++ code is stable.
+H2M_FORK_VERSION = "3.9.0"
+H2M_DEPENDENCY = f"Enderclem-Hell2ModdingCG3H-{H2M_FORK_VERSION}"
 
 HADES2_APP_ID = "1145350"
 
