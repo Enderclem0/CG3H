@@ -871,19 +871,96 @@ def _build_variant_entries(character, variant_mods, accessory_mods,
         except OSError:
             pass
 
-    # Emit a TRUE-STOCK variant per scene entry that at least one
-    # variant_mod targets.  RAW byte-copy from the stock GPK: the merged
-    # GPK preserves byte-identical stock entries for untouched entries
-    # (e.g. HecateHubDream_Mesh), so raw stock bytes are compatible.
-    # The earlier failure was naming ("Stock_HecateHub_Mesh" missed the
-    # character prefix the engine uses for skeleton linkage); using the
-    # `{Character}_Stock_V{N}_Mesh` convention fixes that.
+    # Emit a "Stock" variant per scene entry that at least one
+    # variant_mod targets.  Two paths:
+    #
+    # - If there are no accessories: raw byte-copy from the stock GPK.
+    #   The merged GPK preserves byte-identical stock entries for
+    #   untouched entries, so raw stock bytes are compatible.
+    #
+    # - If there are accessories: run convert() against the stock GPK
+    #   with an accessory-only bundle so the resulting entries contain
+    #   "stock body + all accessories".  Without this, picking Stock
+    #   in the in-game picker would hide every accessory (the raw-stock
+    #   entry doesn't have the accessory meshes merged in, so DoDraw3D
+    #   can't render them and set_mesh_visible has nothing to flip).
+    #
+    # Entry naming: `{Character}_Stock_V{N}_Mesh` (prefix + index).  The
+    # prefix matters for skeleton linkage in the engine; an earlier
+    # iteration tried `Stock_<Entry>_Mesh` and broke that linkage.
     stock_entries_touched = set()
     for mod_info in variant_mods:
         for e in mod_info['mod'].get('target', {}).get('mesh_entries', []):
             stock_entries_touched.add(e)
-    if stock_entries_touched:
+
+    if stock_entries_touched and accessory_mods:
+        # Build a stock-body-plus-accessories GPK, then extract the
+        # targeted entries.
+        try:
+            if len(accessory_mods) == 1:
+                stock_glb = accessory_mods[0]['glb_path']
+                stock_collisions = set()
+            else:
+                stock_glb, stock_collisions = _merge_glbs(
+                    accessory_mods, builder_dir, f"{character}_Stock"
+                )
+        except Exception as e:
+            print(f"    stock: accessory merge failed ({e}); falling back to raw-copy")
+            stock_glb = None
+            stock_collisions = set()
+
+        stock_gpk_entries = None
+        if stock_glb and os.path.isfile(stock_glb):
+            stock_manifest = _merge_manifests(
+                accessory_mods, collisions=stock_collisions or None
+            )
+            stock_routing = {}
+            for mi in accessory_mods:
+                routing = mi['mod'].get('target', {}).get('new_mesh_routing', {})
+                for mesh_name, entries in routing.items():
+                    key = (f"{mi['id']}_{mesh_name}"
+                           if stock_collisions and mesh_name in stock_collisions
+                           else mesh_name)
+                    stock_routing[key] = entries
+
+            stock_tmp_gpk = os.path.join(
+                builder_dir, f"_tmp_stock_{character}.gpk"
+            )
+            try:
+                convert(
+                    glb_path=stock_glb,
+                    gpk_path=original_gpk,
+                    sdb_path=sdb_path,
+                    dll_path=dll_path,
+                    output_gpk=stock_tmp_gpk,
+                    manifest_dict=stock_manifest,
+                    allow_topology_change=True,
+                    patch_animations=False,
+                    new_mesh_routing=stock_routing or None,
+                )
+                stock_gpk_entries = extract_gpk(stock_tmp_gpk)
+            except Exception as e:
+                print(f"    stock: accessory-merge build failed ({e}); "
+                      f"falling back to raw-copy")
+            finally:
+                if os.path.isfile(stock_tmp_gpk):
+                    os.unlink(stock_tmp_gpk)
+                if (len(accessory_mods) > 1 and stock_glb
+                        and os.path.isfile(stock_glb)):
+                    os.unlink(stock_glb)
+
+        if stock_gpk_entries is None:
+            stock_gpk_entries = extract_gpk(original_gpk)
+            stock_source_label = "raw-copy"
+        else:
+            stock_source_label = "stock+accessories"
+    elif stock_entries_touched:
         stock_gpk_entries = extract_gpk(original_gpk)
+        stock_source_label = "raw-copy"
+    else:
+        stock_gpk_entries = None  # nothing to emit
+
+    if stock_entries_touched and stock_gpk_entries is not None:
         sorted_touched = sorted(stock_entries_touched)
         for idx, stock_entry in enumerate(sorted_touched):
             if stock_entry not in stock_gpk_entries:
@@ -893,7 +970,8 @@ def _build_variant_entries(character, variant_mods, accessory_mods,
             main_entries[stock_vname] = stock_gpk_entries[stock_entry]
             variants.setdefault(stock_entry, {})["stock"] = stock_vname
             print(f"    stock: {stock_entry} -> {stock_vname} "
-                  f"({len(stock_gpk_entries[stock_entry]):,} bytes, raw-copy)")
+                  f"({len(stock_gpk_entries[stock_entry]):,} bytes, "
+                  f"{stock_source_label})")
 
     # Repack the main GPK with the injected variant entries.
     if variants:
