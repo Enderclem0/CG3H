@@ -154,8 +154,8 @@ ui.init(mod_state, {
         -- downstream ways.  Harmless if it passes.  Hecate_Mesh is
         -- always present so use it; if it isn't, fall through and let
         -- the variant apply log the entry-missing path.
-        if rom.data.sanity_check_gmd then
-            rom.data.sanity_check_gmd("HecateHub_Mesh")
+        if rom.data.draw_sanity_check_gmd then
+            rom.data.draw_sanity_check_gmd("HecateHub_Mesh")
         end
         runtime.apply_active_variants(mod_state)
     end,
