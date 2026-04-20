@@ -175,8 +175,8 @@ end
 -- (mimicking PrepDraw) before installing the remap so DoDraw3D's
 -- fallback path resolves them on the very first remapped frame.
 function M.swap_entry(character, entry_name, target_id, state)
-    if type(rom.data.swap_to_variant) ~= "function"
-        or type(rom.data.restore_stock) ~= "function" then
+    if type(rom.data.draw_swap_to_variant) ~= "function"
+        or type(rom.data.draw_restore_stock) ~= "function" then
         rom.log.info(LOG_PREFIX .. " [variant] H2M missing v3.9 API")
         return nil
     end
@@ -187,7 +187,7 @@ function M.swap_entry(character, entry_name, target_id, state)
     if not entry_data then return nil end
 
     if target_id == nil or target_id == "" or target_id == entry_name then
-        rom.data.restore_stock(entry_name)
+        rom.data.draw_restore_stock(entry_name)
         rom.log.info(LOG_PREFIX .. " [variant] " .. entry_name .. " -> merged-stock")
         return "live"
     end
@@ -202,11 +202,11 @@ function M.swap_entry(character, entry_name, target_id, state)
     -- Populate target's GMD+0x44 (mirrors PrepDraw).  Safe because the
     -- target is by construction NOT the currently-drawn entry — picking
     -- yourself short-circuits to restore_stock above.
-    if type(rom.data.populate_entry_textures) == "function" then
-        rom.data.populate_entry_textures(target)
+    if type(rom.data.draw_populate_entry_textures) == "function" then
+        rom.data.draw_populate_entry_textures(target)
     end
 
-    rom.data.swap_to_variant(entry_name, target)
+    rom.data.draw_swap_to_variant(entry_name, target)
     rom.log.info(LOG_PREFIX .. " [variant] " .. entry_name .. " -> " .. target)
     return "live"
 end
@@ -230,7 +230,7 @@ end
 -- Must be called after register_variants AND after LoadAllModelAndAnimationData.
 -- The UI calls this on its first ImGui frame — by then the scene has loaded.
 function M.apply_active_variants(state)
-    if type(rom.data.swap_to_variant) ~= "function" then return end
+    if type(rom.data.draw_swap_to_variant) ~= "function" then return end
     local applied = 0
     for char, entries in pairs(state.variants or {}) do
         local user_picks = (state.active_variants or {})[char] or {}
@@ -267,7 +267,7 @@ end
 
 -- ── v3.8: draw-call visibility gate ────────────────────────────────────
 -- Hooks sgg::DrawManager::DoDraw3D (+ shadow/thumbnail variants) via
--- rom.data.set_draw_visible to suppress draw calls per mesh entry.
+-- rom.data.draw_set_visible to suppress draw calls per mesh entry.
 -- Instant, no rebuild, no restart, no data mutation.
 
 --- Check whether the H2M draw-gate API is available.  The fork DLL
@@ -275,7 +275,7 @@ end
 -- load (user installed upstream Hell2Modding instead of our fork, or
 -- the DLL in Ship/ is stale).
 function M.has_draw_gate()
-    return type(rom.data.set_draw_visible) == "function"
+    return type(rom.data.draw_set_visible) == "function"
 end
 
 --- Toggle visibility of a single mod's mesh entries.  Uses the draw-call
@@ -302,7 +302,7 @@ function M.toggle_mod_visibility(mod_id, enabled, state)
     -- body, so entry-level draw-gate would hide the body too.  Use the
     -- finer-grained per-mesh API to flip just the accessory's meshes.
     if target_mod.has_mesh_add then
-        if type(rom.data.set_mesh_visible) ~= "function" then
+        if type(rom.data.draw_set_mesh_visible) ~= "function" then
             rom.log.info(LOG_PREFIX
                 .. " [mesh-gate] set_mesh_visible missing — rebuild required")
             return nil
@@ -319,14 +319,14 @@ function M.toggle_mod_visibility(mod_id, enabled, state)
         for mesh_name, entries in pairs(routing) do
             for _, entry in ipairs(entries) do
                 -- Stock entry.
-                if rom.data.set_mesh_visible(entry, mesh_name, enabled) then
+                if rom.data.draw_set_mesh_visible(entry, mesh_name, enabled) then
                     count = count + 1
                 end
                 -- All variants (stock + per-body-mod) that shadow this entry.
                 local vdata = char_variants[entry]
                 if vdata and vdata.variants then
                     for _, variant_entry in pairs(vdata.variants) do
-                        if rom.data.set_mesh_visible(variant_entry, mesh_name, enabled) then
+                        if rom.data.draw_set_mesh_visible(variant_entry, mesh_name, enabled) then
                             count = count + 1
                         end
                     end
@@ -350,7 +350,7 @@ function M.toggle_mod_visibility(mod_id, enabled, state)
     if enabled then
         -- Re-enable: make all this mod's entries visible.
         for _, entry in ipairs(target_mod.mesh_entries) do
-            rom.data.set_draw_visible(entry, true)
+            rom.data.draw_set_visible(entry, true)
             rom.log.info(LOG_PREFIX .. " [draw-gate] show " .. entry)
         end
     else
@@ -368,7 +368,7 @@ function M.toggle_mod_visibility(mod_id, enabled, state)
 
         for _, entry in ipairs(target_mod.mesh_entries) do
             if not other_entries[entry] then
-                rom.data.set_draw_visible(entry, false)
+                rom.data.draw_set_visible(entry, false)
                 rom.log.info(LOG_PREFIX .. " [draw-gate] hide " .. entry)
             end
         end
@@ -398,7 +398,7 @@ function M.apply_visibility(state)
 
         for _, entry in ipairs(entries) do
             if not enabled_entries[entry] then
-                rom.data.set_draw_visible(entry, false)
+                rom.data.draw_set_visible(entry, false)
                 rom.log.info(LOG_PREFIX .. " [draw-gate] startup hide " .. entry)
             end
         end

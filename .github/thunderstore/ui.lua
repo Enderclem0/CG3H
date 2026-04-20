@@ -377,8 +377,8 @@ local function _draw_window(state, ctx)
         ImGui.TextDisabled(string.format("(%d mods)", #state.mods))
         ImGui.SameLine()
         if ImGui.Button("Pool stats") then
-            if rom.data.dump_pool_stats then
-                local n = rom.data.dump_pool_stats()
+            if rom.data.draw_dump_pool_stats then
+                local n = rom.data.draw_dump_pool_stats()
                 banner = { kind = "live",
                            text = "Dumped " .. n .. " pool(s) to log" }
             end
