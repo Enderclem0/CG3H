@@ -4,6 +4,34 @@ All notable changes to CG3H are documented here.
 
 ---
 
+## v3.9.2
+
+Drops the temporary `Enderclem-Hell2ModdingCG3H` fork and depends on
+upstream `Hell2Modding-Hell2Modding-1.0.92` directly — the first nightly
+that carries all the draw-path bindings, pool size patches, and
+`add_granny_file` / `add_package_file` APIs CG3H needs.
+
+### Fixed
+
+- **Blender animation import hung indefinitely** on any character with
+  20 or more animation clips (e.g. YoungMel, Melinoe). The PyInstaller-
+  bundled `cg3h_exporter.exe` was missing `multiprocessing.freeze_support()`,
+  so worker processes spawned by the parallel animation-extraction path
+  re-executed the exe and ran `main()` from scratch — recursively
+  spawning more workers. Export now completes in normal time.
+
+### Changed
+
+- **Dependency switched to upstream Hell2Modding.** Installing CG3H now
+  pulls `Hell2Modding-Hell2Modding-1.0.92` instead of the fork. The
+  Thunderstore fork (`Enderclem-Hell2ModdingCG3H`) is retired and will
+  not receive further updates.
+- **Runtime Lua uses the `draw_` API prefix** (`rom.data.draw_set_visible`,
+  `rom.data.draw_swap_to_variant`, etc.) now that upstream ships the
+  prefixed names from PR #31.
+
+---
+
 ## v3.9.1
 
 Bugfix release for accessory bone bindings on the Stock outfit picker.
