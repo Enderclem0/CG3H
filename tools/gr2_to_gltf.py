@@ -1966,4 +1966,8 @@ def main():
 
 
 if __name__ == '__main__':
+    # Required so worker processes spawned by multiprocessing.Pool inside a
+    # PyInstaller-bundled exe don't each re-run main() from scratch — without
+    # this, --animations on a character with >=20 anims fork-bombs the exe.
+    multiprocessing.freeze_support()
     main()
