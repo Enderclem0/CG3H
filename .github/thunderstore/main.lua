@@ -101,7 +101,7 @@ runtime.register_variants(mod_state, runtime_ctx)
 
 if not runtime.has_draw_gate() then
     rom.log.info(LOG_PREFIX
-        .. " ERROR: draw-gate binding missing — Enderclem-Hell2ModdingCG3H fork is required")
+        .. " ERROR: draw-gate binding missing — upgrade Hell2Modding to 1.0.92 or newer")
 end
 
 local variant_count = 0
@@ -125,8 +125,8 @@ ui.init(mod_state, {
         if not character then
             return nil
         end
-        -- Draw-gate is always available (the fork is a hard dependency as
-        -- of v3.9), so toggles are live.  Mid-session GPK rebuilds were
+        -- Draw-gate is always available — Hell2Modding 1.0.92+ is a hard
+        -- dependency, so toggles are live.  Mid-session GPK rebuilds were
         -- never useful anyway — LoadModelData is not safe mid-session and
         -- the plugin-init path already rebuilds GPKs on every restart.
         return runtime.toggle_mod_visibility(mod_id, enabled, mod_state)
