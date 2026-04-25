@@ -572,6 +572,57 @@ def _sync_mod_json(mod_dir):
     if types - {'texture_replace'} and not assets.get('textures'):
         types.discard('texture_replace')
 
+    # ── Detect edited animations (canonical list) ──
+    # Auto-populate target.animations with the names of animation tracks
+    # this mod actually edits, so conflict detection at scan time can do
+    # an exact set-intersect across mods without re-parsing GLBs.
+    edited_animations = []
+    if glb_path and os.path.isfile(glb_path):
+        try:
+            gltf_anim = pygltflib.GLTF2().load(glb_path)
+            blob_anim = gltf_anim.binary_blob()
+            anim_hashes = manifest.get('animations', {}).get('hashes', {})
+            for anim in (gltf_anim.animations or []):
+                if not anim.name:
+                    continue
+                orig_hash = anim_hashes.get(anim.name, '')
+                if not orig_hash:
+                    # No baseline hash → conservative: assume edited.
+                    edited_animations.append(anim.name)
+                    continue
+                # Hash channel data the same way the export pass did and
+                # compare.  Different hash → modder edited this clip.
+                h = hashlib.md5()
+                for ch in anim.channels:
+                    sampler = anim.samplers[ch.sampler]
+                    for acc_idx in (sampler.input, sampler.output):
+                        acc = gltf_anim.accessors[acc_idx]
+                        bv = gltf_anim.bufferViews[acc.bufferView]
+                        h.update(blob_anim[bv.byteOffset:bv.byteOffset + bv.byteLength])
+                if h.hexdigest() != orig_hash:
+                    edited_animations.append(anim.name)
+        except Exception as e:
+            print(f"  WARNING: animation detection failed: {e}")
+
+    target = mod.setdefault('target', {})
+    existing_anims = target.get('animations', [])
+    if edited_animations:
+        # Sort for deterministic diffs.  Keep dict-shape compatibility
+        # with the legacy `assets.animations.filter` (a single string) by
+        # writing the list under target.animations only.
+        new_anims = sorted(set(edited_animations))
+        if new_anims != existing_anims:
+            target['animations'] = new_anims
+            changed = True
+        if 'animation_patch' not in types:
+            types.add('animation_patch')
+            changed = True
+    elif existing_anims and 'animation_patch' not in types:
+        # mod.json claims animations but type doesn't say animation_patch
+        # — heal it.  This runs when the mod was authored by hand.
+        types.add('animation_patch')
+        changed = True
+
     # ── Save updated mod.json ──
     if changed:
         mod['type'] = sorted(types) if len(types) > 1 else (next(iter(types)) if types else '')

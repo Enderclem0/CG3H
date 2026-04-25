@@ -179,6 +179,46 @@ def check_conflicts(group):
                 f"INFO: custom texture '{tex_name}' shipped by {', '.join(mod_names)} "
                 f"— will be auto-prefixed with mod id at build time")
 
+    # animation_patch conflicts — same animation entry edited by multiple mods.
+    # cg3h_build's _sync_mod_json populates target.animations with the canonical
+    # list of animation entries each mod actually edits, so this is a pure
+    # set-intersect at scan time.  Mods built before v3.10 won't have the
+    # field populated; surface them with a softer "may conflict" warning so
+    # the modder knows to rebuild + republish.
+    anim_patchers = [(m, n) for m, n, ops in zip(group, names, all_ops)
+                     if 'patches_animations' in ops]
+    anims_by_mod = {}
+    untyped_patchers = []
+    for m, mod_label in anim_patchers:
+        anim_list = m['mod'].get('target', {}).get('animations', [])
+        if isinstance(anim_list, list) and anim_list:
+            anims_by_mod[mod_label] = set(anim_list)
+        else:
+            untyped_patchers.append(mod_label)
+    if untyped_patchers and len(anim_patchers) > 1:
+        warnings.append(
+            f"WARNING: {len(untyped_patchers)} animation_patch mod(s) "
+            f"({', '.join(untyped_patchers)}) don't declare target.animations "
+            f"— rebuild with cg3h_build to populate the canonical list, "
+            f"otherwise overlap conflicts can't be detected accurately")
+    overlaps = {}  # animation_name -> [mod_labels]
+    seen_pairs = set()
+    mod_labels = list(anims_by_mod.keys())
+    for i, a_label in enumerate(mod_labels):
+        for b_label in mod_labels[i + 1:]:
+            shared = anims_by_mod[a_label] & anims_by_mod[b_label]
+            for anim_name in shared:
+                key = anim_name
+                overlaps.setdefault(key, []).extend([a_label, b_label])
+                seen_pairs.add((a_label, b_label))
+    for anim_name, conflicting_mods in overlaps.items():
+        # Dedupe mod names while preserving order
+        seen = set()
+        unique = [m for m in conflicting_mods if not (m in seen or seen.add(m))]
+        warnings.append(
+            f"WARNING: animation '{anim_name}' patched by {', '.join(unique)} "
+            f"— last loaded wins (use priority.json to pick a winner deterministically)")
+
     # mesh_add mods with shared mesh names — auto-prefixed at merge time
     adders = [m for m, ops in zip(group, all_ops) if 'adds_meshes' in ops]
     if len(adders) > 1:

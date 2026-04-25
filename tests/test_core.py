@@ -2097,5 +2097,71 @@ def test_classify_mod_mesh_replace_no_entries():
     assert _classify_mod(mod) == (False, False, False)
 
 
+def _anim_mod(mod_id, character, animations):
+    """animation_patch mod fixture with target.animations populated."""
+    mi = _make_mod(mod_id, character, mod_type='animation_patch')
+    mi['mod']['target']['animations'] = list(animations)
+    return mi
+
+
+def test_check_conflicts_animation_overlap():
+    """Two animation_patch mods touching the same animation entry → warning."""
+    from mod_info import check_conflicts
+
+    group = [
+        _anim_mod('ModA', 'Melinoe', ['Melinoe_Idle', 'Melinoe_Run']),
+        _anim_mod('ModB', 'Melinoe', ['Melinoe_Idle', 'Melinoe_Dash']),
+    ]
+    warnings, errors = check_conflicts(group)
+    assert errors == []
+    overlap_warnings = [w for w in warnings if 'animation' in w and 'Melinoe_Idle' in w]
+    assert len(overlap_warnings) == 1, f"expected one overlap warning, got: {warnings}"
+    assert 'ModA' in overlap_warnings[0] and 'ModB' in overlap_warnings[0]
+
+
+def test_check_conflicts_animation_no_overlap():
+    """Two animation_patch mods on disjoint animations → no conflict."""
+    from mod_info import check_conflicts
+
+    group = [
+        _anim_mod('ModA', 'Melinoe', ['Melinoe_Idle']),
+        _anim_mod('ModB', 'Melinoe', ['Melinoe_Run']),
+    ]
+    warnings, errors = check_conflicts(group)
+    assert errors == []
+    assert not any('animation' in w and ('Melinoe_Idle' in w or 'Melinoe_Run' in w)
+                   for w in warnings)
+
+
+def test_check_conflicts_animation_missing_field():
+    """animation_patch mod without target.animations → softer warning that it
+    can't precisely detect overlap.  Surfaces only when 2+ patcher mods are
+    present (single mod can't conflict with itself)."""
+    from mod_info import check_conflicts
+
+    a = _make_mod('ModA', 'Melinoe', mod_type='animation_patch')
+    b = _anim_mod('ModB', 'Melinoe', ['Melinoe_Idle'])
+    warnings, errors = check_conflicts([a, b])
+    assert errors == []
+    assert any("don't declare target.animations" in w for w in warnings)
+
+
+def test_check_conflicts_animation_three_way_overlap():
+    """Three mods, one shared animation across all three → still one warning
+    that names all three mods."""
+    from mod_info import check_conflicts
+
+    group = [
+        _anim_mod('ModA', 'Melinoe', ['Idle']),
+        _anim_mod('ModB', 'Melinoe', ['Idle']),
+        _anim_mod('ModC', 'Melinoe', ['Idle']),
+    ]
+    warnings, errors = check_conflicts(group)
+    overlap_warnings = [w for w in warnings if 'animation' in w and 'Idle' in w]
+    assert len(overlap_warnings) == 1
+    for label in ('ModA', 'ModB', 'ModC'):
+        assert label in overlap_warnings[0]
+
+
 if __name__ == '__main__':
     sys.exit(_run_all())
