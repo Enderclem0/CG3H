@@ -76,7 +76,9 @@ Replace a character's meshes entirely with new ones.
 
 ### animation_patch
 
-Replace or modify specific animation curves on a character.
+Replace or modify specific animation curves on a character. The GLB
+ships **only the animation tracks** the mod author edited — mesh
+content is not required and not used.
 
 ```json
 {
@@ -85,7 +87,7 @@ Replace or modify specific animation curves on a character.
   "type": "animation_patch",
   "target": {"character": "Melinoe"},
   "assets": {
-    "glb": "Melinoe_edited.glb",
+    "glb": "Melinoe_anims.glb",
     "animations": {
       "patch": true,
       "filter": "NoWeapon_Base_Idle"
@@ -94,6 +96,11 @@ Replace or modify specific animation curves on a character.
 }
 ```
 
+The GLB needs to carry the character's armature and the animation
+clips you've edited.  It does **not** need any mesh primitives — the
+Blender exporter can produce an armature-only GLB when only animation
+tracks were modified.
+
 **`assets.animations` fields:**
 
 | Field | Type | Required | Description |
@@ -101,7 +108,16 @@ Replace or modify specific animation curves on a character.
 | `patch` | bool | yes | Must be `true` to enable animation patching |
 | `filter` | string | no | Substring filter for **export** — reduces GLB size by only exporting matching animations. At build time, the GLB contents are the sole authority on which animations are patched (no import-side filtering). |
 
-**Build**: Loads original GPK, matches GLB animations to GR2 animations by name, patches curve data, outputs modified GPK. Only animations present in the GLB are patched — no filter needed at build time.
+**Build**: Loads original GPK, matches GLB animations to GR2
+animations by name, patches curve data, outputs modified GPK. Only
+animations present in the GLB are patched. The build path runs
+whether or not the GLB contains mesh data.
+
+**Toggle behaviour**: animation patches are baked into the merged
+GPK at build time. Disabling an animation_patch mod requires a
+rebuild + restart — there is no live toggle for this slice (the
+draw-path remap that powers v3.8+ instant-toggle for meshes only
+covers `_Mesh` entries).
 
 **CC-free**: Only the GLB (containing modified curves) is shipped.
 
@@ -163,7 +179,7 @@ The build system also infers operations from assets automatically via `_infer_op
 | `metadata.name` | Mod name (used for Thunderstore manifest and H2M folder naming) |
 | `metadata.version` | Semver version string |
 | `metadata.author` | Author name |
-| `type` | One of the 5 types, or an array for combined types |
+| `type` | One of the 4 types, or an array for combined types |
 | `target.character` | Target character name (must match a `.gpk` in `_Optimized/`) |
 
 **Optional fields:**

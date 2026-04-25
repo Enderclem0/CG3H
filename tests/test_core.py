@@ -2021,5 +2021,81 @@ def test_mod_info_scan_cg3h_mods_empty_dir():
         shutil.rmtree(tmpdir)
 
 
+def test_classify_mod_pure_variant():
+    """Pure mesh_replace with target.mesh_entries → is_variant=True."""
+    from cg3h_builder_entry import _classify_mod
+    mod = {
+        "type": "mesh_replace",
+        "target": {"character": "Melinoe", "mesh_entries": ["Melinoe_Mesh"]},
+    }
+    assert _classify_mod(mod) == (True, False, False)
+
+
+def test_classify_mod_pure_accessory():
+    """mesh_add → is_accessory=True regardless of mesh_entries."""
+    from cg3h_builder_entry import _classify_mod
+    mod = {"type": "mesh_add", "target": {"character": "Melinoe"}}
+    assert _classify_mod(mod) == (False, True, False)
+
+
+def test_classify_mod_mixed_add_and_replace():
+    """mesh_add + mesh_replace → accessory wins (additive)."""
+    from cg3h_builder_entry import _classify_mod
+    mod = {
+        "type": ["mesh_add", "mesh_replace"],
+        "target": {"character": "Melinoe", "mesh_entries": ["Melinoe_Mesh"]},
+    }
+    assert _classify_mod(mod) == (False, True, False)
+
+
+def test_classify_mod_animation_only():
+    """animation_patch with no mesh ops → is_animation_only=True."""
+    from cg3h_builder_entry import _classify_mod
+    mod = {
+        "type": "animation_patch",
+        "target": {"character": "Melinoe"},
+    }
+    assert _classify_mod(mod) == (False, False, True)
+
+
+def test_classify_mod_animation_with_mesh_replace():
+    """animation_patch + mesh_replace → variant, NOT animation_only.
+
+    The animation patch still applies (during convert), but the mod
+    routes through the mesh-replace path because the mesh is the
+    dominant signal.
+    """
+    from cg3h_builder_entry import _classify_mod
+    mod = {
+        "type": ["mesh_replace", "animation_patch"],
+        "target": {"character": "Melinoe", "mesh_entries": ["Melinoe_Mesh"]},
+    }
+    assert _classify_mod(mod) == (True, False, False)
+
+
+def test_classify_mod_animation_with_mesh_add():
+    """animation_patch + mesh_add → accessory, NOT animation_only."""
+    from cg3h_builder_entry import _classify_mod
+    mod = {
+        "type": ["mesh_add", "animation_patch"],
+        "target": {"character": "Melinoe"},
+    }
+    assert _classify_mod(mod) == (False, True, False)
+
+
+def test_classify_mod_pure_texture():
+    """texture_replace alone → all three bools False (separate flow)."""
+    from cg3h_builder_entry import _classify_mod
+    mod = {"type": "texture_replace", "target": {"character": "Melinoe"}}
+    assert _classify_mod(mod) == (False, False, False)
+
+
+def test_classify_mod_mesh_replace_no_entries():
+    """mesh_replace without target.mesh_entries → not a variant."""
+    from cg3h_builder_entry import _classify_mod
+    mod = {"type": "mesh_replace", "target": {"character": "Melinoe"}}
+    assert _classify_mod(mod) == (False, False, False)
+
+
 if __name__ == '__main__':
     sys.exit(_run_all())

@@ -59,27 +59,34 @@ CG3H_MOD_STATE_SCHEMA_VERSION = 1
 
 
 def _classify_mod(mod):
-    """Single source of truth for v3.9 mod classification.
+    """Single source of truth for mod classification.
 
-    Returns (is_variant, is_accessory).  Both can be False (e.g. a pure
-    texture_replace or animation_patch mod).  Both can NOT be True —
-    mesh_add is the dominant signal (any mesh_add presence forces
-    additive).
+    Returns (is_variant, is_accessory, is_animation_only).  All three
+    can be False (e.g. a pure texture_replace mod).  is_variant and
+    is_accessory cannot both be True — mesh_add is the dominant signal
+    (any mesh_add presence forces additive).  is_animation_only is
+    mutually exclusive with is_variant and is_accessory.
 
     Rule:
       - PURE mesh_replace (mesh_replace in type, mesh_add NOT in type)
         and non-empty target.mesh_entries → picker variant.
       - Anything with mesh_add in type (including mixed with
         mesh_replace) → additive accessory.
+      - animation_patch in type AND no mesh_add/mesh_replace → standalone
+        animation_only (v3.10).  Mixed with mesh_* falls into the
+        variant/accessory bucket; animation patches still apply during
+        convert() in that case.
     """
     mod_type = mod.get('type', '')
     types = mod_type if isinstance(mod_type, list) \
         else [mod_type] if mod_type else []
     has_entries = bool(mod.get('target', {}).get('mesh_entries', []))
+    has_mesh_ops = 'mesh_add' in types or 'mesh_replace' in types
     is_pure_replacer = 'mesh_replace' in types and 'mesh_add' not in types
     is_variant = is_pure_replacer and has_entries
     is_accessory = 'mesh_add' in types
-    return is_variant, is_accessory
+    is_animation_only = 'animation_patch' in types and not has_mesh_ops
+    return is_variant, is_accessory, is_animation_only
 
 
 def _load_mod_state(builder_dir):
@@ -1386,12 +1393,15 @@ def scan_and_build_all(plugins_data_dir, game_dir=None, only_character=None):
         # so runtime swap to a slim variant always fits.
         variant_mods = []
         accessory_mods = []
+        animation_only_mods = []
         for mi in char_mods:
-            is_variant, is_accessory = _classify_mod(mi['mod'])
+            is_variant, is_accessory, is_animation_only = _classify_mod(mi['mod'])
             if is_variant:
                 variant_mods.append(mi)
             elif is_accessory:
                 accessory_mods.append(mi)
+            elif is_animation_only:
+                animation_only_mods.append(mi)
 
         print(f"  {character}: building from {len(char_mods)} mod(s)")
 

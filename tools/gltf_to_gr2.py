@@ -1895,6 +1895,12 @@ def convert(
     total_patched = 0
     gr2_files_to_free = []
 
+    # Short-circuit: animation-only mods have no mesh content.  Skip
+    # the whole per-entry mesh loop so we don't load + free every
+    # _Mesh GR2 just to find no work to do.
+    if not glb_meshes:
+        entries_to_patch = []
+
     for entry_idx, entry_key in enumerate(entries_to_patch):
         entry_meshes = routing[entry_key]
         gr2_bytes = gpk_entries[entry_key]
@@ -1924,7 +1930,9 @@ def convert(
 
         gr2_files_to_free.append(gr2_file)
 
-    if total_patched == 0:
+    # Animation-only mods legitimately patch zero meshes.  Only raise
+    # when both the mesh and animation paths produced nothing.
+    if total_patched == 0 and not glb_animations:
         _keepalive.clear()
         for gf in gr2_files_to_free:
             dll.GrannyFreeFile(gf)
