@@ -1,7 +1,7 @@
 {
   "name": "CG3HBuilder",
-  "version_number": "3.9.2",
+  "version_number": "3.9.3",
   "website_url": "https://github.com/Enderclem0/CG3H",
   "description": "CG3H Runtime Builder — builds mesh mod GPKs on the user's machine. Required by CG3H mesh mods.",
-  "dependencies": ["Hell2Modding-Hell2Modding-1.0.92"]
+  "dependencies": ["Hell2Modding-Hell2Modding-1.0.95"]
 }

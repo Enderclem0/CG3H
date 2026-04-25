@@ -4,6 +4,19 @@ All notable changes to CG3H are documented here.
 
 ---
 
+## v3.9.3
+
+Bumps the upstream Hell2Modding dependency from `1.0.92` to `1.0.95`.
+v3.9.2 wasn't shipped to Thunderstore — `1.0.92` was missing the most
+recent post-launch offset patches and crashed on the current Hades II
+build, so this is the first installable patch on top of v3.9.1.
+
+### Changed
+
+- **Dependency: `Hell2Modding-Hell2Modding-1.0.95`** (was `1.0.92`).
+
+---
+
 ## v3.9.2
 
 Drops the temporary `Enderclem-Hell2ModdingCG3H` fork and depends on

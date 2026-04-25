@@ -5,7 +5,7 @@ import re
 # Single source of truth for the CG3H release version.  Bump this on
 # release; tests/test_core.py::test_version_consistency enforces that
 # .github/thunderstore/manifest.json matches.
-CG3H_VERSION = "3.9.2"
+CG3H_VERSION = "3.9.3"
 
 # Thunderstore dependency string.  The folder name AuthorName-ModName
 # is required by Hell2Modding's plugin loader (lua_manager.cpp:89
@@ -18,7 +18,7 @@ CG3H_BUILDER_DEPENDENCY = f"{CG3H_BUILDER_FOLDER}-{CG3H_VERSION}"
 # all the CG3H-required APIs (add_granny_file/add_package_file, the
 # draw.cpp bindings, and the static GPU buffer pool size patches).
 # Retires the `Enderclem-Hell2ModdingCG3H` fork we shipped for v3.9.0/3.9.1.
-H2M_VERSION = "1.0.92"
+H2M_VERSION = "1.0.95"
 H2M_DEPENDENCY = f"Hell2Modding-Hell2Modding-{H2M_VERSION}"
 
 HADES2_APP_ID = "1145350"
