@@ -816,16 +816,43 @@ class CG3H_OT_Export(bpy.types.Operator):
         if new_mesh_routing:
             target["new_mesh_routing"] = new_mesh_routing
 
-        # type field shape: single string when only one, list when both.
-        # Fallback to "mesh_replace" when neither (selection contained no
-        # meshes — shouldn't happen in practice) so existing builder
-        # classification still routes it correctly.
-        if has_replace and has_add:
-            mod_type = ["mesh_add", "mesh_replace"]
-        elif has_add:
-            mod_type = "mesh_add"
-        else:
-            mod_type = "mesh_replace"
+        # Detect animation tracks in the exported GLB.  The gltf
+        # exporter writes them into the JSON chunk; we just read the
+        # header rather than depend on pygltflib (which Blender doesn't
+        # bundle).  Empty file or parse failure → 0 (silently fall back
+        # to mesh-only classification).
+        n_animations = 0
+        try:
+            with open(glb_path, "rb") as gf:
+                if gf.read(4) == b"glTF":
+                    gf.read(8)  # version + total length
+                    json_len = struct.unpack("<I", gf.read(4))[0]
+                    gf.read(4)  # chunk type ('JSON')
+                    glb_json = json.loads(gf.read(json_len).decode("utf-8"))
+                    n_animations = len(glb_json.get("animations") or [])
+        except Exception:
+            pass  # GLB unreadable; treat as no animations
+
+        # type field shape: single string when only one, list when
+        # multiple.  v3.10: if no mesh edits but the GLB carries
+        # animation tracks, the user authored an animation-only mod —
+        # tag it animation_patch instead of falling back to the legacy
+        # mesh_replace default.
+        types_list = []
+        if has_add:
+            types_list.append("mesh_add")
+        if has_replace:
+            types_list.append("mesh_replace")
+        if n_animations > 0 and not has_add and not has_replace:
+            # Pure animation-only mod.
+            types_list = ["animation_patch"]
+        elif n_animations > 0 and (has_add or has_replace):
+            # Mixed: include animation_patch alongside the mesh op so
+            # cg3h_build's _sync_mod_json doesn't have to heal it later.
+            types_list.append("animation_patch")
+        if not types_list:
+            types_list = ["mesh_replace"]  # legacy fallback
+        mod_type = types_list if len(types_list) > 1 else types_list[0]
 
         mod_json = {
             "format": "cg3h-mod/1.0",

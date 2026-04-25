@@ -101,6 +101,15 @@ clips you've edited.  It does **not** need any mesh primitives — the
 Blender exporter can produce an armature-only GLB when only animation
 tracks were modified.
 
+**`target.animations`** (auto-populated, since v3.10) — list of
+animation entry names this mod patches.  When you build via
+`cg3h_build.py` (the Blender addon's auto-build path), the canonical
+list is extracted from the GLB and written to mod.json automatically.
+Conflict detection at scan time reads this field directly — no GLB
+re-parsing.  Mods built without the field still work, but conflict
+detection between two animation_patch mods becomes a soft warning
+instead of a precise overlap report.
+
 **`assets.animations` fields:**
 
 | Field | Type | Required | Description |

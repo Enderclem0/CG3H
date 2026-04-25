@@ -4,6 +4,66 @@ All notable changes to CG3H are documented here.
 
 ---
 
+## v3.10.0
+
+**Standalone animation mods.**  `animation_patch` is now a first-class
+mod type — modders can ship a GLB containing only edited animation
+clips (no mesh content required) and CG3HBuilder will patch the
+matching GR2 entries onto the stock character.
+
+Animation editing was always supported, but only as a rider on a
+mesh mod.  v3.10 makes it standalone: edit a clip in Blender, export,
+publish, done.
+
+### For mod players
+
+- New mods may show up under the `animation_patch` type in mod
+  manifests — they ship as small Thunderstore packages (often a few
+  hundred KB) and apply on next game launch.
+- **Animation patches are baked at build time and aren't live-toggleable.**
+  Disabling an animation_patch mod requires a rebuild + restart (the
+  v3.8+ instant-toggle covers `_Mesh` entries only).
+- Animation conflicts (two mods editing the same clip) surface as
+  warnings in the in-game CG3H log.  Use `priority.json` to pick a
+  winner, or the alphabetically-later mod ID wins by default.
+
+### For mod authors
+
+- **Blender addon auto-detects animation-only edits.**  If you only
+  modified armature animation tracks (no mesh position changes), the
+  exporter writes `"type": "animation_patch"` to mod.json.  Mixed
+  mesh + animation mods get the combined type list.
+- **`target.animations` is auto-populated at build time.**
+  `cg3h_build.py` walks the GLB's animation tracks, hashes each
+  channel against the manifest baseline, and writes the canonical
+  list of edited clip names to `mod.json::target.animations`.  This
+  is what the conflict detector reads at scan time — pure metadata,
+  no extra GLB I/O.
+- Schema example in `docs/mod_spec.md` and the v3.10 plan doc at
+  `docs/v3_10_animation_patch_plan.md`.
+
+### Internal
+
+- `tools/gltf_to_gr2.py::convert()` no longer raises
+  "No meshes were patched" when called on a mesh-less GLB with
+  animations to apply.  Per-entry mesh loop short-circuits when
+  `glb_meshes` is empty.
+- `tools/cg3h_builder_entry.py::_classify_mod` returns a third
+  bool, `is_animation_only`, used by the build path to skip
+  variant/accessory routing for pure animation mods.
+- `tools/mod_info.py::check_conflicts` adds the animation overlap
+  rule (set-intersect on `target.animations`).
+- 12 new tests in `tests/test_core.py` covering classifier outcomes,
+  animation overlap, three-way overlap, and missing-field fallback.
+
+### Other
+
+- `README.md` cleaned up: dropped the stale Hell2Modding-fork
+  warning (replaced by upstream `Hell2Modding-Hell2Modding-1.0.92+`
+  in v3.9.3) and added the animation-toggle caveat.
+
+---
+
 ## v3.9.3
 
 Bumps the upstream Hell2Modding dependency from `1.0.92` to `1.0.95`.
