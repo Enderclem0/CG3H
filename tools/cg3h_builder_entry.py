@@ -61,11 +61,10 @@ CG3H_MOD_STATE_SCHEMA_VERSION = 1
 def _classify_mod(mod):
     """Single source of truth for mod classification.
 
-    Returns (is_variant, is_accessory, is_animation_only).  All three
-    can be False (e.g. a pure texture_replace mod).  is_variant and
+    Returns (is_variant, is_accessory, is_animation_only, is_animation_add).
+    All four can be False (e.g. a pure texture_replace mod).  is_variant and
     is_accessory cannot both be True — mesh_add is the dominant signal
-    (any mesh_add presence forces additive).  is_animation_only is
-    mutually exclusive with is_variant and is_accessory.
+    (any mesh_add presence forces additive).
 
     Rule:
       - PURE mesh_replace (mesh_replace in type, mesh_add NOT in type)
@@ -76,6 +75,9 @@ def _classify_mod(mod):
         animation_only (v3.10).  Mixed with mesh_* falls into the
         variant/accessory bucket; animation patches still apply during
         convert() in that case.
+      - animation_add in type → ships brand-new animation entries plus
+        their SJSON aliases (v3.11).  Independent of mesh_* — a single
+        mod can be both a variant AND ship new animations.
     """
     mod_type = mod.get('type', '')
     types = mod_type if isinstance(mod_type, list) \
@@ -86,7 +88,91 @@ def _classify_mod(mod):
     is_variant = is_pure_replacer and has_entries
     is_accessory = 'mesh_add' in types
     is_animation_only = 'animation_patch' in types and not has_mesh_ops
-    return is_variant, is_accessory, is_animation_only
+    is_animation_add = 'animation_add' in types
+    return is_variant, is_accessory, is_animation_only, is_animation_add
+
+
+def _collect_animation_adds(animation_add_mods, character):
+    """v3.11 — gather convert()-side specs + alias dicts from animation_add mods.
+
+    Returns (add_specs, alias_entries):
+      add_specs     - [{template, target, glb_action?}] passed to convert()
+      alias_entries - [{logical_name, granny_name, sjson, ...}] persisted
+                      to status.json for the Lua runtime to register as
+                      SJSON Animation entries
+
+    Each entry in target.new_animations supports:
+      logical_name      (required) — Lua-facing alias name
+      granny_name       (required) — GPK entry key the alias points at
+      clone_from        (required) — existing GR2 entry to use as the
+                                     bone-track template
+      source_glb_action (optional) — GLB animation name to use for
+                                     curves (v3.11+).  When absent, the
+                                     template's curves are kept as-is
+                                     (pure byte-clone).
+      loop              (optional, default false)
+      inherit_from      (optional, default character-specific base)
+      chain_to          (optional)
+      blends            (optional list of {from, duration})
+      cancel_on_owner_move (optional bool)
+
+    `target.alias_sjson` (mod-level) overrides the per-character SJSON
+    home.  Defaults come from anim_sjson_routing.alias_home_for(character).
+    """
+    add_specs = []
+    alias_entries = []
+    default_sjson = alias_home_for(character)
+
+    for mi in animation_add_mods:
+        mod = mi['mod']
+        target = mod.get('target', {}) or {}
+        mod_alias_sjson = target.get('alias_sjson') or default_sjson
+        for raw in target.get('new_animations', []):
+            if not isinstance(raw, dict):
+                print(f"    WARNING: {mi['id']} new_animations entry is not "
+                      f"an object: {raw!r}")
+                continue
+            logical = raw.get('logical_name')
+            granny = raw.get('granny_name')
+            clone_from = raw.get('clone_from')
+            glb_action = raw.get('source_glb_action')
+            if not (logical and granny):
+                print(f"    WARNING: {mi['id']} new_animations entry "
+                      f"missing logical_name or granny_name: {raw!r}")
+                continue
+            if not clone_from:
+                # v3.11 requires a template.  v3.12 may relax this if we
+                # build a "from skeleton only" path that doesn't need
+                # a stock animation as bone-track scaffolding.
+                print(f"    WARNING: {mi['id']} new_animations entry needs "
+                      f"clone_from (template GR2 entry): {logical!r}")
+                continue
+            add_specs.append({
+                'template': clone_from,
+                'target': granny,
+                'glb_action': glb_action,  # None → byte-clone
+            })
+            sjson_basename = raw.get('alias_sjson') or mod_alias_sjson
+            if not sjson_basename:
+                print(f"    WARNING: {mi['id']} no alias_sjson home for "
+                      f"character {character!r} and none specified; "
+                      f"alias {logical!r} will not be registered")
+                continue
+            alias_entries.append({
+                'mod_id': mi['id'],
+                'character': character,
+                'logical_name': logical,
+                'granny_name': granny,
+                'clone_from': clone_from,
+                'source_glb_action': glb_action,
+                'sjson': sjson_basename,
+                'loop': bool(raw.get('loop', False)),
+                'inherit_from': raw.get('inherit_from'),
+                'chain_to': raw.get('chain_to'),
+                'blends': raw.get('blends') or [],
+                'cancel_on_owner_move': raw.get('cancel_on_owner_move'),
+            })
+    return add_specs, alias_entries
 
 
 def _load_mod_state(builder_dir):
@@ -116,6 +202,7 @@ if _dir not in sys.path:
 if sys.stdout and sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
+from anim_sjson_routing import alias_home_for
 from cg3h_constants import CG3H_VERSION
 from cg3h_constants import find_game_path as _find_game_path
 from gltf_to_gr2 import convert
@@ -1370,6 +1457,15 @@ def scan_and_build_all(plugins_data_dir, game_dir=None, only_character=None):
                     cached_vmap, output_gpk, character)
                 if cached_vmap:
                     status_characters[character]["variants"] = cached_vmap
+                # v3.11 — animation aliases on cache hits.  Same shape
+                # as the rebuild branch.  The cache key encodes
+                # mod.json content, so on cache hit the alias set is
+                # guaranteed to match what was last built.
+                _, cached_aliases = _collect_animation_adds(
+                    [mi for mi in char_mods
+                     if _classify_mod(mi['mod'])[3]],
+                    character)
+                status_characters[character]["alias_animations"] = cached_aliases
                 continue
             else:
                 print(f"  {character}: mods changed, rebuilding...")
@@ -1394,14 +1490,20 @@ def scan_and_build_all(plugins_data_dir, game_dir=None, only_character=None):
         variant_mods = []
         accessory_mods = []
         animation_only_mods = []
+        animation_add_mods = []
         for mi in char_mods:
-            is_variant, is_accessory, is_animation_only = _classify_mod(mi['mod'])
+            is_variant, is_accessory, is_animation_only, is_animation_add = \
+                _classify_mod(mi['mod'])
             if is_variant:
                 variant_mods.append(mi)
             elif is_accessory:
                 accessory_mods.append(mi)
             elif is_animation_only:
                 animation_only_mods.append(mi)
+            # animation_add is orthogonal — a variant or accessory mod
+            # can ALSO ship new animations.  Track separately.
+            if is_animation_add:
+                animation_add_mods.append(mi)
 
         print(f"  {character}: building from {len(char_mods)} mod(s)")
 
@@ -1448,6 +1550,17 @@ def scan_and_build_all(plugins_data_dir, game_dir=None, only_character=None):
 
         merged_manifest = _merge_manifests(char_mods, collisions=collisions or None)
 
+        # v3.11 — collect animation_add specs + alias data.  Aliases
+        # are persisted to status.json so the Lua runtime can register
+        # SJSON entries on next launch.
+        add_specs, alias_entries = _collect_animation_adds(
+            animation_add_mods, character)
+        # If any animation_add entry sources a GLB action, the GLB
+        # animations need to be parsed too — same flag drives both
+        # animation_patch and animation_add curve injection.
+        if any(s.get('glb_action') for s in add_specs):
+            patch_anims = True
+
         for mi in char_mods:
             print(f"    - {mi['id']}")
 
@@ -1462,6 +1575,7 @@ def scan_and_build_all(plugins_data_dir, game_dir=None, only_character=None):
                 allow_topology_change=allow_topo,
                 patch_animations=patch_anims,
                 new_mesh_routing=merged_routing or None,
+                add_animations=add_specs or None,
             )
             ok = True
         except Exception as e:
@@ -1508,6 +1622,12 @@ def scan_and_build_all(plugins_data_dir, game_dir=None, only_character=None):
                     variants_map, output_gpk, character)
                 if variants_map:
                     status_characters[character]["variants"] = variants_map
+
+            # v3.11 — persist alias entries so main.lua can register
+            # SJSON injections at next launch.  Empty list is fine; we
+            # write [] rather than omit the key so the runtime can
+            # detect "no aliases this build" cleanly.
+            status_characters[character]["alias_animations"] = alias_entries
         else:
             failed += 1
             _record(character, "failed", char_mods, None,

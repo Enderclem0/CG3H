@@ -2028,14 +2028,14 @@ def test_classify_mod_pure_variant():
         "type": "mesh_replace",
         "target": {"character": "Melinoe", "mesh_entries": ["Melinoe_Mesh"]},
     }
-    assert _classify_mod(mod) == (True, False, False)
+    assert _classify_mod(mod) == (True, False, False, False)
 
 
 def test_classify_mod_pure_accessory():
     """mesh_add → is_accessory=True regardless of mesh_entries."""
     from cg3h_builder_entry import _classify_mod
     mod = {"type": "mesh_add", "target": {"character": "Melinoe"}}
-    assert _classify_mod(mod) == (False, True, False)
+    assert _classify_mod(mod) == (False, True, False, False)
 
 
 def test_classify_mod_mixed_add_and_replace():
@@ -2045,7 +2045,7 @@ def test_classify_mod_mixed_add_and_replace():
         "type": ["mesh_add", "mesh_replace"],
         "target": {"character": "Melinoe", "mesh_entries": ["Melinoe_Mesh"]},
     }
-    assert _classify_mod(mod) == (False, True, False)
+    assert _classify_mod(mod) == (False, True, False, False)
 
 
 def test_classify_mod_animation_only():
@@ -2055,7 +2055,7 @@ def test_classify_mod_animation_only():
         "type": "animation_patch",
         "target": {"character": "Melinoe"},
     }
-    assert _classify_mod(mod) == (False, False, True)
+    assert _classify_mod(mod) == (False, False, True, False)
 
 
 def test_classify_mod_animation_with_mesh_replace():
@@ -2070,7 +2070,7 @@ def test_classify_mod_animation_with_mesh_replace():
         "type": ["mesh_replace", "animation_patch"],
         "target": {"character": "Melinoe", "mesh_entries": ["Melinoe_Mesh"]},
     }
-    assert _classify_mod(mod) == (True, False, False)
+    assert _classify_mod(mod) == (True, False, False, False)
 
 
 def test_classify_mod_animation_with_mesh_add():
@@ -2080,21 +2080,39 @@ def test_classify_mod_animation_with_mesh_add():
         "type": ["mesh_add", "animation_patch"],
         "target": {"character": "Melinoe"},
     }
-    assert _classify_mod(mod) == (False, True, False)
+    assert _classify_mod(mod) == (False, True, False, False)
 
 
 def test_classify_mod_pure_texture():
-    """texture_replace alone → all three bools False (separate flow)."""
+    """texture_replace alone → all four bools False (separate flow)."""
     from cg3h_builder_entry import _classify_mod
     mod = {"type": "texture_replace", "target": {"character": "Melinoe"}}
-    assert _classify_mod(mod) == (False, False, False)
+    assert _classify_mod(mod) == (False, False, False, False)
 
 
 def test_classify_mod_mesh_replace_no_entries():
     """mesh_replace without target.mesh_entries → not a variant."""
     from cg3h_builder_entry import _classify_mod
     mod = {"type": "mesh_replace", "target": {"character": "Melinoe"}}
-    assert _classify_mod(mod) == (False, False, False)
+    assert _classify_mod(mod) == (False, False, False, False)
+
+
+def test_classify_mod_pure_animation_add():
+    """animation_add alone → is_animation_add=True, others False."""
+    from cg3h_builder_entry import _classify_mod
+    mod = {"type": "animation_add", "target": {"character": "Melinoe"}}
+    assert _classify_mod(mod) == (False, False, False, True)
+
+
+def test_classify_mod_animation_add_orthogonal():
+    """animation_add is orthogonal to mesh axes — a variant CAN ship
+    new animations.  Both flags should be True simultaneously."""
+    from cg3h_builder_entry import _classify_mod
+    mod = {
+        "type": ["mesh_replace", "animation_add"],
+        "target": {"character": "Melinoe", "mesh_entries": ["Melinoe_Mesh"]},
+    }
+    assert _classify_mod(mod) == (True, False, False, True)
 
 
 def _anim_mod(mod_id, character, animations):

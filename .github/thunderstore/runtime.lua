@@ -168,6 +168,166 @@ function M.register_variants(state, ctx)
     end
 end
 
+-- ── v3.11: animation_add SJSON alias injection ─────────────────────────
+-- For every alias declared by an animation_add mod, append an Animation
+-- entry to the character's per-character SJSON.  H2M's
+-- rom.data.on_sjson_read_as_string lets us rewrite the file contents
+-- before the engine parses them; the hook fires inside FileStreamRead
+-- and supports up to 8x the original size.
+
+--- Build the SJSON text for one alias.  Mirrors stock entries:
+--     {
+--         Name = "..."
+--         InheritFrom = "..."
+--         GrannyAnimation = "..."
+--         Loop = true
+--         ChainTo = "..."
+--     }
+local function build_alias_sjson(alias)
+    local lines = { "{" }
+    table.insert(lines, '    Name = "' .. alias.logical_name .. '"')
+    if alias.inherit_from and alias.inherit_from ~= "" then
+        table.insert(lines, '    InheritFrom = "' .. alias.inherit_from .. '"')
+    end
+    table.insert(lines, '    GrannyAnimation = "' .. alias.granny_name .. '"')
+    if alias.loop then
+        table.insert(lines, '    Loop = true')
+    end
+    if alias.chain_to and alias.chain_to ~= "" then
+        table.insert(lines, '    ChainTo = "' .. alias.chain_to .. '"')
+    end
+    table.insert(lines, "}")
+    return table.concat(lines, "\n")
+end
+
+--- Inject a list of synthesized Animation entries into a `{ Animations = [
+-- ... ] }` SJSON file.  Strategy: the file ends `] }` (close-of-array,
+-- close-of-table); we find the last `]` and splice our entries in just
+-- before it.  Robust against trailing whitespace.
+local function inject_animation_entries(content, entries_sjson)
+    local last_bracket = nil
+    local pos = 1
+    while true do
+        local i = string.find(content, "]", pos, true)
+        if not i then break end
+        last_bracket = i
+        pos = i + 1
+    end
+    if not last_bracket then
+        return content  -- malformed; leave alone
+    end
+    return string.sub(content, 1, last_bracket - 1)
+        .. "\n\n" .. entries_sjson .. "\n\n"
+        .. string.sub(content, last_bracket)
+end
+
+--- Read state.build_status[*].alias_animations and register one
+-- on_sjson_read_as_string callback per (character, sjson_basename)
+-- pair that injects all matching aliases.  Idempotent: multiple
+-- aliases targeting the same SJSON share a single callback.
+--- Register a SINGLE global SJSON callback that injects alias entries
+-- on demand.  Must be called EARLY in plugin init — before
+-- runtime.apply runs the builder — so the callback exists when the
+-- engine first reads animation SJSON at startup.  The callback
+-- captures `state` by reference, so when the builder later populates
+-- state.build_status, subsequent SJSON reads see the data.
+--
+-- Idempotent: safe to call multiple times; only registers once per
+-- plugin lifetime via the M.__alias_callback_registered flag.
+function M.register_animation_aliases(state)
+    if M.__alias_callback_registered then
+        return  -- already wired up
+    end
+    if not (rom.data and rom.data.on_sjson_read_as_string) then
+        rom.log.warning(LOG_PREFIX
+            .. " rom.data.on_sjson_read_as_string missing — "
+            .. "animation_add aliases cannot be registered")
+        return
+    end
+
+    rom.data.on_sjson_read_as_string(function(file_path, content)
+        -- Collect aliases targeting this file from the LIVE state
+        -- (closure captures state by reference; build_status is
+        -- populated by load_status after the builder finishes).
+        if not state or not state.build_status then
+            return content
+        end
+        local matching = {}
+        for _, rec in pairs(state.build_status) do
+            for _, alias in ipairs(rec.alias_animations or {}) do
+                if alias.sjson and alias.logical_name and alias.granny_name
+                    and string.find(file_path, alias.sjson, 1, true) then
+                    table.insert(matching, alias)
+                end
+            end
+        end
+        if #matching == 0 then
+            return content
+        end
+
+        local parts = {}
+        for _, alias in ipairs(matching) do
+            table.insert(parts, build_alias_sjson(alias))
+        end
+        local injected = table.concat(parts, "\n\n")
+        local new_content = inject_animation_entries(content, injected)
+        if new_content ~= content then
+            rom.log.info(LOG_PREFIX .. " injected "
+                .. tostring(#matching) .. " alias(es) into "
+                .. tostring(file_path)
+                .. " (size " .. #content .. " -> " .. #new_content .. ")")
+        end
+        return new_content
+    end)  -- no path filter; we filter inside the callback by basename
+
+    M.__alias_callback_registered = true
+    rom.log.info(LOG_PREFIX .. " global SJSON-alias callback registered "
+        .. "(injection deferred to FileStreamRead time)")
+end
+
+--- Trigger a re-read of the engine's game data so the alias
+-- callback registered earlier gets a chance to fire AFTER the
+-- builder has produced status.json.  No-op if the H2M binding isn't
+-- available (older H2M).  Safe to call from main.lua right after
+-- runtime.apply + mod_state.load_status.
+function M.reload_game_data_for_aliases(state)
+    -- Count aliases for the log message.
+    local total = 0
+    for _, rec in pairs(state.build_status or {}) do
+        total = total + (rec.alias_animations and #rec.alias_animations or 0)
+    end
+    if total == 0 then
+        return 0  -- nothing to reload for
+    end
+    if rom.data and rom.data.reload_game_data then
+        rom.data.reload_game_data()
+        rom.log.info(LOG_PREFIX .. " reload_game_data() — engine should "
+            .. "re-read SJSON; callback will inject " .. total .. " alias(es)")
+    else
+        rom.log.warning(LOG_PREFIX .. " rom.data.reload_game_data missing — "
+            .. "aliases registered but won't be applied until next game launch")
+    end
+    return total
+end
+
+--- Public helper — modders call this to play an animation by alias name.
+-- Exposed under rom.mods["Enderclem-CG3HBuilder"].play_animation.
+function M.play_animation(target_id, anim_name)
+    if not (target_id and anim_name) then return false end
+    local set_anim = rom.game and rom.game.SetAnimation
+    if not set_anim then return false end
+    local ok, err = pcall(set_anim, {
+        Name = anim_name,
+        DestinationId = target_id,
+    })
+    if not ok then
+        rom.log.warning(LOG_PREFIX .. " play_animation('"
+            .. tostring(anim_name) .. "') raised: " .. tostring(err))
+        return false
+    end
+    return true
+end
+
 --- Switch the active render entry for ONE source entry of a character.
 -- `target_id == "stock"` / nil → clear remap, render the source itself.
 -- Otherwise install a remap so the game renders `target_id`'s data when

@@ -20,9 +20,26 @@ Quick round-trip test:
 """
 import argparse
 import os
+import re
 import struct
 import sys
 import tempfile
+
+
+# Mesh-entry classifier.  Two GPKs in the game use a non-standard
+# suffix and a `endswith('_Mesh')` filter silently drops them:
+#   Axe.gpk          ::  Melinoe_Axe_Mesh1
+#   ToolFishRod.gpk  ::  ToolFishRod_AnimationMesh
+# This regex catches `_Mesh`, `_Mesh<digits>`, `_AnimationMesh` and
+# anything else ending in `Mesh\d*`.  Animation entries follow the
+# `_<C|N>_<digits>` convention and never end in `Mesh`, so the
+# inverse cleanly selects animations.
+_MESH_ENTRY_RE = re.compile(r'Mesh\d*$')
+
+
+def is_mesh_entry(name):
+    """True if a GPK entry name represents a mesh (not an animation)."""
+    return bool(_MESH_ENTRY_RE.search(name))
 
 try:
     import lz4.block

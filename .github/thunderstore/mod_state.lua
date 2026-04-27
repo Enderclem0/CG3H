@@ -71,6 +71,35 @@ local function _string_array(content, key)
     return result
 end
 
+-- v3.11 — parse the target.new_animations array, shape:
+--   [ { "logical_name": "...", "granny_name": "...",
+--       "clone_from": "...", "source_glb_action": "...",
+--       "loop": true, ... }, ... ]
+-- Returns a list of { logical_name, granny_name, loop } dicts.  Used by
+-- the Animations tab so each mod can be tested directly without going
+-- through cg3h_status.json (handy for hand-authored mods that haven't
+-- been built yet).
+local function _parse_new_animations(content)
+    local result = {}
+    local target_block = content:match('"target"%s*:%s*(%b{})')
+    if not target_block then return result end
+    local arr = target_block:match('"new_animations"%s*:%s*(%b[])')
+    if not arr then return result end
+    for entry_body in arr:gmatch('(%b{})') do
+        local logical = entry_body:match('"logical_name"%s*:%s*"([^"]*)"')
+        local granny = entry_body:match('"granny_name"%s*:%s*"([^"]*)"')
+        local loop_v = entry_body:match('"loop"%s*:%s*(%a+)')
+        if logical and granny then
+            table.insert(result, {
+                logical_name = logical,
+                granny_name = granny,
+                loop = (loop_v == "true"),
+            })
+        end
+    end
+    return result
+end
+
 -- Parse the target.new_mesh_routing object, shape:
 --     { "TorusHubMesh": ["HecateHub_Mesh"], "TorusBattleMesh": [...] }
 -- Returns { [mesh_name] = { entry1, entry2, ... } }.  Each mesh_name maps
@@ -152,6 +181,11 @@ function M.scan(plugins_data_dir)
                             mesh_entries     = _string_array(content, "mesh_entries"),
                             has_mesh_add     = type_block:find('"mesh_add"') ~= nil,
                             has_mesh_replace = type_block:find('"mesh_replace"') ~= nil,
+                            has_animation_patch = type_block:find('"animation_patch"') ~= nil,
+                            has_animation_add   = type_block:find('"animation_add"') ~= nil,
+                            -- v3.11 — patched stock animations + brand-new aliases
+                            patched_animations = _string_array(content, "animations"),
+                            new_animations   = _parse_new_animations(content),
                             new_mesh_routing = _parse_new_mesh_routing(content),
                         }
                         if mod.character ~= "" and mod.id then
@@ -242,12 +276,51 @@ function M.load_status(builder_dir)
             end
         end
 
+        -- v3.11: alias_animations.  Each element looks like
+        --   { "mod_id": "...", "logical_name": "...",
+        --     "granny_name": "...", "sjson": "...", "loop": false,
+        --     "inherit_from": "...", "chain_to": "...", "blends": [...] }
+        -- We parse only the scalar fields we'll inject into SJSON;
+        -- blends are intentionally NOT parsed in v3.11.0 (modders use
+        -- the simpler InheritFrom/ChainTo path).
+        local aliases = {}
+        -- Use balanced %b[] so nested arrays (e.g. inline `"blends": []`)
+        -- don't terminate the outer match at their `]`.
+        local aa_block = body:match('"alias_animations"%s*:%s*(%b[])')
+        if aa_block then
+            for entry_body in aa_block:gmatch('(%b{})') do
+                local function s(field)
+                    return entry_body:match('"' .. field .. '"%s*:%s*"([^"]*)"')
+                end
+                local function b(field)
+                    local v = entry_body:match('"' .. field .. '"%s*:%s*(%a+)')
+                    if v == "true" then return true end
+                    if v == "false" then return false end
+                    return nil
+                end
+                local logical = s("logical_name")
+                local granny = s("granny_name")
+                if logical and granny then
+                    aliases[#aliases + 1] = {
+                        mod_id = s("mod_id"),
+                        logical_name = logical,
+                        granny_name = granny,
+                        sjson = s("sjson"),
+                        loop = b("loop"),
+                        inherit_from = s("inherit_from"),
+                        chain_to = s("chain_to"),
+                    }
+                end
+            end
+        end
+
         M.build_status[char] = {
             state = state,
             gpk_path = gpk_path,
             error = err,
             duration_ms = duration,
             variants = variants,
+            alias_animations = aliases,
         }
     end
 end

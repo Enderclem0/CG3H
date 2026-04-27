@@ -320,6 +320,136 @@ local function _draw_mods_tab(state)
     end
 end
 
+-- ── Tab: Animations (v3.11) ────────────────────────────────────────────
+-- Lists every mod's animation work and lets the user trigger each
+-- entry on-demand for visual verification.  Two kinds of entries:
+--   - new aliases (animation_add) — modder-authored clips registered
+--     via the SJSON injection path.  Triggering plays the modder's
+--     custom animation.
+--   - patched stock (animation_patch) — stock animation aliases whose
+--     curves got rewritten by the modder.  Triggering plays the
+--     stock alias and the engine uses the modder's curves.
+
+-- Persistent across frames: target picker state.
+local _anim_target_kind = "Hero"          -- "Hero" or "NPC"
+local _anim_npc_name    = "NPC_Hecate_01"  -- buffer for NPC DestinationName
+
+local function _resolve_anim_target_id()
+    local g = rom.game
+    if not g then return nil, "no rom.game" end
+    if _anim_target_kind == "NPC" then
+        if not (g.GetClosestUnitOfType and g.CurrentRun
+                and g.CurrentRun.Hero) then
+            return nil, "GetClosestUnitOfType missing or no hero"
+        end
+        local id = g.GetClosestUnitOfType({
+            Id = g.CurrentRun.Hero.ObjectId,
+            DestinationName = _anim_npc_name,
+        })
+        return id, "NPC " .. _anim_npc_name
+    end
+    if g.CurrentRun and g.CurrentRun.Hero then
+        return g.CurrentRun.Hero.ObjectId, "Hero"
+    end
+    return nil, "Hero not loaded yet"
+end
+
+local function _play_anim(ctx, anim_name)
+    local target, label = _resolve_anim_target_id()
+    if not target then
+        banner = { kind = "error",
+                   text = "Play '" .. anim_name .. "': " .. (label or "no target") }
+        return
+    end
+    local ok = ctx.on_play_animation
+        and ctx.on_play_animation(target, anim_name)
+        or false
+    if ok then
+        banner = { kind = "live",
+                   text = "Played '" .. anim_name .. "' on " .. label }
+    else
+        banner = { kind = "error",
+                   text = "Failed to play '" .. anim_name
+                          .. "' on " .. label .. " (see log)" }
+    end
+end
+
+local function _draw_animations_tab(state, ctx)
+    ImGui.TextDisabled("Trigger any modded animation on the player or "
+        .. "an NPC.  Useful for verifying that a mod's new alias "
+        .. "registered correctly + that animation_patch curves landed.")
+    ImGui.Separator()
+
+    -- Target picker
+    if ImGui.RadioButton("Hero (player)", _anim_target_kind == "Hero") then
+        _anim_target_kind = "Hero"
+    end
+    ImGui.SameLine()
+    if ImGui.RadioButton("Hub NPC", _anim_target_kind == "NPC") then
+        _anim_target_kind = "NPC"
+    end
+    if _anim_target_kind == "NPC" then
+        local changed, new_val = ImGui.InputText(
+            "DestinationName##anim_npc", _anim_npc_name, 64)
+        if changed then _anim_npc_name = new_val end
+        ImGui.TextDisabled("e.g. NPC_Hecate_01, NPC_Nemesis_01, NPC_Dora_01")
+    end
+    ImGui.Separator()
+
+    -- Per-mod listing.  Empty mods (no new/patched anims) are skipped
+    -- so the tab stays focused on what's actually testable.
+    local any_shown = false
+    for _, mod in ipairs(state.mods) do
+        local n_new = mod.new_animations and #mod.new_animations or 0
+        local n_patched = mod.patched_animations
+                          and #mod.patched_animations or 0
+        if n_new > 0 or n_patched > 0 then
+            any_shown = true
+            local header = mod.id .. "  (" .. mod.character .. ")"
+            if n_new > 0 then
+                header = header .. "  +" .. n_new .. " new"
+            end
+            if n_patched > 0 then
+                header = header .. "  ~" .. n_patched .. " patched"
+            end
+            if ImGui.CollapsingHeader(header) then
+                if n_new > 0 then
+                    ImGui.TextDisabled("New aliases (animation_add):")
+                    for i, alias in ipairs(mod.new_animations) do
+                        local btn = "Play##new_" .. mod.id .. "_" .. i
+                        if ImGui.SmallButton(btn) then
+                            _play_anim(ctx, alias.logical_name)
+                        end
+                        ImGui.SameLine()
+                        local label = alias.logical_name
+                        if alias.loop then
+                            label = label .. "  (loop)"
+                        end
+                        ImGui.Text(label)
+                    end
+                end
+                if n_patched > 0 then
+                    if n_new > 0 then ImGui.Spacing() end
+                    ImGui.TextDisabled("Patched stock (animation_patch):")
+                    for i, anim in ipairs(mod.patched_animations) do
+                        local btn = "Play##patched_" .. mod.id .. "_" .. i
+                        if ImGui.SmallButton(btn) then
+                            _play_anim(ctx, anim)
+                        end
+                        ImGui.SameLine()
+                        ImGui.Text(anim)
+                    end
+                end
+            end
+        end
+    end
+    if not any_shown then
+        ImGui.TextDisabled("No animation_add or animation_patch mods "
+            .. "installed.  Build one with the Blender addon and "
+            .. "Refresh.")
+    end
+end
+
 -- ── Tab: Summary ───────────────────────────────────────────────────────
 
 local function _draw_summary_tab(state)
@@ -394,6 +524,10 @@ local function _draw_window(state, ctx)
             end
             if ImGui.BeginTabItem("Mods") then
                 _draw_mods_tab(state)
+                ImGui.EndTabItem()
+            end
+            if ImGui.BeginTabItem("Animations") then
+                _draw_animations_tab(state, ctx)
                 ImGui.EndTabItem()
             end
             if ImGui.BeginTabItem("Summary") then

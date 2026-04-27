@@ -62,7 +62,7 @@ if _tools_dir not in sys.path:
 from granny_types import (
     build_type_map, get_struct_stride, get_transform_field_offsets, setup_dll_types, _type_sym_addr,
 )
-from gpk_pack import extract_gpk, pack_gpk
+from gpk_pack import extract_gpk, is_mesh_entry, pack_gpk
 
 
 # ── Module-level DLL state ────────────────────────────────────────────────────
@@ -390,6 +390,95 @@ def _fixup_quat_signs(values):
         values[i + 1] *= flip
 
 
+def _apply_glb_tracks_to_gr2(dll, gr2_bytes, str_db, glb_tracks,
+                              dak32f_type_ptr, sdb_dict, sdb_crc):
+    """v3.11 helper — overwrite a GR2 animation entry's curves in-place
+    using GLB-derived tracks, then return fresh serialized bytes.
+
+    Extracted from patch_animation_entries' inner loop so the same
+    encoder is reused by both:
+      - `patch_animation_entries` (modify a stock entry under its own
+        name)
+      - `_build_added_animations` (clone a stock entry under a NEW
+        name, then overwrite curves with a different GLB action's
+        data)
+
+    Returns (new_bytes, n_tracks_modified) or (None, 0) on failure.
+    """
+    gr2_buf = ctypes.create_string_buffer(gr2_bytes)
+    gr2_file = dll.GrannyReadEntireFileFromMemory(len(gr2_bytes), gr2_buf)
+    if not gr2_file:
+        return None, 0
+    dll.GrannyRemapFileStrings(gr2_file, str_db)
+    fi = dll.GrannyGetFileInfo(gr2_file)
+    if not fi:
+        dll.GrannyFreeFile(gr2_file)
+        return None, 0
+
+    tg_count = ri(fi, 0x6C)
+    if tg_count == 0:
+        dll.GrannyFreeFile(gr2_file)
+        return None, 0
+    tg0 = rq(rq(fi, 0x70), 0)
+    tt_count = ri(tg0, 0x14)
+    tt_ptr = rq(tg0, 0x18)
+    if tt_count == 0 or not _valid_ptr(tt_ptr):
+        dll.GrannyFreeFile(gr2_file)
+        return None, 0
+
+    tracks_modified = 0
+    for ti in range(tt_count):
+        t_base = tt_ptr + ti * ANIM_TRACK_STRIDE
+        t_name = read_cstr(rq(t_base, 0))
+
+        bone_data = glb_tracks.get(t_name)
+        if bone_data is None:
+            short = t_name.split(':')[-1]
+            bone_data = glb_tracks.get(short)
+        if bone_data is None:
+            continue
+
+        for path, coff, dim in [('rotation', 0x0C, 4),
+                                 ('translation', 0x1C, 3),
+                                 ('scale', 0x2C, 3)]:
+            if path not in bone_data:
+                continue
+            times, values = bone_data[path]
+            if len(times) == 0:
+                continue
+
+            if path == 'scale' and values.shape[-1] == 3:
+                mat_values = np.zeros((len(values), 9), dtype=np.float32)
+                mat_values[:, 0] = values[:, 0]
+                mat_values[:, 4] = values[:, 1]
+                mat_values[:, 8] = values[:, 2]
+                values = mat_values
+
+            if path == 'rotation' and values.shape[-1] == 4:
+                _fixup_quat_signs(values)
+
+            if path == 'rotation' and values.shape[-1] == 4:
+                data_p = rq(t_base, coff + 8)
+                if _valid_ptr(data_p) and safe_bytes(data_p, 1)[0] in (8, 9):
+                    if _patch_quantized_curve_inplace(dll, t_base + coff, data_p, values):
+                        tracks_modified += 1
+                        continue
+
+            data_buf, knots_buf, ctrls_buf = _build_dak32f_curve(times, values, degree=2)
+            _keepalive.extend([data_buf, knots_buf, ctrls_buf])
+            struct.pack_into('<Q', (ctypes.c_uint8 * 8).from_address(t_base + coff),
+                             0, dak32f_type_ptr)
+            struct.pack_into('<Q', (ctypes.c_uint8 * 8).from_address(t_base + coff + 8),
+                             0, ctypes.addressof(data_buf))
+            tracks_modified += 1
+
+    new_bytes = None
+    if tracks_modified > 0:
+        new_bytes = build_gr2_bytes(dll, fi, gr2_bytes, sdb_dict, sdb_crc)
+    dll.GrannyFreeFile(gr2_file)
+    return new_bytes, tracks_modified
+
+
 def patch_animation_entries(dll, gpk_entries, sdb_bytes, glb_animations,
                             anim_patch_filter=None):
     """
@@ -415,7 +504,7 @@ def patch_animation_entries(dll, gpk_entries, sdb_bytes, glb_animations,
     str_db = dll.GrannyGetStringDatabase(sdb_file)
 
     patched = 0
-    anim_entries = {k: v for k, v in gpk_entries.items() if not k.endswith('_Mesh')}
+    anim_entries = {k: v for k, v in gpk_entries.items() if not is_mesh_entry(k)}
 
     # Optional pre-filter (only used by CLI --anim-patch-filter, not by builder)
     if anim_patch_filter:
@@ -1462,12 +1551,19 @@ def _create_new_mesh(dll, fi, glb_m, skeleton_bones, template_mesh, material_ptr
             if matched and matched in bb_name_list:
                 remap[bp_idx] = bb_name_list.index(matched)
 
-        # Apply remap to all vertices
-        new_bj = np.zeros_like(bj_u8)
-        for j in range(4):
-            col = np.clip(bj_u8[:, j], 0, len(remap) - 1)
-            new_bj[:, j] = remap[col]
-        glb_m['bj_u8'] = new_bj
+        # Apply remap to all vertices.  When bone_palette is empty
+        # (mesh has bj_u8 but no joints[] in GLB — unusual but possible
+        # for accessories rigged to a single implicit bone), len(remap)
+        # is 0 and `np.clip(.., 0, -1)` overflows.  Zero the indices
+        # in that case so the mesh binds to the fallback root bone.
+        if len(remap) > 0:
+            new_bj = np.zeros_like(bj_u8)
+            for j in range(4):
+                col = np.clip(bj_u8[:, j], 0, len(remap) - 1)
+                new_bj[:, j] = remap[col]
+            glb_m['bj_u8'] = new_bj
+        else:
+            glb_m['bj_u8'] = np.zeros_like(bj_u8)
 
     # ── Build + replace vertex buffer (now with correct bone indices) ──
     vbuf_bytes = build_vertex_buffer_40(glb_m)
@@ -1827,7 +1923,24 @@ def convert(
     patch_animations: bool = False,
     anim_patch_filter=None,
     new_mesh_routing: dict = None,
+    add_animations=None,
 ) -> None:
+    """
+    add_animations
+        v3.11 animation_add: list of dicts describing brand-new
+        animation entries to add to the output GPK.  Each dict:
+            template    (required) — existing GR2 entry name to base
+                          the new entry on (provides the bone-track
+                          structure; must be on the same skeleton).
+            target      (required) — GPK entry key for the new entry.
+            glb_action  (optional) — GLB animation name; if set, the
+                          template's curves are OVERWRITTEN with this
+                          action's keyframes before serialization.  If
+                          absent, the template's bytes are byte-copied
+                          under the new key (clone-only).
+        Pair each entry with an SJSON-side alias (registered at runtime)
+        so modders can SetAnimation({Name=alias}) on the new key.
+    """
     print(f"[1/6] Parsing GLB: {glb_path}")
     glb_meshes = parse_glb(glb_path)
     print(f"  Found {len(glb_meshes)} mesh(es) in GLB")
@@ -1846,9 +1959,9 @@ def convert(
         with open(manifest_path) as f:
             manifest = json.load(f)
 
-    all_mesh_entries = [k for k in gpk_entries if k.endswith('_Mesh')]
+    all_mesh_entries = [k for k in gpk_entries if is_mesh_entry(k)]
     if not all_mesh_entries:
-        raise KeyError(f"No _Mesh entries in GPK. Available: {sorted(gpk_entries)}")
+        raise KeyError(f"No mesh entries in GPK. Available: {sorted(gpk_entries)}")
 
     # If entry_name is set, only process that single entry (legacy/override)
     if entry_name is not None:
@@ -1930,9 +2043,11 @@ def convert(
 
         gr2_files_to_free.append(gr2_file)
 
-    # Animation-only mods legitimately patch zero meshes.  Only raise
-    # when both the mesh and animation paths produced nothing.
-    if total_patched == 0 and not glb_animations:
+    # Animation-only / animation_add mods legitimately patch zero
+    # meshes.  Only raise when no path produced anything.
+    if (total_patched == 0
+            and not glb_animations
+            and not add_animations):
         _keepalive.clear()
         for gf in gr2_files_to_free:
             dll.GrannyFreeFile(gf)
@@ -1959,10 +2074,111 @@ def convert(
                                                     anim_patch_filter=anim_patch_filter)
         print(f"  {n_anim_patched} animation(s) patched")
 
+    # v3.11 animation_add: emit brand-new GPK entries.  Two modes:
+    #   1. Pure byte-clone (glb_action absent) — fast path, identical
+    #      curves under a new name.  Used when modders just want an
+    #      alias for an existing animation.
+    #   2. Clone + curve overwrite (glb_action set) — load the template,
+    #      replace its tracks with GLB-derived data, serialize anew.
+    #      Reuses the same _apply_glb_tracks_to_gr2 encoder used by
+    #      patch_animation_entries so we don't fork the curve format.
+    n_anim_cloned = 0
+    n_anim_authored = 0
+    if add_animations:
+        # Lazy: only set up DLL/SDB resources when an entry needs them.
+        _aa_dak32 = None
+        _aa_str_db = None
+        _aa_sdb_buf = None
+        _aa_sdb_file = None
+        for spec in add_animations:
+            template = spec.get('template')
+            target = spec.get('target')
+            glb_action = spec.get('glb_action')
+            if not (template and target):
+                print(f"  WARNING: animation_add entry missing template "
+                      f"or target: {spec!r}")
+                continue
+            if template not in gpk_entries:
+                print(f"  WARNING: animation_add template missing: "
+                      f"{template!r} — skipping target {target!r}")
+                continue
+            tpl_bytes = gpk_entries[template]
+
+            if not glb_action:
+                # Mode 1: pure byte-clone.
+                gpk_entries[target] = tpl_bytes
+                n_anim_cloned += 1
+                continue
+
+            # Mode 2: clone + overwrite curves with GLB action.
+            glb_tracks = glb_animations.get(glb_action) if glb_animations else None
+            if glb_tracks is None:
+                print(f"  WARNING: animation_add glb_action {glb_action!r} "
+                      f"not in GLB — falling back to byte clone for {target!r}")
+                gpk_entries[target] = tpl_bytes
+                n_anim_cloned += 1
+                continue
+
+            # Resolve the curve type ptr + a fresh SDB load on first use
+            # (we already disposed the original in the mesh loop above).
+            if _aa_dak32 is None:
+                try:
+                    _aa_dak32 = ctypes.c_void_p.in_dll(
+                        dll, 'GrannyCurveDataDaK32fC32fType').value
+                except (ValueError, AttributeError):
+                    print("  WARNING: GrannyCurveDataDaK32fC32fType missing "
+                          "— falling back to byte clone")
+                    gpk_entries[target] = tpl_bytes
+                    n_anim_cloned += 1
+                    continue
+                _aa_sdb_buf = ctypes.create_string_buffer(sdb_bytes)
+                _aa_sdb_file = dll.GrannyReadEntireFileFromMemory(
+                    len(sdb_bytes), _aa_sdb_buf)
+                if not _aa_sdb_file:
+                    print("  WARNING: SDB reload for animation_add failed "
+                          "— falling back to byte clone")
+                    gpk_entries[target] = tpl_bytes
+                    n_anim_cloned += 1
+                    continue
+                _aa_str_db = dll.GrannyGetStringDatabase(_aa_sdb_file)
+
+            new_bytes, n_tracks = _apply_glb_tracks_to_gr2(
+                dll, tpl_bytes, _aa_str_db, glb_tracks,
+                _aa_dak32, sdb_dict, sdb_crc)
+            if new_bytes:
+                gpk_entries[target] = new_bytes
+                n_anim_authored += 1
+                print(f"  animation_add: {target} <- {glb_action} via "
+                      f"template {template} ({n_tracks} tracks)")
+            else:
+                # Encoder produced nothing usable — modders still get
+                # the byte-clone fallback so the alias resolves to
+                # SOMETHING playable, just unmodified.
+                print(f"  WARNING: encoder failed for {target!r}; "
+                      f"falling back to byte clone of {template!r}")
+                gpk_entries[target] = tpl_bytes
+                n_anim_cloned += 1
+        if _aa_sdb_file:
+            dll.GrannyFreeFile(_aa_sdb_file)
+        _keepalive.clear()
+        msg_parts = []
+        if n_anim_cloned:
+            msg_parts.append(f"{n_anim_cloned} cloned")
+        if n_anim_authored:
+            msg_parts.append(f"{n_anim_authored} authored from GLB")
+        if msg_parts:
+            print(f"  animation_add: {', '.join(msg_parts)}")
+
     pack_gpk(gpk_entries, output_gpk)
     entries_msg = f" across {len(entries_to_patch)} entries" if len(entries_to_patch) > 1 else ""
     anim_msg = f", {n_anim_patched} animation(s)" if n_anim_patched else ""
-    print(f"\nDone!  {total_patched} mesh(es){entries_msg}{anim_msg} patched -> {output_gpk!r}")
+    add_msg = ""
+    if n_anim_cloned or n_anim_authored:
+        bits = []
+        if n_anim_cloned: bits.append(f"{n_anim_cloned} cloned")
+        if n_anim_authored: bits.append(f"{n_anim_authored} authored")
+        add_msg = f", {' + '.join(bits)} new animation(s)"
+    print(f"\nDone!  {total_patched} mesh(es){entries_msg}{anim_msg}{add_msg} patched -> {output_gpk!r}")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────

@@ -43,6 +43,7 @@ IMPORTER   = os.path.join(SCRIPT_DIR, "gltf_to_gr2.py")
 DEFAULT_OUTPUT = os.path.join(os.path.expanduser("~"), "Documents", "CG3H_Mods")
 
 from cg3h_constants import STEAM_PATHS, CG3H_BUILDER_DEPENDENCY, find_game_path
+from gpk_pack import is_mesh_entry
 
 
 
@@ -531,10 +532,41 @@ class App:
         # Show what will actually be built
         display_name = self._build_mod_name.get() or name
         display_author = self._build_author.get() or author
-        self._build_info.config(
-            text=f'"{display_name}" by {display_author}  |  {character}  |  {ops_str}  |  v{version}',
-            foreground="#555",
-        )
+        info_lines = [
+            f'"{display_name}" by {display_author}  |  {character}  |  '
+            f'{ops_str}  |  v{version}'
+        ]
+
+        # v3.11: surface animation_add aliases.  Modders need to know
+        # the EXACT logical_name they'll have to pass to SetAnimation
+        # at runtime, since CG3HBuilder generates it from
+        # action_name / metadata.author and re-using the wrong string
+        # in their Lua plugin is a silent failure (entity disappears).
+        new_anims = m.get("target", {}).get("new_animations", []) or []
+        if new_anims:
+            info_lines.append("")
+            info_lines.append(
+                f"This build will register {len(new_anims)} new "
+                f"animation alias(es):")
+            for entry in new_anims[:8]:
+                if not isinstance(entry, dict):
+                    continue
+                logical = entry.get("logical_name", "?")
+                granny = entry.get("granny_name", "?")
+                clone_from = entry.get("clone_from", "")
+                src = entry.get("source_glb_action")
+                mode = "GLB-authored" if src else "byte-clone"
+                info_lines.append(
+                    f"  • {logical}  →  {granny}  ({mode} from "
+                    f"{clone_from or '?'})"
+                )
+            if len(new_anims) > 8:
+                info_lines.append(f"  ... and {len(new_anims) - 8} more")
+            info_lines.append(
+                "Use rom.game.CG3H_API.play_animation(target_id, "
+                "<logical_name>) to trigger from a plugin.")
+
+        self._build_info.config(text="\n".join(info_lines), foreground="#555")
         if not self._build_running:
             self._build_btn.config(state=tk.NORMAL)
 
@@ -1161,7 +1193,7 @@ class App:
                 pos += nl
                 cs = struct.unpack_from('<I', data, pos)[0]
                 pos += 4
-                if name.endswith('_Mesh'):
+                if is_mesh_entry(name):
                     mesh_entries.append(name)
                 pos += cs
         except Exception:

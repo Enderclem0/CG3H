@@ -83,6 +83,16 @@ local runtime_ctx = {
     game_dir          = "",  -- populated below from cg3h_status.json
 }
 
+-- v3.11: register the SJSON-alias callback BEFORE running the
+-- builder.  The callback closes over `mod_state.build_status`, which
+-- the builder will populate later.  Registering early ensures the
+-- callback exists when the engine first reads animation SJSON files
+-- (which happens early — before runtime.apply finishes the synchronous
+-- builder subprocess).  After the builder + load_status complete,
+-- reload_game_data() forces the engine to re-read SJSON so the
+-- callback fires with the populated state.
+runtime.register_animation_aliases(mod_state)
+
 runtime.apply(mod_state, runtime_ctx)
 
 -- Status JSON is written by the builder during runtime.apply().  Read it
@@ -94,6 +104,26 @@ runtime_ctx.game_dir = mod_state.game_dir
 -- v3.9: populate mod_state.variants from the builder's status output.
 -- Must run AFTER load_status so build_status[char].variants is available.
 runtime.register_variants(mod_state, runtime_ctx)
+
+-- v3.11: now that build_status is populated, ask the engine to re-read
+-- its game data — our callback will inject the alias entries on the
+-- second read.  No-op if no aliases are registered.
+local n_aliases = runtime.reload_game_data_for_aliases(mod_state)
+if n_aliases > 0 then
+    rom.log.info(LOG_PREFIX .. " " .. n_aliases
+        .. " custom animation alias(es) queued")
+end
+
+-- v3.11: expose the play_animation helper on rom.game so other plugins
+-- can call it without knowing CG3H's internals.  rom.game is the game's
+-- _G, shared across all H2M plugins.  Modders use:
+--   local cg3h = rom.game.CG3H_API
+--   cg3h.play_animation(rom.game.CurrentRun.Hero.ObjectId, "MyAnim")
+if rom.game then
+    rom.game.CG3H_API = rom.game.CG3H_API or {}
+    rom.game.CG3H_API.play_animation = runtime.play_animation
+    rom.game.CG3H_API.version = "3.11.0"
+end
 
 -- NOTE: apply_visibility is NOT called at startup because HashGuid::Lookup
 -- returns 0 before the first scene loads.  The builder respects mod_state
@@ -143,6 +173,13 @@ ui.init(mod_state, {
             mod_state.set_active_variant(character, entry_name, mod_id, builder_data_dir)
         end
         return runtime.swap_character_all(character, mod_id, mod_state)
+    end,
+    -- v3.11: in-game tester for animation_add aliases + animation_patch
+    -- edits.  The Animations tab calls this to play a clip on the
+    -- selected target.  Returns true on success so the UI can show a
+    -- success/error banner.
+    on_play_animation = function(target_id, anim_name)
+        return runtime.play_animation(target_id, anim_name)
     end,
     -- v3.9 Step 4.5: apply default/persisted variant selections on the
     -- first ImGui frame.  Can't run at plugin-init time because model

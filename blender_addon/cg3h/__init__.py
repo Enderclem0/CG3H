@@ -725,6 +725,51 @@ class CG3H_OT_Export(bpy.types.Operator):
         workspace = os.path.join(self.output_dir, mod_name)
         os.makedirs(workspace, exist_ok=True)
 
+        # v3.11: auto-prefix new Blender actions with the author slug.
+        # Two reasons:
+        #   1. Cross-mod alias collision avoidance — every modder shipping
+        #      "Dance" would clash in the engine's global Animation table.
+        #   2. Visibility — the modder writes Lua code that calls
+        #      SetAnimation({Name = "Author_Dance"}); seeing the prefixed
+        #      name in their Blender outliner makes that obvious.
+        # Apply only to actions whose names DON'T match a stock animation
+        # entry (those are intentional animation_patch overrides) and
+        # DON'T already start with the author slug.
+        manifest = _get_manifest(context) or {}
+        stock_anims = set(
+            (manifest.get('animations') or {}).get('hashes', {}).keys()
+        )
+        author_slug = "".join(c for c in author if c.isalnum())
+        if author_slug and stock_anims:
+            renamed = []
+            prefix = author_slug + "_"
+            for action in bpy.data.actions:
+                if action.name in stock_anims:
+                    continue  # intentional stock override (animation_patch)
+                if action.name.startswith(prefix):
+                    continue  # already prefixed (re-export)
+                new_name = prefix + action.name
+                # Sanity: don't collide with another action's existing name
+                if new_name in bpy.data.actions:
+                    continue
+                old_name = action.name
+                action.name = new_name
+                renamed.append((old_name, new_name))
+            if renamed:
+                msg = (f"Auto-prefixed {len(renamed)} action(s) with "
+                       f"'{author_slug}_' to avoid cross-mod collisions:")
+                self.report({'INFO'}, msg)
+                for old, new in renamed[:5]:
+                    print(f"[CG3H]   {old}  →  {new}")
+                if len(renamed) > 5:
+                    print(f"[CG3H]   ... and {len(renamed) - 5} more")
+        elif not stock_anims:
+            # No manifest cached → can't tell stock from custom; skip
+            # the auto-rename rather than risk renaming a stock-matching
+            # action.  The modder can re-import from CG3H to populate
+            # the manifest.
+            pass
+
         # Export GLB
         glb_path = os.path.join(workspace, f"{character}.glb")
         bpy.ops.export_scene.gltf(

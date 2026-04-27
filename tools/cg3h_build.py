@@ -623,6 +623,85 @@ def _sync_mod_json(mod_dir):
         types.add('animation_patch')
         changed = True
 
+    # ── Detect new animations (v3.11 animation_add) ──
+    # An "animation" in the GLB whose name doesn't exist in manifest.
+    # animations.hashes is a brand-new clip the modder authored.  Auto-
+    # populate target.new_animations so the builder routes it through
+    # the animation_add path.  Modders can override any field by hand-
+    # editing mod.json; we only fill in entries the modder hasn't.
+    discovered_new = []
+    if glb_path and os.path.isfile(glb_path):
+        try:
+            gltf_for_add = pygltflib.GLTF2().load(glb_path)
+            anim_hashes = manifest.get('animations', {}).get('hashes', {})
+            for anim in (gltf_for_add.animations or []):
+                if anim.name and anim.name not in anim_hashes:
+                    discovered_new.append(anim.name)
+        except Exception as e:
+            print(f"  WARNING: new-animation detection failed: {e}")
+
+    if discovered_new:
+        # Author slug: prefer mod metadata.author, fall back to "Mod"
+        # so we always produce a parseable granny_name.  The Blender
+        # addon auto-prefixes action names with the same slug at export
+        # time (so cross-mod logical_name collisions are avoided);
+        # detect that here and strip BEFORE recomposing granny_name to
+        # avoid <Char>_<Author>_<Author>_<Action>_C_00 double-prefix.
+        meta = mod.get('metadata', {})
+        author = (meta.get('author') or 'Mod').replace(' ', '').replace('-', '')
+        author_slug = ''.join(c for c in author if c.isalnum())
+        author_prefix = author_slug + '_' if author_slug else ''
+        character = target.get('character') or 'Unknown'
+
+        # Default clone_from: prefer a base-idle entry on the same
+        # character (safe same-skeleton template), else the first
+        # entry in the manifest's hashes alphabetically.  Modders
+        # override per-entry if they want a specific template.
+        anim_hashes = manifest.get('animations', {}).get('hashes', {})
+        stock_names = sorted(anim_hashes.keys())
+        default_template = next(
+            (n for n in stock_names if 'NoWeapon_Base_Idle' in n),
+            stock_names[0] if stock_names else None,
+        )
+
+        existing = target.get('new_animations', []) or []
+        existing_logical = {
+            e.get('logical_name') for e in existing
+            if isinstance(e, dict) and e.get('logical_name')
+        }
+        added = 0
+        for action_name in discovered_new:
+            if action_name in existing_logical:
+                continue
+            # action_name is what the engine sees as logical_name (and
+            # what the modder will call from Lua).  When the Blender
+            # addon auto-prefixed it with author, strip that here so
+            # the granny_name has exactly one author segment.
+            stem = action_name
+            if author_prefix and stem.startswith(author_prefix):
+                stem = stem[len(author_prefix):]
+            entry = {
+                'logical_name': action_name,
+                'granny_name': f"{character}_{author_slug}_{stem}_C_00",
+                'source_glb_action': action_name,
+            }
+            if default_template:
+                entry['clone_from'] = default_template
+            existing.append(entry)
+            added += 1
+        if added:
+            target['new_animations'] = existing
+            changed = True
+            print(f"  detected {added} new animation(s) "
+                  f"(target.new_animations populated)")
+        if 'animation_add' not in types:
+            types.add('animation_add')
+            changed = True
+    elif (target.get('new_animations') or []) and 'animation_add' not in types:
+        # Hand-authored mod.json with new_animations but missing type.
+        types.add('animation_add')
+        changed = True
+
     # ── Save updated mod.json ──
     if changed:
         mod['type'] = sorted(types) if len(types) > 1 else (next(iter(types)) if types else '')

@@ -4,6 +4,114 @@ All notable changes to CG3H are documented here.
 
 ---
 
+## v3.11.0
+
+**Brand-new animations.**  `animation_add` is the next step beyond
+v3.10's `animation_patch` — instead of editing existing clips,
+modders can ship animation entries the game has never seen, with
+custom names, and trigger them from Lua.
+
+This unlocks emote mods, custom death/idle/win-pose animations
+selectable per modder, cinematic mods that play scripted sequences,
+and mods that compose existing motion (a "fast idle" built by
+re-timing the stock idle at 2× speed).
+
+### What this enables
+
+- New emote animations bound to a hotkey or a UI button.
+- Custom death / idle / win-pose animations selectable per modder.
+- Mods that compose existing motion under custom names.
+
+### What it does NOT enable
+
+- Engine-driven triggers (e.g., "play this when health drops below
+  20%").  Modders call `SetAnimation` themselves from their own
+  H2M plugin — CG3H exposes a small helper at
+  `rom.game.CG3H_API.play_animation(target_id, anim_name)`.
+- New animation tracks bound to bones the character doesn't have.
+  Skeleton extension stays out of scope (v4.0).
+
+### For mod authors
+
+Two write modes are supported:
+
+1. **Pure clone** (`clone_from`) — alias an existing GR2 animation
+   under a new name.  Useful for re-targeting a stock animation
+   to a new logical name your plugin can call.  No GLB content
+   required.
+2. **GLB-authored** (`source_glb_action` + `clone_from`) — the
+   modder's Blender action provides the keyframes; the
+   `clone_from` template provides the bone-track scaffolding.  The
+   builder grafts the keyframes onto the template's bone structure
+   and serializes a fresh GR2 entry.
+
+`mod.json`:
+
+```json
+{
+  "format": "cg3h-mod/1.0",
+  "type": "animation_add",
+  "metadata": { ... },
+  "target": {
+    "character": "Melinoe",
+    "new_animations": [
+      {
+        "logical_name": "FunkyDance",
+        "granny_name": "Melinoe_Author_FunkyDance_C_00",
+        "clone_from": "Melinoe_NoWeapon_Base_Idle_00",
+        "source_glb_action": "FunkyDance",
+        "loop": true,
+        "inherit_from": "MelinoeBaseAnimation",
+        "chain_to": "MelinoeIdleWeaponless"
+      }
+    ]
+  },
+  "assets": { "glb": "MyMod.glb" }
+}
+```
+
+`cg3h_build` auto-populates `target.new_animations` from any
+Blender action whose name doesn't match a stock animation, so
+hand-editing the schema is optional.
+
+**Naming guidance**: animation aliases (`logical_name`) live in a
+single global table the game reads at startup, so two mods that
+ship the same alias name will collide.  Pick action names that
+won't clash — prefix with your author handle (`Enderclem_Dance`
+instead of `Dance`) until the addon does this for you.  GR2 entry
+keys (`granny_name`) are auto-namespaced with the author slug, so
+GPK-level collisions are not an issue.
+
+### How it works under the hood
+
+The Lua `SetAnimation({Name = X})` resolves `X` against an internal
+Animation alias table the engine builds at startup from
+`Content/Game/Animations/Model/*.sjson`.  `Name` is the SJSON
+logical alias, NOT the GR2 entry key.  v3.11 ships two halves:
+
+1. The new GR2 entry is baked into the merged per-character GPK at
+   build time.
+2. CG3HBuilder's runtime registers an `on_sjson_read_as_string`
+   callback (Hell2Modding API) that appends a synthesized
+   `Animation { Name = ..., GrannyAnimation = ..., Loop = ..., ... }`
+   entry to the character's SJSON file before the engine parses it.
+
+The engine then accepts the new alias as if it had always existed.
+Animation aliases live in `cg3h_status.json` under
+`characters[*].alias_animations` so they survive cache hits without
+re-running the builder.
+
+### Compatibility
+
+- Existing `animation_patch` mods are unchanged — v3.11 is purely
+  additive.
+- `_classify_mod` returns a 4-tuple now; `is_animation_add` is
+  orthogonal to mesh classification, so a single mod can be both
+  a variant AND ship new animations.
+- H2M dependency stays at 1.0.95.
+
+---
+
 ## v3.10.0
 
 **Standalone animation mods.**  `animation_patch` is now a first-class

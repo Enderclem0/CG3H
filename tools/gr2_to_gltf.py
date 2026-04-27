@@ -45,6 +45,7 @@ from pkg_texture import (
     _read_7bit_int, _read_csstring, _swap32, build_dds_header, load_texture_index,
     read_pkg_chunks, save_texture_index, scan_textures,
 )
+from gpk_pack import is_mesh_entry
 
 # Module-level state populated by setup_granny().
 _TYPES: dict = {}
@@ -763,7 +764,7 @@ def extract_animations(dll, gpk_entries, sdb_bytes, anim_filter=None,
     anim_workers: 0 = auto (cpu_count), 1 = sequential, N = use N workers.
     Returns list of dicts with name, duration, and decoded track data.
     """
-    anim_entries = {k: v for k, v in gpk_entries.items() if not k.endswith('_Mesh')}
+    anim_entries = {k: v for k, v in gpk_entries.items() if not is_mesh_entry(k)}
     if anim_filter:
         pattern = anim_filter.lower()
         anim_entries = {k: v for k, v in anim_entries.items() if pattern in k.lower()}
@@ -1703,12 +1704,12 @@ def main():
 
     print(f"[1/5] Extracting GPK: {gpk_path}")
     entries = extract_all_from_gpk(gpk_path)
-    all_mesh_keys = [k for k in entries if k.endswith('_Mesh')]
+    all_mesh_keys = [k for k in entries if is_mesh_entry(k)]
 
     if args.list_entries:
         print(f"Entries in {gpk_path}:")
         for k, v in entries.items():
-            tag = " [MESH]" if k.endswith('_Mesh') else ""
+            tag = " [MESH]" if is_mesh_entry(k) else ""
             print(f"  {k} ({len(v):,} bytes){tag}")
         sys.exit(0)
 
