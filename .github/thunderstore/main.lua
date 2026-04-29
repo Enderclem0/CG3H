@@ -49,17 +49,25 @@ end
 local builder_path = rom.path.combine(builder_data_dir, "cg3h_builder.exe")
 
 -- ── Module loading ─────────────────────────────────────────────────────
--- H2M's Lua plugin loader does NOT add the plugin folder to package.path,
--- so we add it ourselves before the first require.  Includes the
--- `?/init.lua` fallback so future `ui/` sub-modules load cleanly.
+-- Use dofile() with absolute paths instead of require() + package.path.
+-- Two reasons:
+--   1. require() caches into the GLOBAL package.loaded table; if any other
+--      plugin happens to require a module name we used (mod_state, runtime,
+--      ui), they'd silently get OUR module.
+--   2. Mutating package.path persists across the entire Lua state and
+--      affects every plugin that uses package.path-aware loaders (require,
+--      package.searchers).  We can't predict the downstream effect.
+-- dofile() takes a literal path, doesn't cache, doesn't touch package.path
+-- — completely scoped to our plugin.  Modules end with `return M` so the
+-- behavior matches the previous require() return value.
 
-package.path = plugin_folder .. "/?.lua;"
-            .. plugin_folder .. "/?/init.lua;"
-            .. package.path
+local function _load_module(name)
+    return dofile(rom.path.combine(plugin_folder, name .. ".lua"))
+end
 
-local mod_state = require("mod_state")
-local runtime   = require("runtime")
-local ui        = require("ui")
+local mod_state = _load_module("mod_state")
+local runtime   = _load_module("runtime")
+local ui        = _load_module("ui")
 
 -- ── Pipeline ───────────────────────────────────────────────────────────
 
@@ -146,7 +154,17 @@ if variant_count > 0 then
     rom.log.info(LOG_PREFIX .. " " .. variant_count .. " variant(s) registered for outfit switching")
 end
 
-ui.init(mod_state, {
+-- IMPORTANT: build a context table once, then construct the rom.gui.*
+-- callback closures HERE in main.lua's chunk.  When H2M's sol2 binding
+-- registers a closure, the closure carries its function-environment
+-- with it; if that env is ui.lua's chunk env (because the closure was
+-- created INSIDE ui.lua's M.init), sol2 misroutes the callback to a
+-- different plugin context — which silently corrupts ImGui rendering
+-- for OTHER plugins (verified end-to-end: registering CG3H's add_imgui
+-- from inside ui.init reproducibly breaks zerp-MelSkin's menu).
+-- Constructing the closures here keeps their _ENV bound to main.lua,
+-- which IS the plugin's m_env.  ui.lua exposes only helper functions.
+local ui_ctx = {
     on_refresh = function()
         mod_state.refresh(plugins_data_dir, builder_data_dir)
     end,
@@ -155,18 +173,12 @@ ui.init(mod_state, {
         if not character then
             return nil
         end
-        -- Draw-gate is always available — Hell2Modding 1.0.92+ is a hard
-        -- dependency, so toggles are live.  Mid-session GPK rebuilds were
-        -- never useful anyway — LoadModelData is not safe mid-session and
-        -- the plugin-init path already rebuilds GPKs on every restart.
         return runtime.toggle_mod_visibility(mod_id, enabled, mod_state)
     end,
-    -- v3.9: per-entry body picker.
     on_set_variant_entry = function(character, entry_name, mod_id)
         mod_state.set_active_variant(character, entry_name, mod_id, builder_data_dir)
         return runtime.swap_entry(character, entry_name, mod_id, mod_state)
     end,
-    -- v3.9: "Apply to all scenes" cascade.
     on_set_variant_all = function(character, mod_id)
         local char_variants = mod_state.variants[character] or {}
         for entry_name, _ in pairs(char_variants) do
@@ -174,29 +186,31 @@ ui.init(mod_state, {
         end
         return runtime.swap_character_all(character, mod_id, mod_state)
     end,
-    -- v3.11: in-game tester for animation_add aliases + animation_patch
-    -- edits.  The Animations tab calls this to play a clip on the
-    -- selected target.  Returns true on success so the UI can show a
-    -- success/error banner.
-    on_play_animation = function(target_id, anim_name)
-        return runtime.play_animation(target_id, anim_name)
-    end,
-    -- v3.9 Step 4.5: apply default/persisted variant selections on the
-    -- first ImGui frame.  Can't run at plugin-init time because model
-    -- entries aren't in mModelData yet; add_imgui fires AFTER the model
-    -- load, so first-frame is the earliest safe moment.
+    -- v3.11 Animations tab was removed pending a clean redesign (see
+    -- ROADMAP.md).  rom.game.CG3H_API.play_animation is still available
+    -- for plugin authors who want to trigger their custom aliases.
     on_first_frame = function()
-        -- Canary: if the GMD layout drifted in a game update, surface
-        -- it as a single ERROR line before features start failing in
-        -- downstream ways.  Harmless if it passes.  Hecate_Mesh is
-        -- always present so use it; if it isn't, fall through and let
-        -- the variant apply log the entry-missing path.
         if rom.data.draw_sanity_check_gmd then
             rom.data.draw_sanity_check_gmd("HecateHub_Mesh")
         end
         runtime.apply_active_variants(mod_state)
     end,
-})
+}
+
+-- One-shot first-frame guard.  Local to main.lua's chunk so the
+-- closure built below has main.lua's env.
+local _ui_did_first_frame = false
+
+rom.gui.add_to_menu_bar(function()
+    ui.render_menu_bar()
+end)
+rom.gui.add_imgui(function()
+    if not _ui_did_first_frame then
+        _ui_did_first_frame = true
+        if ui_ctx.on_first_frame then ui_ctx.on_first_frame() end
+    end
+    ui.render(mod_state, ui_ctx)
+end)
 
 -- v3.9: per-mod outfit picker.  Each mesh_replace mod with declared
 -- target.mesh_entries gets a slim variant entry in the merged GPK; plus

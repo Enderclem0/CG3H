@@ -249,8 +249,16 @@ function M.register_animation_aliases(state)
         -- Collect aliases targeting this file from the LIVE state
         -- (closure captures state by reference; build_status is
         -- populated by load_status after the builder finishes).
+        --
+        -- IMPORTANT: H2M's hook treats ANY string return as
+        -- "modification happened" and rewrites the engine's read
+        -- buffer with our string (data.cpp:354-365).  That round-trip
+        -- through Lua perturbs other mods' SJSON-driven init even
+        -- when the content is byte-identical.  Return nil unless we
+        -- actually have aliases to inject — that lets H2M's
+        -- any_modif_happened flag stay false and skips the rewrite.
         if not state or not state.build_status then
-            return content
+            return  -- nil → no modification
         end
         local matching = {}
         for _, rec in pairs(state.build_status) do
@@ -262,7 +270,7 @@ function M.register_animation_aliases(state)
             end
         end
         if #matching == 0 then
-            return content
+            return  -- nil → no modification
         end
 
         local parts = {}
@@ -271,12 +279,13 @@ function M.register_animation_aliases(state)
         end
         local injected = table.concat(parts, "\n\n")
         local new_content = inject_animation_entries(content, injected)
-        if new_content ~= content then
-            rom.log.info(LOG_PREFIX .. " injected "
-                .. tostring(#matching) .. " alias(es) into "
-                .. tostring(file_path)
-                .. " (size " .. #content .. " -> " .. #new_content .. ")")
+        if new_content == content then
+            return  -- nothing actually changed
         end
+        rom.log.info(LOG_PREFIX .. " injected "
+            .. tostring(#matching) .. " alias(es) into "
+            .. tostring(file_path)
+            .. " (size " .. #content .. " -> " .. #new_content .. ")")
         return new_content
     end)  -- no path filter; we filter inside the callback by basename
 
@@ -453,9 +462,22 @@ function M.toggle_mod_visibility(mod_id, enabled, state)
             break
         end
     end
-    if not target_mod or #target_mod.mesh_entries == 0 then
-        rom.log.info(LOG_PREFIX .. " [draw-gate] no mesh entries for " .. mod_id)
+    if not target_mod then
+        rom.log.info(LOG_PREFIX .. " [draw-gate] mod not found: " .. mod_id)
         return nil
+    end
+
+    -- animation_patch / animation_add mods don't ship meshes — there's
+    -- nothing for the draw-gate to flip.  Their content is baked into
+    -- the merged GPK + SJSON aliases at build time, so the toggle DOES
+    -- take effect, just on next game launch (CG3HBuilder reruns the
+    -- builder and respects mod_state).  Surface that as a "restart"
+    -- outcome so the UI shows the right message instead of treating it
+    -- as a failure.
+    if #target_mod.mesh_entries == 0 then
+        rom.log.info(LOG_PREFIX .. " [draw-gate] no mesh entries for "
+            .. mod_id .. " (animation-only mod) — rebuild on next launch")
+        return "restart"
     end
 
     -- mesh_add mods merge their meshes INTO the stock entry alongside the

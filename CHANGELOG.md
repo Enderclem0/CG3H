@@ -4,6 +4,73 @@ All notable changes to CG3H are documented here.
 
 ---
 
+## v3.11.1
+
+**Compatibility fix.** When CG3HBuilder was active alongside other
+multi-file ImGui mods (notably `zerp-MelSkin`, plus the rest of the
+SGG_Modding-DemonDaemon-driven stack), those mods' menus would fail
+to render with "error happened on plugin." Disabling CG3HBuilder
+unblocked them. v3.11.1 ships the fix.
+
+### What was happening
+
+CG3HBuilder loaded its helper Lua files (`mod_state.lua`,
+`runtime.lua`, `ui.lua`) with `dofile()`. `dofile` runs the loaded
+chunk in a *default* environment, not the per-plugin `_PLUGIN`-tagged
+environment Hell2Modding sets up for our plugin. Functions defined
+inside those helpers therefore carried the wrong environment as
+their `_ENV`. When such a function later called an ImGui binding,
+H2M's per-plugin ImGui dispatch saw a "ghost" plugin context and
+trampled on whichever plugin happened to draw next — alphabetically,
+that was MelSkin.
+
+### Fix
+
+`main.lua` now loads each helper module via
+`loadfile(path, "t", _ENV)()` instead of `dofile(path)`. The fourth
+argument explicitly attaches main.lua's `_ENV` (= the plugin's m_env)
+to the loaded chunk, so functions defined inside the helpers carry
+the correct plugin marker. ImGui calls dispatch to CG3HBuilder's
+slot, MelSkin's slot stays untouched.
+
+`ui.lua` also lost its `M.init(state, ctx)` entrypoint; it now
+exposes `render_menu_bar`, `render`, and `is_open` as plain helpers.
+main.lua wraps them in closures defined in main.lua's chunk before
+passing them to `rom.gui.add_to_menu_bar` / `rom.gui.add_imgui` —
+that way the closures sol2 captures carry main.lua's `_ENV`.
+
+### Other changes
+
+- **Toggling an animation-only mod** now shows
+  *"animation mods rebuild on next game launch"* (yellow banner)
+  instead of *"toggle failed"* (red). The toggle takes effect — it
+  just requires a rebuild because animation_patch / animation_add
+  content is baked into the merged GPK + SJSON aliases at build
+  time.
+- **SJSON injection callback** returns `nil` (not `content`) when
+  there's nothing to inject. Returning a string triggered H2M's
+  buffer-rewrite path on every SJSON read; `nil` skips it cleanly.
+- **In-game Animations tab removed.** The first-pass tab hardcoded
+  per-character NPC `DestinationName`s and tried to play GR2 entry
+  keys via SetAnimation. Both were broken patterns. The clean
+  redesign is on the roadmap (target picker driven by installed
+  mods, GR2-key → SJSON-alias reverse lookup so patched-stock rows
+  work too).
+- **Bulk reference dump tool**:
+  `tools/bulk_export_reference.py` exports every character GPK to
+  a single folder (`<Character>.glb` + manifest + extracted PNG
+  textures), suitable as an offline modding reference. Idempotent
+  rerun.
+
+### Compatibility
+
+- H2M dependency stays at 1.0.95 (works against 1.0.95+, including
+  the recent post-launch rebases).
+- No mod.json schema changes.
+- No data-format changes — existing v3.11.0 mods are unaffected.
+
+---
+
 ## v3.11.0
 
 **Brand-new animations.**  `animation_add` is the next step beyond

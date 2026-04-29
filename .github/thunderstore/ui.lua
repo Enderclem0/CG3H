@@ -45,6 +45,9 @@ local function _run_and_banner(cb, label)
     elseif outcome == "transition" then
         banner = { kind = "transition",
                    text = label .. ": changes apply on next area transition." }
+    elseif outcome == "restart" then
+        banner = { kind = "transition",
+                   text = label .. ": animation mods rebuild on next game launch." }
     elseif outcome == "error" or outcome == nil then
         banner = { kind = "error",
                    text = label .. ": toggle failed (see console)." }
@@ -541,34 +544,45 @@ local function _draw_window(state, ctx)
 end
 
 -- ── Public API ─────────────────────────────────────────────────────────
+--
+-- Why these are split helpers instead of a single M.init that registers
+-- with rom.gui.* itself: H2M's sol2 binding for ImGui calls captures the
+-- calling Lua function's _ENV at invocation time.  Functions defined in
+-- THIS file (ui.lua) carry ui.lua's chunk env as their _ENV — even if
+-- ui.lua was loaded with `loadfile(path, "t", main_env)` — meaning sol2
+-- attributes ImGui calls made from those functions to the wrong plugin
+-- context.  That silently corrupts H2M's per-plugin ImGui state and
+-- breaks rendering for OTHER plugins (we reproduced this end-to-end
+-- with zerp-MelSkin).
+--
+-- The fix: main.lua wraps these helpers in closures defined in main.lua's
+-- own chunk, then passes those closures to rom.gui.add_to_menu_bar /
+-- rom.gui.add_imgui.  The closure carries main.lua's _ENV, so sol2 sees
+-- our plugin context correctly and the ImGui call (made from inside the
+-- closure when it calls ui.render or ui.render_menu_bar) is attributed
+-- to CG3HBuilder.  Don't move the rom.gui.* calls back into this file.
 
---- Register the ImGui callbacks with H2M.
--- @param state   the mod_state table (read-only from here on)
--- @param ctx     { on_refresh = fn, on_toggle_mod = fn(id, enabled), ... }
-function M.init(state, ctx)
-    ctx = ctx or {}
+--- Render the top-menu-bar entry.  Toggles the manager window open.
+function M.render_menu_bar()
+    if ImGui.MenuItem("Mod Manager") then
+        window_open = not window_open
+    end
+end
 
-    rom.gui.add_to_menu_bar(function()
-        if ImGui.MenuItem("Mod Manager") then
-            window_open = not window_open
-        end
-    end)
+--- Render the manager window if currently open.  Caller is expected to
+-- run this each ImGui frame.
+-- @param state   mod_state
+-- @param ctx     { on_refresh, on_toggle_mod, on_set_variant_entry,
+--                  on_set_variant_all, on_first_frame }
+function M.render(state, ctx)
+    if window_open then
+        _draw_window(state, ctx)
+    end
+end
 
-    -- One-shot: on the first ImGui frame, apply the default/persisted
-    -- variant selections.  Deferred to first frame because model entries
-    -- only exist in mModelData after LoadAllModelAndAnimationData — which
-    -- runs BEFORE any ImGui callback fires but AFTER plugin init.  See
-    -- project_loading_timeline.md.
-    local did_init_variants = false
-    rom.gui.add_imgui(function()
-        if not did_init_variants then
-            did_init_variants = true
-            if ctx.on_first_frame then ctx.on_first_frame() end
-        end
-        if window_open then
-            _draw_window(state, ctx)
-        end
-    end)
+--- Whether the manager window is currently open.
+function M.is_open()
+    return window_open
 end
 
 return M
