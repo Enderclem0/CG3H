@@ -250,6 +250,23 @@ def _get_manifest(context):
         return None
 
 
+def _new_actions(context):
+    """Return Blender Actions whose names DON'T match any stock animation
+    in the cached manifest — i.e. the actions that will be exported as
+    `animation_add` entries.  Empty list if the manifest is missing
+    (the modder hasn't imported the character yet) since we can't tell
+    stock from new without it."""
+    manifest = _get_manifest(context)
+    if not manifest:
+        return []
+    stock = set(
+        (manifest.get('animations') or {}).get('hashes', {}).keys()
+    )
+    if not stock:
+        return []
+    return [a for a in bpy.data.actions if a.name not in stock]
+
+
 def _get_mesh_bb_names(context, mesh_obj_name):
     """Return the bone-binding name list for a mesh, or None if not in manifest."""
     m = _get_manifest(context)
@@ -692,6 +709,14 @@ class CG3H_OT_Export(bpy.types.Operator):
                     if value.lower() == part.lower():
                         self.character = value
                         break
+
+        # Seed each new (non-stock) action with a `cg3h_loop` custom
+        # property so the dialog can render a checkbox bound to it.
+        # Stored on the Action so it persists with the .blend.
+        for action in _new_actions(context):
+            if "cg3h_loop" not in action:
+                action["cg3h_loop"] = False
+
         return context.window_manager.invoke_props_dialog(self, width=400)
 
     def draw(self, context):
@@ -700,6 +725,18 @@ class CG3H_OT_Export(bpy.types.Operator):
         layout.prop(self, "mod_name")
         layout.prop(self, "author")
         layout.prop(self, "output_dir")
+
+        # New animations: one row per non-stock Action with a loop
+        # checkbox.  Skipped silently if the modder hasn't imported
+        # the character yet (no manifest → can't tell stock from new).
+        new_actions = _new_actions(context)
+        if new_actions:
+            box = layout.box()
+            box.label(text="New animations (animation_add):")
+            for action in new_actions:
+                row = box.row()
+                row.prop(action, '["cg3h_loop"]', text="Loop")
+                row.label(text=action.name)
 
     def execute(self, context):
         if self.character == "NONE":
@@ -860,6 +897,20 @@ class CG3H_OT_Export(bpy.types.Operator):
         }
         if new_mesh_routing:
             target["new_mesh_routing"] = new_mesh_routing
+
+        # Pre-declare each non-stock Action as an animation_add entry
+        # carrying the modder's loop flag.  Builder's _sync_mod_json
+        # fills in the rest (granny_name, clone_from, source_glb_action)
+        # without overwriting fields we set here.  Action names here
+        # already reflect the author-prefix renaming above.
+        new_anim_entries = []
+        for action in _new_actions(context):
+            new_anim_entries.append({
+                "logical_name": action.name,
+                "loop": bool(action.get("cg3h_loop", False)),
+            })
+        if new_anim_entries:
+            target["new_animations"] = new_anim_entries
 
         # Detect animation tracks in the exported GLB.  The gltf
         # exporter writes them into the JSON chunk; we just read the

@@ -186,9 +186,9 @@ local ui_ctx = {
         end
         return runtime.swap_character_all(character, mod_id, mod_state)
     end,
-    -- v3.11 Animations tab was removed pending a clean redesign (see
-    -- ROADMAP.md).  rom.game.CG3H_API.play_animation is still available
-    -- for plugin authors who want to trigger their custom aliases.
+    on_play_animation = function(target_id, anim_name)
+        return runtime.play_animation(target_id, anim_name)
+    end,
     on_first_frame = function()
         if rom.data.draw_sanity_check_gmd then
             rom.data.draw_sanity_check_gmd("HecateHub_Mesh")

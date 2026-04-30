@@ -4,6 +4,49 @@ All notable changes to CG3H are documented here.
 
 ---
 
+## v3.11.2
+
+**Animations tab redesign + per-Action loop checkbox in the Blender
+addon.**
+
+### In-game Animations tab (clean redesign)
+
+The first-pass tab grouped rows by mod and used a global Hero / Hub
+NPC radio with a hardcoded `NPC_Hecate_01` text input.  Replaced
+with a per-character layout — one CollapsingHeader per character,
+listing every animation (new + patched) shipped by enabled mods,
+with mod attribution per row.  Each Play button targets the row's
+character implicitly: Melinoe / YoungMel → hero; everything else →
+`GetClosestUnitOfType` with the character name (then
+`NPC_<Char>_01` as a fallback).  No global picker, no hardcoded
+NPC names.
+
+Banner feedback when no live target is found —
+`Play 'X': Hecate not in current scene`.
+
+### Blender addon: per-Action Loop checkbox
+
+When you author a new animation in Blender (an Action whose name
+doesn't match any stock entry), the Export dialog now lists each
+non-stock Action with a Loop checkbox.  State is stored on
+`action["cg3h_loop"]` so it persists with the .blend file.  No
+more hand-editing mod.json after export to flip Loop on a custom
+clip.
+
+The addon writes `target.new_animations: [{logical_name, loop}]`
+for each non-stock Action; the builder's `_sync_mod_json` upserts
+to fill in `granny_name`, `clone_from`, and `source_glb_action`
+without overwriting anything the modder set.
+
+### Misc
+
+- `tools/install_plugin_local.py` auto-appends `/ReturnOfModding`
+  when you pass the profile root by mistake.  H2M only loads from
+  the subdir; deploying to the parent silently lands in an
+  unused folder.
+
+---
+
 ## v3.11.1
 
 **Compatibility fix.** When CG3HBuilder was active alongside other

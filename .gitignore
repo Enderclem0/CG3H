@@ -55,3 +55,8 @@ blender_addon/cg3h/cg3h_builder.exe
 
 # GUI-local config (saved game path, author name, etc.)
 tools/.cg3h_config.json
+
+# Local-only smoke fixtures — deploy to a specific r2modman profile
+# and only make sense on the author's machine.  Existing tracked
+# fixtures stay tracked; this just prevents new ones being added.
+tests/scripts/deploy_*_fixture.py

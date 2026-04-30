@@ -665,14 +665,12 @@ def _sync_mod_json(mod_dir):
         )
 
         existing = target.get('new_animations', []) or []
-        existing_logical = {
-            e.get('logical_name') for e in existing
+        existing_by_logical = {
+            e.get('logical_name'): e for e in existing
             if isinstance(e, dict) and e.get('logical_name')
         }
-        added = 0
-        for action_name in discovered_new:
-            if action_name in existing_logical:
-                continue
+
+        def _build_defaults(action_name):
             # action_name is what the engine sees as logical_name (and
             # what the modder will call from Lua).  When the Blender
             # addon auto-prefixed it with author, strip that here so
@@ -680,20 +678,45 @@ def _sync_mod_json(mod_dir):
             stem = action_name
             if author_prefix and stem.startswith(author_prefix):
                 stem = stem[len(author_prefix):]
-            entry = {
-                'logical_name': action_name,
+            d = {
                 'granny_name': f"{character}_{author_slug}_{stem}_C_00",
                 'source_glb_action': action_name,
             }
             if default_template:
-                entry['clone_from'] = default_template
-            existing.append(entry)
-            added += 1
-        if added:
+                d['clone_from'] = default_template
+            return d
+
+        added = 0
+        merged = 0
+        for action_name in discovered_new:
+            entry = existing_by_logical.get(action_name)
+            if entry is None:
+                entry = {'logical_name': action_name}
+                entry.update(_build_defaults(action_name))
+                existing.append(entry)
+                added += 1
+                continue
+            # Entry already declared by the addon (or by hand) — fill in
+            # any fields the modder didn't set without overwriting their
+            # values.  Lets the Blender addon write a minimal entry
+            # ({logical_name, loop}) and have the builder complete it.
+            defaults = _build_defaults(action_name)
+            entry_changed = False
+            for k, v in defaults.items():
+                if not entry.get(k):
+                    entry[k] = v
+                    entry_changed = True
+            if entry_changed:
+                merged += 1
+        if added or merged:
             target['new_animations'] = existing
             changed = True
-            print(f"  detected {added} new animation(s) "
-                  f"(target.new_animations populated)")
+            if added:
+                print(f"  detected {added} new animation(s) "
+                      f"(target.new_animations populated)")
+            if merged:
+                print(f"  filled in defaults on {merged} pre-declared "
+                      f"new_animations entr{'y' if merged == 1 else 'ies'}")
         if 'animation_add' not in types:
             types.add('animation_add')
             changed = True

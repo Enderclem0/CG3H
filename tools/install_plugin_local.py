@@ -141,6 +141,15 @@ def main():
                     help=f'ReturnOfModding dir (default: {DEFAULT_R2})')
     args = ap.parse_args()
 
+    # Auto-correct the most common footgun: passing the profile root
+    # (`…/profiles/<name>`) instead of its `ReturnOfModding` subdir.
+    # H2M only loads from the latter; deploying to the former silently
+    # writes to an unused folder.
+    rom_subdir = os.path.join(args.r2_dir, 'ReturnOfModding')
+    if os.path.isdir(rom_subdir) and not os.path.basename(args.r2_dir) == 'ReturnOfModding':
+        args.r2_dir = rom_subdir
+        print(f"[install] auto-corrected --r2-dir to {args.r2_dir}")
+
     if not os.path.isdir(args.r2_dir):
         raise SystemExit(f"ERROR: r2modman profile not found: {args.r2_dir}")
 
