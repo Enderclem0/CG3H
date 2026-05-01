@@ -2115,6 +2115,84 @@ def test_classify_mod_animation_add_orthogonal():
     assert _classify_mod(mod) == (True, False, False, True)
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# texture_replace — folder-mirror authoring mode (v3.12)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _make_texture_mod(td, files):
+    """Lay out a fake texture_replace mod under `td`.  `files` is an
+    iterable of relative paths (forward-slash separated); each becomes
+    a 0-byte file under <td>/textures/<rel>."""
+    for rel in files:
+        abs_path = os.path.join(td, "textures", *rel.split("/"))
+        os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+        open(abs_path, "wb").close()
+
+
+def test_texture_variant_walker_basic():
+    from texture_variant import collect_overrides
+    with tempfile.TemporaryDirectory() as td:
+        _make_texture_mod(td, [
+            "GR2/Melinoe_Body_BC.png",
+            "UI/Portraits/Melinoe.png",
+        ])
+        out = collect_overrides(td)
+    pkgs = sorted(o["pkg_entry"] for o in out)
+    assert pkgs == ["GR2\\Melinoe_Body_BC.png",
+                    "UI\\Portraits\\Melinoe.png"]
+
+
+def test_texture_variant_walker_deep_nesting():
+    """Mirror should preserve arbitrary depth and produce backslashed
+    PKG entry paths regardless of host OS."""
+    from texture_variant import collect_overrides
+    with tempfile.TemporaryDirectory() as td:
+        _make_texture_mod(td, [
+            "Characters/Hub/Decor/Melinoe_idle.png",
+        ])
+        out = collect_overrides(td)
+    assert len(out) == 1
+    assert out[0]["pkg_entry"] == "Characters\\Hub\\Decor\\Melinoe_idle.png"
+
+
+def test_texture_variant_walker_skips_unsupported_and_hidden():
+    """`.psd` working copies and dotfiles must be skipped silently so
+    they don't pollute the build."""
+    from texture_variant import collect_overrides
+    with tempfile.TemporaryDirectory() as td:
+        _make_texture_mod(td, [
+            "GR2/Body.png",
+            "GR2/Body.psd",         # working file — skip
+            "GR2/.DS_Store",        # macOS metadata — skip
+            "GR2/.hidden.png",      # hidden — skip
+        ])
+        out = collect_overrides(td)
+    pkgs = [o["pkg_entry"] for o in out]
+    assert pkgs == ["GR2\\Body.png"]
+
+
+def test_texture_variant_walker_missing_textures_dir():
+    """No textures/ folder → empty list, no error.  A mod can be
+    declared `texture_variant` and still ship nothing (no-op runtime)."""
+    from texture_variant import collect_overrides
+    with tempfile.TemporaryDirectory() as td:
+        assert collect_overrides(td) == []
+
+
+def test_texture_variant_walker_deterministic_order():
+    """Output order must be deterministic so cache keys built on top
+    of the walk don't churn."""
+    from texture_variant import collect_overrides
+    with tempfile.TemporaryDirectory() as td:
+        _make_texture_mod(td, [
+            "B/b.png", "A/a.png", "A/c.png", "C/x.png",
+        ])
+        out1 = [o["pkg_entry"] for o in collect_overrides(td)]
+        out2 = [o["pkg_entry"] for o in collect_overrides(td)]
+    assert out1 == out2
+    assert out1 == sorted(out1)
+
+
 def _anim_mod(mod_id, character, animations):
     """animation_patch mod fixture with target.animations populated."""
     mi = _make_mod(mod_id, character, mod_type='animation_patch')
