@@ -33,6 +33,9 @@ BUNDLE_SOURCES = [
     ('tools/cg3h_build.py',             'addon'),
     ('tools/cg3h_constants.py',         'addon'),
     ('tools/pkg_texture.py',            'addon'),
+    # v3.12: cg3h_build imports walk_texture_overrides from this module
+    # for the folder-mirror texture_replace authoring path.
+    ('tools/texture_variant.py',        'addon'),
     # Default CG3H icon — used by package_thunderstore as the final
     # fallback when a mod workspace doesn't ship its own icon.png.
     # Without it, the produced Thunderstore ZIP has no root icon,
