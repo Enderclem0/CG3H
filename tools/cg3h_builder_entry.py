@@ -58,6 +58,43 @@ def _variant_entry_name(character, mod_id, scene_index):
 CG3H_MOD_STATE_SCHEMA_VERSION = 1
 
 
+def _skins_map_for(char_mods):
+    """v3.12: per-character skins registry for cg3h_status.json.
+
+    Returns `{ mod_id: { name, version, pkg_entries, preview } }` for
+    every `texture_replace` mod in `char_mods`.  Drives the in-game
+    manager's Skin dropdown without each consumer re-walking mod.json.
+    Mods whose `assets.textures` is empty still appear (lets the UI
+    show a hand-authored mod that hasn't been built yet) — the manager
+    filters them when rendering the picker.
+    """
+    skins = {}
+    for mi in char_mods:
+        mod = mi['mod']
+        mod_type = mod.get('type', '')
+        types = mod_type if isinstance(mod_type, list) \
+            else [mod_type] if mod_type else []
+        if 'texture_replace' not in types:
+            continue
+        metadata = mod.get('metadata', {})
+        textures = mod.get('assets', {}).get('textures', []) or []
+        pkg_entries = sorted({
+            t.get('pkg_entry_name') for t in textures
+            if t.get('pkg_entry_name')
+        })
+        preview = None
+        preview_path = os.path.join(mi.get('mod_dir', ''), 'preview.png')
+        if mi.get('mod_dir') and os.path.isfile(preview_path):
+            preview = preview_path.replace('\\', '/')
+        skins[mi['id']] = {
+            'name': metadata.get('name', mi['id']),
+            'version': metadata.get('version', ''),
+            'pkg_entries': pkg_entries,
+            'preview': preview,
+        }
+    return skins
+
+
 def _classify_mod(mod):
     """Single source of truth for mod classification.
 
@@ -1466,6 +1503,10 @@ def scan_and_build_all(plugins_data_dir, game_dir=None, only_character=None):
                      if _classify_mod(mi['mod'])[3]],
                     character)
                 status_characters[character]["alias_animations"] = cached_aliases
+                # v3.12: persist skins registry on cache hit too.
+                cached_skins = _skins_map_for(char_mods)
+                if cached_skins:
+                    status_characters[character]["skins"] = cached_skins
                 continue
             else:
                 print(f"  {character}: mods changed, rebuilding...")
@@ -1628,6 +1669,11 @@ def scan_and_build_all(plugins_data_dir, game_dir=None, only_character=None):
             # write [] rather than omit the key so the runtime can
             # detect "no aliases this build" cleanly.
             status_characters[character]["alias_animations"] = alias_entries
+
+            # v3.12 — persist skins registry for the manager's picker.
+            built_skins = _skins_map_for(char_mods)
+            if built_skins:
+                status_characters[character]["skins"] = built_skins
         else:
             failed += 1
             _record(character, "failed", char_mods, None,

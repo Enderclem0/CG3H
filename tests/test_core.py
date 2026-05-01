@@ -2218,6 +2218,78 @@ def test_sync_mod_json_folder_mirror_no_blender():
                            "UI\\Portraits\\Melinoe.png"]
 
 
+def test_skins_map_for_basic():
+    """One texture_replace mod → one skin entry with sorted pkg_entries."""
+    from cg3h_builder_entry import _skins_map_for
+    char_mods = [{
+        'id': 'Author-RedDress',
+        'mod_dir': '/nonexistent',
+        'mod': {
+            'type': 'texture_replace',
+            'metadata': {'name': 'RedDress', 'version': '1.0.0'},
+            'target': {'character': 'Melinoe'},
+            'assets': {'textures': [
+                {'pkg_entry_name': 'GR2\\Melinoe_Body_BC.png'},
+                {'pkg_entry_name': 'UI\\Portraits\\Melinoe.png'},
+            ]},
+        },
+    }]
+    skins = _skins_map_for(char_mods)
+    assert list(skins.keys()) == ['Author-RedDress']
+    assert skins['Author-RedDress']['name'] == 'RedDress'
+    assert skins['Author-RedDress']['version'] == '1.0.0'
+    assert skins['Author-RedDress']['pkg_entries'] == [
+        'GR2\\Melinoe_Body_BC.png',
+        'UI\\Portraits\\Melinoe.png',
+    ]
+    assert skins['Author-RedDress']['preview'] is None
+
+
+def test_skins_map_for_skips_non_texture_replace():
+    """mesh_replace / animation_add mods don't appear in skins map even
+    if they ship texture overrides as part of their bundle."""
+    from cg3h_builder_entry import _skins_map_for
+    char_mods = [
+        {'id': 'A', 'mod_dir': '/x', 'mod': {
+            'type': 'mesh_replace',
+            'target': {'character': 'Melinoe'},
+            'assets': {'textures': [{'pkg_entry_name': 'GR2\\X.png'}]},
+        }},
+        {'id': 'B', 'mod_dir': '/x', 'mod': {
+            'type': 'texture_replace',
+            'target': {'character': 'Melinoe'},
+            'assets': {'textures': [{'pkg_entry_name': 'GR2\\Y.png'}]},
+        }},
+    ]
+    skins = _skins_map_for(char_mods)
+    assert list(skins.keys()) == ['B']
+
+
+def test_skins_map_for_handles_list_type():
+    """Mods with type as a list (mixed types) — e.g.
+    ['mesh_replace', 'texture_replace'] — count as a skin."""
+    from cg3h_builder_entry import _skins_map_for
+    char_mods = [{'id': 'C', 'mod_dir': '/x', 'mod': {
+        'type': ['mesh_replace', 'texture_replace'],
+        'target': {'character': 'Melinoe'},
+        'assets': {'textures': [{'pkg_entry_name': 'GR2\\Z.png'}]},
+    }}]
+    skins = _skins_map_for(char_mods)
+    assert 'C' in skins
+
+
+def test_skins_map_for_empty_textures():
+    """Hand-authored mod with no built textures yet → still appears
+    so the UI can show 'pending build' state.  pkg_entries is []."""
+    from cg3h_builder_entry import _skins_map_for
+    char_mods = [{'id': 'D', 'mod_dir': '/x', 'mod': {
+        'type': 'texture_replace',
+        'target': {'character': 'Melinoe'},
+    }}]
+    skins = _skins_map_for(char_mods)
+    assert skins['D']['pkg_entries'] == []
+
+
 def test_sync_mod_json_folder_mirror_dedupe_with_existing():
     """If mod.json already declares the same pkg_entry_name (e.g. via
     Blender flow), the folder-mirror walk must NOT add a duplicate."""
