@@ -1138,12 +1138,13 @@ class CG3H_OT_Export(bpy.types.Operator):
         with direction='NORMAL' uses whatever vertex normals are
         stored on the mesh, and CG3H imports normals from the GR2
         verbatim (the engine encodes direction, not unit length, so
-        magnitudes can be ≠1).  Computing face-averaged unit normals
-        via bmesh sidesteps that — face normals are always derived
-        from geometry and are unit length by construction.
+        magnitudes can be ≠1).  bmesh's `f.normal` also turned out
+        to NOT be unit length on imported meshes — it's a hint
+        attribute that `bm.normal_update()` doesn't reliably
+        override.  Computing face normals from raw vertex positions
+        with numpy is the only reliable path.
         """
-        import bmesh
-        import mathutils
+        import numpy as np
 
         # Use the same scaffolding as _duplicate_with_modifier for the
         # selection / active dance.
@@ -1177,25 +1178,47 @@ class CG3H_OT_Export(bpy.types.Operator):
         if dupe.data:
             dupe.data.name = new_name
 
-        # Push each vertex along the average of its incident face
-        # normals.  bmesh face normals are always unit length —
-        # they're computed from positions on demand.
-        bm = bmesh.new()
-        bm.from_mesh(dupe.data)
-        bm.normal_update()
-        zero = mathutils.Vector((0.0, 0.0, 0.0))
-        for v in bm.verts:
-            if not v.link_faces:
+        # Push each vertex along an averaged face normal.  Compute
+        # everything from raw positions — bmesh's f.normal turned
+        # out to NOT be unit length on CG3H imports (probably mesh-
+        # data hint values that bm.normal_update() doesn't override).
+        # NumPy from positions is the bulletproof path.
+        mesh = dupe.data
+        n_verts = len(mesh.vertices)
+        verts = np.empty((n_verts, 3), dtype=np.float64)
+        mesh.vertices.foreach_get("co", verts.ravel())
+
+        v_normals = np.zeros_like(verts)
+        for poly in mesh.polygons:
+            idx = list(poly.vertices)
+            if len(idx) < 3:
                 continue
-            n = zero.copy()
-            for f in v.link_faces:
-                n += f.normal
-            if n.length > 1e-9:
-                n.normalize()
-                v.co = v.co + n * strength
-        bm.to_mesh(dupe.data)
-        bm.free()
-        dupe.data.update()
+            v0 = verts[idx[0]]
+            # Triangle-fan from vertex 0; each tri contributes a
+            # face normal computed from positions (always unit after
+            # division by length).
+            for i in range(1, len(idx) - 1):
+                v1 = verts[idx[i]]
+                v2 = verts[idx[i + 1]]
+                fn = np.cross(v1 - v0, v2 - v0)
+                fl = np.linalg.norm(fn)
+                if fl < 1e-12:
+                    continue
+                fn = fn / fl
+                v_normals[idx[0]]   += fn
+                v_normals[idx[i]]   += fn
+                v_normals[idx[i+1]] += fn
+        lens = np.linalg.norm(v_normals, axis=1, keepdims=True)
+        unit = np.where(lens > 1e-9, v_normals / np.maximum(lens, 1e-9), 0.0)
+        new_verts = verts + unit * float(strength)
+        mesh.vertices.foreach_set("co", new_verts.astype(np.float64).ravel())
+        mesh.update()
+        # Diagnostic: log the actual achieved displacement so the
+        # next debug pass doesn't need to crack the GLB to see what
+        # happened.
+        max_disp = float(np.linalg.norm(new_verts - verts, axis=1).max())
+        print(f"[CG3H]     outline applied: strength={strength:.3f} "
+              f"max_disp={max_disp:.3f}")
 
         # Match the post-conditions of _duplicate_with_modifier so the
         # rest of the export flow (cleanup, routing) treats this dupe
