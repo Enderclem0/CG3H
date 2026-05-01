@@ -4,6 +4,77 @@ All notable changes to CG3H are documented here.
 
 ---
 
+## v3.12.0
+
+**`texture_replace` mods can now be authored without Blender, and a
+new Skin dropdown in the Characters tab swaps textures live —
+no restart.**
+
+### Folder-mirror authoring
+
+A `texture_replace` mod can ship its overrides under a top-level
+`textures/` folder whose internal layout mirrors the game's PKG
+entry paths.  The builder walks the folder, packs every PNG into
+the mod's `.pkg`, fills in `mod.json`.  No JSON editing required.
+
+```
+MyMelinoeRedDress/
+  mod.json                            (type: texture_replace)
+  textures/
+    GR2/Melinoe_Color512.png          → overrides GR2\Melinoe_Color512
+    UI/Portraits/Melinoe.png          → overrides UI\Portraits\Melinoe
+```
+
+Any PKG path is fair game — 3D model textures and 2D UI textures
+(portraits, codex art, dialogue overlays) go through the same
+authoring path.
+
+The existing flat-PNGs-with-manifest layout that comes out of the
+Blender addon keeps working unchanged.
+
+### Skin picker in the in-game manager
+
+The Characters tab gains a **Skin** dropdown next to Body.  Lists
+"Stock" plus every `texture_replace` mod targeting that character.
+Selecting an entry swaps the character's textures on the spot — no
+restart, no area transition needed.  Picking "Stock" reverts to the
+unmodded textures.
+
+For NPCs that aren't currently in the scene, the selection is saved
+and applied automatically the next time the character loads — a
+freshly-spawned Hecate picks up her skin without you re-opening the
+manager.
+
+### Public API
+
+`rom.game.CG3H_API` exposes:
+
+- `set_active_skin(character, mod_id)` — apply and persist.
+- `clear_skin(character)` — revert to stock and persist.
+
+Other plugins can drive skin selection directly.
+
+### Builder validation
+
+When a `texture_replace` mod ships a texture for a PKG path the
+game doesn't actually own (typo, wrong slash, missing prefix), the
+builder logs a warning naming the mod and the offending path.
+Build continues — the warning is advisory, not blocking.
+
+### State persistence
+
+Skin selections are saved to `cg3h_mod_state.json` and replayed at
+launch.
+
+### Breaking change
+
+If you previously installed multiple `texture_replace` mods at once
+and relied on them all applying together, that no longer happens —
+the new picker is explicit-selection.  By default no skin is active
+(vanilla textures show); pick one from the manager to apply it.
+
+---
+
 ## v3.11.2
 
 **Animations tab redesign + per-Action loop checkbox in the Blender
