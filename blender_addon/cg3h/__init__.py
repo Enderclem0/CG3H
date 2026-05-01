@@ -35,7 +35,7 @@ import shutil
 import struct
 import subprocess
 import tempfile
-from bpy.props import BoolProperty, EnumProperty, StringProperty
+from bpy.props import BoolProperty, EnumProperty, FloatProperty, StringProperty
 from bpy_extras.io_utils import ExportHelper, ImportHelper
 
 # Pure helpers (importable from tests without bpy).
@@ -807,6 +807,11 @@ class CG3H_OT_Export(bpy.types.Operator):
             # the manifest.
             pass
 
+        # v3.13: auto-generate sibling shadow + outline meshes per
+        # accessory whose `cg3h_gen_shadow` / `cg3h_gen_outline` flags
+        # are set.  Returns a list of duplicates to delete post-export.
+        auto_gen_dupes = self._build_auto_gen_siblings(context)
+
         # Export GLB
         glb_path = os.path.join(workspace, f"{character}.glb")
         bpy.ops.export_scene.gltf(
@@ -817,6 +822,16 @@ class CG3H_OT_Export(bpy.types.Operator):
             export_tangents=False,
             export_yup=True,
         )
+
+        # Clean up the auto-gen duplicates so the modder's scene is
+        # restored to its pre-export state.  Errors are non-fatal —
+        # the GLB is already written.
+        for dupe in auto_gen_dupes:
+            try:
+                bpy.data.objects.remove(dupe, do_unlink=True)
+            except Exception as e:
+                print(f"[CG3H]   WARNING: could not remove auto-gen "
+                      f"duplicate {dupe.name}: {e}")
 
         if not os.path.isfile(glb_path):
             self.report({'ERROR'}, "glTF export produced no file. Select meshes + armature first.")
@@ -1002,33 +1017,221 @@ class CG3H_OT_Export(bpy.types.Operator):
                 if os.path.isfile(manifest_glb):
                     os.unlink(manifest_glb)
 
-        # Build mod package (PKG + Thunderstore ZIP)
-        # Run cg3h_build.py as subprocess with system Python since Blender's
-        # Python doesn't have etcpak/Pillow needed for texture compression.
-        zip_path = None
+        # Build the unzipped mod package.  We deliberately omit
+        # `--package` so cg3h_build leaves the result as a plain
+        # folder under <workspace>/build/plugins[_data]/<mod_id>/...
+        # — modders can inspect every produced file (the stripped
+        # GLB, the .pkg, mod.json, manifest) before deciding to
+        # publish.  When they're ready, they zip the build/
+        # contents themselves for Thunderstore upload.
+        build_dir = None
+        build_succeeded = False
         build_script = os.path.join(_addon_dir(), "cg3h_build.py")
         if os.path.isfile(build_script):
             system_python = shutil.which("python") or shutil.which("python3") or shutil.which("py")
             if system_python:
                 try:
                     result = subprocess.run(
-                        [system_python, build_script, workspace, "--package"],
+                        [system_python, build_script, workspace],
                         capture_output=True, text=True, timeout=120,
                     )
                     if result.returncode == 0:
-                        mod_id = f"{author}-{mod_name}".replace(" ", "")
-                        zip_name = f"{mod_id}-1.0.0.zip"
-                        zip_path = os.path.join(workspace, zip_name)
+                        build_succeeded = True
+                        build_dir = os.path.join(workspace, "build")
                     else:
                         print(f"CG3H build failed:\n{result.stderr or result.stdout}")
                 except Exception as build_err:
                     print(f"CG3H build error: {build_err}")
 
-        if zip_path and os.path.isfile(zip_path):
-            self.report({'INFO'}, f"Mod ready: {zip_path}")
+        # v3.13: after a successful build, sweep the intermediate
+        # source files (GLB, mod.json, manifest, baseline, icon) —
+        # they already shaped the build/ output and will be
+        # regenerated on the next export from the .blend.  Keep
+        # build/ itself so the modder can inspect what shipped.
+        if build_succeeded:
+            sweep_files = [
+                glb_path,                                       # source GLB
+                os.path.join(workspace, "mod.json"),
+                os.path.join(workspace, "manifest.json"),
+                os.path.join(workspace, ".baseline_positions.npz"),
+                os.path.join(workspace, "icon.png"),
+            ]
+            for path in sweep_files:
+                try:
+                    if os.path.isfile(path):
+                        os.unlink(path)
+                except Exception as e:
+                    print(f"[CG3H] Could not remove {path}: {e}")
+
+        if build_dir and os.path.isdir(build_dir):
+            self.report({'INFO'}, f"Mod ready: {build_dir}")
         else:
             self.report({'INFO'}, f"Workspace created: {workspace} (build manually with CG3H GUI)")
         return {'FINISHED'}
+
+    def _build_auto_gen_siblings(self, context):
+        """v3.13: duplicate selected meshes with `cg3h_gen_shadow` /
+        `cg3h_gen_outline` set, apply the appropriate modifier (Decimate
+        for shadow, Displace along normal for outline), rename with the
+        engine-recognised suffix (`<orig>ShadowMesh_MeshShape` /
+        `<orig>Outline_MeshShape`), and add to the active selection so
+        the GLB export picks them up.
+
+        Returns the list of created duplicates so the caller can delete
+        them post-export and leave the modder's scene clean.
+
+        The Armature modifier on the original mesh transfers to the
+        duplicate (Blender duplicates the modifier stack).  We apply
+        only Decimate / Displace by name — Armature stays unapplied so
+        runtime skinning still works.
+        """
+        dupes = []
+        # Snapshot selection — _build runs late in execute() so ctx
+        # is the same set the export will use.
+        candidates = [obj for obj in context.selected_objects
+                      if obj.type == 'MESH']
+        for src in candidates:
+            gen_shadow = bool(getattr(src, "cg3h_gen_shadow", False))
+            gen_outline = bool(getattr(src, "cg3h_gen_outline", False))
+            if not (gen_shadow or gen_outline):
+                continue
+            base_name = src.name.replace("_MeshShape", "")
+
+            if gen_shadow:
+                ratio = float(getattr(src, "cg3h_shadow_ratio", 0.30))
+                dupe = self._duplicate_with_modifier(
+                    context, src,
+                    new_name=f"{base_name}ShadowMesh_MeshShape",
+                    modifier_type='DECIMATE',
+                    modifier_attrs={'ratio': max(0.05, min(1.0, ratio))})
+                if dupe is not None:
+                    dupes.append(dupe)
+                    print(f"[CG3H]   auto-gen shadow: "
+                          f"{src.name} → {dupe.name} (decimate {ratio:.2f})")
+
+            if gen_outline:
+                push = float(getattr(src, "cg3h_outline_push", 0.01))
+                # Push as a fraction of the mesh's bbox diagonal so
+                # accessories of any scale get a proportional outline.
+                bbox_diag = self._bbox_diagonal(src)
+                strength = bbox_diag * max(0.001, min(0.5, push))
+                dupe = self._duplicate_with_modifier(
+                    context, src,
+                    new_name=f"{base_name}Outline_MeshShape",
+                    modifier_type='DISPLACE',
+                    modifier_attrs={
+                        'direction': 'NORMAL',
+                        'strength': strength,
+                        'mid_level': 0.0,
+                    })
+                if dupe is not None:
+                    dupes.append(dupe)
+                    print(f"[CG3H]   auto-gen outline: "
+                          f"{src.name} → {dupe.name} "
+                          f"(push {push*100:.1f}% = {strength:.3f})")
+        return dupes
+
+    @staticmethod
+    def _bbox_diagonal(obj):
+        """Local bounding-box diagonal length (object scale included),
+        used to scale the outline Displace strength so accessories of
+        any size get a proportional outline."""
+        import math
+        coords = [(c[0], c[1], c[2]) for c in obj.bound_box]
+        mn = [min(c[i] for c in coords) for i in range(3)]
+        mx = [max(c[i] for c in coords) for i in range(3)]
+        sx, sy, sz = obj.scale
+        diag = math.sqrt(((mx[0] - mn[0]) * sx) ** 2
+                         + ((mx[1] - mn[1]) * sy) ** 2
+                         + ((mx[2] - mn[2]) * sz) ** 2)
+        return diag if diag > 0 else 1.0
+
+    @staticmethod
+    def _duplicate_with_modifier(context, src, new_name,
+                                 modifier_type, modifier_attrs):
+        """Make a duplicate of `src`, add a modifier with the given
+        type + attrs, apply just that modifier (leaving any other
+        modifiers like Armature untouched), rename, and add to the
+        active selection.  Returns the new Object or None on failure.
+        """
+        # Avoid creating duplicates with already-existing siblings —
+        # the modder may have authored the outline / shadow mesh by
+        # hand and we'd shadow it.
+        if new_name in bpy.data.objects:
+            print(f"[CG3H]   skip auto-gen: {new_name!r} already exists")
+            return None
+
+        # Duplicate.  bpy.ops.object.duplicate operates on selection
+        # in the active view layer — temporarily isolate `src`.
+        prev_active = context.view_layer.objects.active
+        prev_selected = list(context.selected_objects)
+        try:
+            bpy.ops.object.select_all(action='DESELECT')
+            src.select_set(True)
+            context.view_layer.objects.active = src
+            bpy.ops.object.duplicate(linked=False)
+            dupe = context.view_layer.objects.active
+        finally:
+            # Restore prior selection so the rest of execute() sees
+            # the original picks; we'll re-add the dupe to selection
+            # below before returning.
+            bpy.ops.object.select_all(action='DESELECT')
+            for o in prev_selected:
+                try:
+                    o.select_set(True)
+                except Exception:
+                    pass
+            context.view_layer.objects.active = prev_active
+
+        if dupe is src or dupe is None:
+            return None
+        dupe.name = new_name
+        if dupe.data:
+            dupe.data.name = new_name
+
+        mod = dupe.modifiers.new(name=f"cg3h_{modifier_type.lower()}",
+                                 type=modifier_type)
+        for k, v in modifier_attrs.items():
+            try:
+                setattr(mod, k, v)
+            except Exception as e:
+                print(f"[CG3H]   WARNING: setting {k}={v} on {modifier_type} "
+                      f"failed: {e}")
+
+        # Apply just this modifier.  Apply requires the dupe to be
+        # the active object.
+        prev_active2 = context.view_layer.objects.active
+        try:
+            context.view_layer.objects.active = dupe
+            bpy.ops.object.modifier_apply(modifier=mod.name)
+        except Exception as e:
+            print(f"[CG3H]   WARNING: apply {modifier_type} on "
+                  f"{dupe.name} raised: {e}")
+            try:
+                bpy.data.objects.remove(dupe, do_unlink=True)
+            except Exception:
+                pass
+            context.view_layer.objects.active = prev_active2
+            return None
+        context.view_layer.objects.active = prev_active2
+
+        # Reset the auto-gen flags on the duplicate so it doesn't try
+        # to re-generate from itself on a re-export (defensive — the
+        # dupe gets deleted post-export anyway, but if something keeps
+        # it around we don't want recursive auto-gen).
+        try:
+            dupe.cg3h_gen_shadow = False
+            dupe.cg3h_gen_outline = False
+        except Exception:
+            pass
+
+        # Add to selection so the GLB export picks it up alongside
+        # the other selected meshes.
+        try:
+            dupe.select_set(True)
+        except Exception:
+            pass
+        return dupe
 
     def _check_bone_bindings(self, context):
         """Walk selected meshes' vertex groups and flag weights on bones not in
@@ -1203,37 +1406,72 @@ class CG3H_PT_MeshEntries(bpy.types.Panel):
             return
 
         entries = [e for e in entries_str.split(",") if e]
-        if len(entries) <= 1:
-            layout.label(text=f"Single entry: {entries[0] if entries else '(none)'}")
-            return
-
-        layout.label(text=f"Character: {character} ({len(entries)} entries)")
+        is_multi_entry = len(entries) > 1
+        if is_multi_entry:
+            layout.label(text=f"Character: {character} ({len(entries)} entries)")
+        else:
+            layout.label(text=f"Character: {character} (single entry: "
+                              f"{entries[0] if entries else '(none)'})")
         layout.separator()
 
         obj = context.active_object
         if not obj or obj.type != 'MESH':
-            layout.label(text="Select a mesh to assign entries")
+            layout.label(text="Select a mesh to see options")
             return
 
-        # Check if this is an original (imported) mesh
+        # Original (imported) meshes are routed by manifest — no
+        # per-mesh entry pick, no auto-gen (stock outline/shadow
+        # already exist).  Surface bone-preset and skinning helpers
+        # only.
         original_meshes = [n for n in context.scene.get("cg3h_original_meshes", "").split(",") if n]
-        if obj.name in original_meshes:
-            layout.label(text=f"{obj.name}", icon='MESH_DATA')
-            layout.label(text="Original mesh — routed via manifest", icon='INFO')
-            return
-
+        is_original = obj.name in original_meshes
         layout.label(text=f"{obj.name}", icon='MESH_DATA')
+        if is_original:
+            layout.label(text="Original mesh — routed via manifest", icon='INFO')
 
-        # Check if entry properties exist on this mesh
-        first_prop = f"cg3h_entry_{entries[0]}"
-        if first_prop not in obj:
-            layout.operator("cg3h.init_mesh_entries", text="Enable Entry Selection", icon='CHECKMARK')
+        # Multi-entry routing checkboxes only shown for new meshes
+        # AND multi-entry characters (single-entry chars route
+        # everything to the one entry; nothing to pick).
+        if not is_original and is_multi_entry:
+            first_prop = f"cg3h_entry_{entries[0]}"
+            if first_prop not in obj:
+                layout.operator("cg3h.init_mesh_entries",
+                                text="Enable Entry Selection",
+                                icon='CHECKMARK')
+                return
+            for entry in entries:
+                prop_name = f"cg3h_entry_{entry}"
+                if prop_name in obj:
+                    layout.prop(obj, f'["{prop_name}"]', text=entry)
+
+        # v3.13 — auto-gen sibling outline + shadow meshes at export
+        # time.  Engine renders a mesh in the outline / shadow pass
+        # only when its name has the right suffix and mesh_type byte
+        # is set (engine fills mesh_type from the name at GR2 load).
+        # A mesh_add accessory ships as one mesh and so falls out of
+        # both passes — the auto-gen closes that gap by duplicating
+        # the modder's mesh, applying a modifier (Decimate for shadow,
+        # Displace for outline), renaming with the right suffix, then
+        # exporting alongside.  Duplicates are deleted post-export.
+        # Skipped for original meshes — they already have stock
+        # outline / shadow siblings in the GR2.
+        if is_original:
             return
-
-        for entry in entries:
-            prop_name = f"cg3h_entry_{entry}"
-            if prop_name in obj:
-                layout.prop(obj, f'["{prop_name}"]', text=entry)
+        layout.separator()
+        gen_box = layout.box()
+        gen_box.label(text="Auto-gen shadow + outline", icon='MOD_SOLIDIFY')
+        # Shadow row — proper RNA props render as native checkbox + slider.
+        row = gen_box.row(align=True)
+        row.prop(obj, "cg3h_gen_shadow", text="Shadow")
+        sub = row.row()
+        sub.enabled = obj.cg3h_gen_shadow
+        sub.prop(obj, "cg3h_shadow_ratio", text="ratio")
+        # Outline row.
+        row = gen_box.row(align=True)
+        row.prop(obj, "cg3h_gen_outline", text="Outline")
+        sub = row.row()
+        sub.enabled = obj.cg3h_gen_outline
+        sub.prop(obj, "cg3h_outline_push", text="push")
 
         # Bone visibility preset — hides bones not relevant to the chosen
         # template/entry. Also drives export validation: when a specific
@@ -1372,6 +1610,39 @@ def register():
         update=_apply_bone_preset,
         default=0,
     )
+    # v3.13: per-mesh auto-gen flags + parameters.  Registering these as
+    # proper RNA properties (instead of plain custom dict entries) so
+    # Blender renders them with native bool/float widgets — bare custom
+    # properties would render as a non-interactive number field.
+    bpy.types.Object.cg3h_gen_shadow = BoolProperty(
+        name="Generate shadow",
+        description="At export time, duplicate this mesh, decimate it, "
+                    "rename to <Mesh>ShadowMesh_MeshShape, and ship it "
+                    "alongside so the engine renders it in the shadow pass",
+        default=False,
+    )
+    bpy.types.Object.cg3h_shadow_ratio = FloatProperty(
+        name="Decimate ratio",
+        description="Target vertex ratio for the auto-generated shadow "
+                    "mesh (stock shadows are roughly 0.25–0.40 of the "
+                    "main mesh's poly count)",
+        default=0.30, min=0.05, max=1.0, step=5, precision=2,
+    )
+    bpy.types.Object.cg3h_gen_outline = BoolProperty(
+        name="Generate outline",
+        description="At export time, duplicate this mesh, push vertices "
+                    "outward along their normals, rename to "
+                    "<Mesh>Outline_MeshShape, and ship alongside so the "
+                    "engine renders it in the outline pass",
+        default=False,
+    )
+    bpy.types.Object.cg3h_outline_push = FloatProperty(
+        name="Push (% of bbox)",
+        description="Outward displacement of the outline mesh, as a "
+                    "fraction of the source mesh's bounding-box diagonal "
+                    "(stock outlines push ~0.7%)",
+        default=0.01, min=0.001, max=0.5, step=1, precision=4,
+    )
 
 
 def unregister():
@@ -1392,5 +1663,9 @@ def unregister():
                  "cg3h_manifest_json", "cg3h_baseline_b64", "cg3h_bone_preset"):
         if hasattr(bpy.types.Scene, prop):
             delattr(bpy.types.Scene, prop)
+    for prop in ("cg3h_gen_shadow", "cg3h_shadow_ratio",
+                 "cg3h_gen_outline", "cg3h_outline_push"):
+        if hasattr(bpy.types.Object, prop):
+            delattr(bpy.types.Object, prop)
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)

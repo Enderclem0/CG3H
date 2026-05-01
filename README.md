@@ -24,7 +24,7 @@ Build non-destructive mod packages for [Hell2Modding (H2M)](https://github.com/S
 2. In Blender: Edit > Preferences > Add-ons > Install from Disk
 3. Enable "CG3H — Hades II Model Tools" and set the game path in preferences
 4. **Import**: File > Import > Hades II Model (.gpk)
-5. **Export**: File > Export > Hades II Mod (CG3H) — produces a ready-to-install Thunderstore package
+5. **Export**: File > Export > Hades II Mod (CG3H) — produces a `build/` folder with the assembled mod files; zip its contents when you're ready to publish on Thunderstore
 
 The sidebar panel N key (CG3H tab) lets you assign new meshes to specific entries for multi-entry characters.
 
