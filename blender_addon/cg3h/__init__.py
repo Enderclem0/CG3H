@@ -1192,6 +1192,27 @@ class CG3H_OT_Export(bpy.types.Operator):
         if dupe.data:
             dupe.data.name = new_name
 
+        # Strip custom split normals before adding a normal-driven
+        # modifier (Displace direction='NORMAL').  The CG3H importer
+        # writes per-vertex normals from the GR2 verbatim, and those
+        # normals can be non-unit length (the engine doesn't require
+        # unit normals; they just have to encode direction).  Blender's
+        # Displace multiplies those non-unit normals by the strength,
+        # so a 1% bbox-diag strength can produce a 100x-larger
+        # displacement than intended.  Clearing custom split normals
+        # forces Blender to recompute unit-length normals from face
+        # geometry, which gives Displace the expected behaviour.
+        if modifier_type == 'DISPLACE' and dupe.data.has_custom_normals:
+            prev_act_n = context.view_layer.objects.active
+            try:
+                context.view_layer.objects.active = dupe
+                bpy.ops.mesh.customdata_custom_splitnormals_clear()
+            except Exception as e:
+                print(f"[CG3H]   WARNING: clearing custom normals on "
+                      f"{dupe.name} raised: {e}")
+            finally:
+                context.view_layer.objects.active = prev_act_n
+
         mod = dupe.modifiers.new(name=f"cg3h_{modifier_type.lower()}",
                                  type=modifier_type)
         for k, v in modifier_attrs.items():
