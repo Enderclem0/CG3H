@@ -823,16 +823,6 @@ class CG3H_OT_Export(bpy.types.Operator):
             export_yup=True,
         )
 
-        # Clean up the auto-gen duplicates so the modder's scene is
-        # restored to its pre-export state.  Errors are non-fatal —
-        # the GLB is already written.
-        for dupe in auto_gen_dupes:
-            try:
-                bpy.data.objects.remove(dupe, do_unlink=True)
-            except Exception as e:
-                print(f"[CG3H]   WARNING: could not remove auto-gen "
-                      f"duplicate {dupe.name}: {e}")
-
         if not os.path.isfile(glb_path):
             self.report({'ERROR'}, "glTF export produced no file. Select meshes + armature first.")
             return {'CANCELLED'}
@@ -912,6 +902,19 @@ class CG3H_OT_Export(bpy.types.Operator):
         }
         if new_mesh_routing:
             target["new_mesh_routing"] = new_mesh_routing
+
+        # Auto-gen siblings have done their job — they're in the GLB
+        # (use_selection picked them up) and in new_mesh_routing
+        # (the loop above walked them).  Now pull them out of the
+        # scene so the modder's working state matches what they had
+        # pre-export.  Errors are non-fatal — the artefacts are
+        # already written.
+        for dupe in auto_gen_dupes:
+            try:
+                bpy.data.objects.remove(dupe, do_unlink=True)
+            except Exception as e:
+                print(f"[CG3H]   WARNING: could not remove auto-gen "
+                      f"duplicate {dupe.name}: {e}")
 
         # Pre-declare each non-stock Action as an animation_add entry
         # carrying the modder's loop flag.  Builder's _sync_mod_json
