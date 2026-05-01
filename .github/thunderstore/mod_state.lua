@@ -33,6 +33,12 @@ M.active_variants = {} -- v3.9: per-entry active body selection.
                        -- Shape: { [character] = { [entry_name] = mod_id } }
                        -- Missing / "stock" → stock render for that entry.
 
+M.active_skins = {}    -- v3.12: per-character active texture-replace mod.
+                       -- Shape: { [character] = mod_id }
+                       -- Missing / "stock" → no exclusive skin (every
+                       -- enabled texture_replace mod's pkg gets registered,
+                       -- last-wins per PKG path — v3.11 baseline behavior).
+
 -- ── Helpers ────────────────────────────────────────────────────────────
 
 -- r2modman nests plugins_data/{mod_id}/{mod_id}/mod.json; manual installs
@@ -314,6 +320,32 @@ function M.load_status(builder_dir)
             end
         end
 
+        -- v3.12: per-character "skins" block shape =
+        --   { [mod_id] = { name, version, pkg_entries: [...], preview } }
+        -- Emitted by the builder for every texture_replace mod.
+        local skins = {}
+        local s_block = body:match('"skins"%s*:%s*(%b{})')
+        if s_block then
+            for mod_id, mod_body in s_block:gmatch('"([^"]+)"%s*:%s*(%b{})') do
+                local entry = {
+                    name = mod_body:match('"name"%s*:%s*"([^"]*)"') or mod_id,
+                    version = mod_body:match('"version"%s*:%s*"([^"]*)"') or "",
+                    preview = mod_body:match('"preview"%s*:%s*"([^"]*)"'),
+                    -- v3.12 B: SetThingProperty target for live swap.
+                    granny_texture = mod_body:match(
+                        '"granny_texture"%s*:%s*"([^"]*)"'),
+                    pkg_entries = {},
+                }
+                local pe_arr = mod_body:match('"pkg_entries"%s*:%s*(%b[])')
+                if pe_arr then
+                    for v in pe_arr:gmatch('"([^"]*)"') do
+                        table.insert(entry.pkg_entries, v)
+                    end
+                end
+                skins[mod_id] = entry
+            end
+        end
+
         M.build_status[char] = {
             state = state,
             gpk_path = gpk_path,
@@ -321,6 +353,7 @@ function M.load_status(builder_dir)
             duration_ms = duration,
             variants = variants,
             alias_animations = aliases,
+            skins = skins,
         }
     end
 end
@@ -335,6 +368,7 @@ end
 function M.load_mod_state(builder_dir)
     M.mod_state = {}
     M.active_variants = {}
+    M.active_skins = {}
     local path = rom.path.combine(builder_dir, "cg3h_mod_state.json")
     if not rom.path.exists(path) then
         return
@@ -366,6 +400,16 @@ function M.load_mod_state(builder_dir)
             M.active_variants[char] = {}
             for entry, mod_id in char_body:gmatch('"([^"]+)"%s*:%s*"([^"]*)"') do
                 M.active_variants[char][entry] = mod_id
+            end
+        end
+    end
+
+    -- v3.12: "active_skins": { "Character": "mod_id", ... }
+    local as_block = content:match('"active_skins"%s*:%s*(%b{})')
+    if as_block then
+        for char, mod_id in as_block:gmatch('"([^"]+)"%s*:%s*"([^"]*)"') do
+            if mod_id and mod_id ~= "" then
+                M.active_skins[char] = mod_id
             end
         end
     end
@@ -423,6 +467,23 @@ function M.save_mod_state(builder_dir)
         local char_comma = (ci < #chars) and "}," or "}"
         table.insert(lines, '    ' .. char_comma)
         ::next_char::
+    end
+    table.insert(lines, '  },')
+
+    -- v3.12: active_skins block — per-character exclusive skin picker.
+    -- Only persist non-empty entries (default = no exclusive skin).
+    table.insert(lines, '  "active_skins": {')
+    local skin_chars = {}
+    for char, mod_id in pairs(M.active_skins) do
+        if mod_id and mod_id ~= "" and mod_id ~= "stock" then
+            table.insert(skin_chars, char)
+        end
+    end
+    table.sort(skin_chars)
+    for i, char in ipairs(skin_chars) do
+        local comma = (i < #skin_chars) and "," or ""
+        table.insert(lines, string.format(
+            '    "%s": "%s"%s', char, M.active_skins[char], comma))
     end
     table.insert(lines, '  }')
 
@@ -505,6 +566,30 @@ function M.set_active_variant(character, entry_name, mod_id, builder_dir)
         M.active_variants[character][entry_name] = nil
     else
         M.active_variants[character][entry_name] = mod_id
+    end
+    M.save_mod_state(builder_dir)
+end
+
+-- ── v3.12: per-character active skin accessors ───────────────────────
+
+--- Read the active skin mod_id for a character.  Returns "stock" when
+-- no exclusive skin is selected (= every enabled texture_replace mod
+-- gets registered, last-wins).  Never returns nil.
+function M.get_active_skin(character)
+    local id = M.active_skins[character]
+    if not id or id == "" then return "stock" end
+    return id
+end
+
+--- Set the active skin for a character.  Pass "stock" (or nil) to
+-- clear the selection and revert to the v3.11 stack-everything
+-- behavior.  Persists to cg3h_mod_state.json.  Takes effect on next
+-- launch — texture overrides are registered at plugin init.
+function M.set_active_skin(character, mod_id, builder_dir)
+    if mod_id == "stock" or mod_id == nil or mod_id == "" then
+        M.active_skins[character] = nil
+    else
+        M.active_skins[character] = mod_id
     end
     M.save_mod_state(builder_dir)
 end

@@ -2115,6 +2115,239 @@ def test_classify_mod_animation_add_orthogonal():
     assert _classify_mod(mod) == (True, False, False, True)
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# texture_replace — folder-mirror authoring mode (v3.12)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _make_texture_mod(td, files):
+    """Lay out a fake texture_replace mod under `td`.  `files` is an
+    iterable of relative paths (forward-slash separated); each becomes
+    a 0-byte file under <td>/textures/<rel>."""
+    for rel in files:
+        abs_path = os.path.join(td, "textures", *rel.split("/"))
+        os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+        open(abs_path, "wb").close()
+
+
+def test_texture_variant_walker_basic():
+    """PKG entry paths drop the file extension — the game looks up
+    `GR2\\Melinoe_Body_BC`, not `GR2\\Melinoe_Body_BC.png`."""
+    from texture_variant import collect_overrides
+    with tempfile.TemporaryDirectory() as td:
+        _make_texture_mod(td, [
+            "GR2/Melinoe_Body_BC.png",
+            "UI/Portraits/Melinoe.png",
+        ])
+        out = collect_overrides(td)
+    pkgs = sorted(o["pkg_entry"] for o in out)
+    assert pkgs == ["GR2\\Melinoe_Body_BC", "UI\\Portraits\\Melinoe"]
+
+
+def test_texture_variant_walker_deep_nesting():
+    """Mirror should preserve arbitrary depth and produce backslashed
+    PKG entry paths regardless of host OS."""
+    from texture_variant import collect_overrides
+    with tempfile.TemporaryDirectory() as td:
+        _make_texture_mod(td, [
+            "Characters/Hub/Decor/Melinoe_idle.png",
+        ])
+        out = collect_overrides(td)
+    assert len(out) == 1
+    assert out[0]["pkg_entry"] == "Characters\\Hub\\Decor\\Melinoe_idle"
+
+
+def test_texture_variant_walker_skips_unsupported_and_hidden():
+    """`.psd` working copies and dotfiles must be skipped silently so
+    they don't pollute the build."""
+    from texture_variant import collect_overrides
+    with tempfile.TemporaryDirectory() as td:
+        _make_texture_mod(td, [
+            "GR2/Body.png",
+            "GR2/Body.psd",         # working file — skip
+            "GR2/.DS_Store",        # macOS metadata — skip
+            "GR2/.hidden.png",      # hidden — skip
+        ])
+        out = collect_overrides(td)
+    pkgs = [o["pkg_entry"] for o in out]
+    assert pkgs == ["GR2\\Body"]
+
+
+def test_texture_variant_walker_missing_textures_dir():
+    """No textures/ folder → empty list, no error.  A mod can be
+    declared `texture_variant` and still ship nothing (no-op runtime)."""
+    from texture_variant import collect_overrides
+    with tempfile.TemporaryDirectory() as td:
+        assert collect_overrides(td) == []
+
+
+def test_load_or_build_pkg_entry_set_missing_game_dir():
+    """No game_dir → empty set, no error.  Validation falls back to
+    permissive mode (warning suppressed) when scanning isn't possible."""
+    from texture_variant import load_or_build_pkg_entry_set
+    with tempfile.TemporaryDirectory() as cache:
+        assert load_or_build_pkg_entry_set("", cache) == set()
+        assert load_or_build_pkg_entry_set(None, cache) == set()
+
+
+def test_load_or_build_pkg_entry_set_caches():
+    """Cache file gets written on first call and re-read on second."""
+    from texture_variant import load_or_build_pkg_entry_set
+    with tempfile.TemporaryDirectory() as game:
+        # Empty Content/Packages/1080p — scan returns empty set,
+        # but cache still gets written.
+        os.makedirs(os.path.join(game, "Content", "Packages", "1080p"))
+        with tempfile.TemporaryDirectory() as cache:
+            r1 = load_or_build_pkg_entry_set(game, cache)
+            assert r1 == set()
+            assert os.path.isfile(os.path.join(cache, "_pkg_entry_set.json"))
+            r2 = load_or_build_pkg_entry_set(game, cache)
+            assert r2 == set()
+
+
+def test_texture_variant_walker_deterministic_order():
+    """Output order must be deterministic so cache keys built on top
+    of the walk don't churn."""
+    from texture_variant import collect_overrides
+    with tempfile.TemporaryDirectory() as td:
+        _make_texture_mod(td, [
+            "B/b.png", "A/a.png", "A/c.png", "C/x.png",
+        ])
+        out1 = [o["pkg_entry"] for o in collect_overrides(td)]
+        out2 = [o["pkg_entry"] for o in collect_overrides(td)]
+    assert out1 == out2
+    assert out1 == sorted(out1)
+
+
+def test_sync_mod_json_folder_mirror_no_blender():
+    """A pure folder-mirror mod (no GLB, no manifest) gets its textures/
+    contents written into mod.json with `texture_replace` auto-typed."""
+    from cg3h_build import _sync_mod_json
+    with tempfile.TemporaryDirectory() as td:
+        _make_texture_mod(td, [
+            "GR2/Melinoe_Body_BC.png",
+            "UI/Portraits/Melinoe.png",
+        ])
+        with open(os.path.join(td, "mod.json"), "w") as f:
+            json.dump({
+                "format": "cg3h-mod/1.0",
+                "metadata": {"name": "Test", "author": "A"},
+                "target": {"character": "Melinoe"},
+            }, f)
+        _sync_mod_json(td)
+        with open(os.path.join(td, "mod.json")) as f:
+            mod = json.load(f)
+    assert mod.get("type") == "texture_replace"
+    pkg_entries = sorted(t["pkg_entry_name"]
+                         for t in mod["assets"]["textures"])
+    assert pkg_entries == ["GR2\\Melinoe_Body_BC", "UI\\Portraits\\Melinoe"]
+
+
+def test_skins_map_for_basic():
+    """One texture_replace mod → one skin entry with the FIRST entry
+    as the primary granny_texture and pkg_entries renamed to unique
+    `<mod_id>_<basename>` form for live SetThingProperty swap."""
+    from cg3h_builder_entry import _skins_map_for
+    char_mods = [{
+        'id': 'Author-RedDress',
+        'mod_dir': '/nonexistent',
+        'mod': {
+            'type': 'texture_replace',
+            'metadata': {'name': 'RedDress', 'version': '1.0.0'},
+            'target': {'character': 'Melinoe'},
+            'assets': {'textures': [
+                {'pkg_entry_name': 'GR2\\Melinoe_Color512'},
+                {'pkg_entry_name': 'UI\\Portraits\\Melinoe'},
+            ]},
+        },
+    }]
+    skins = _skins_map_for(char_mods)
+    assert list(skins.keys()) == ['Author-RedDress']
+    assert skins['Author-RedDress']['name'] == 'RedDress'
+    assert skins['Author-RedDress']['version'] == '1.0.0'
+    # Primary atlas = first declared entry.
+    assert skins['Author-RedDress']['granny_texture'] == \
+        'Author-RedDress_Melinoe_Color512'
+    # Both entries renamed to unique form, sorted.
+    assert skins['Author-RedDress']['pkg_entries'] == [
+        'Author-RedDress_Melinoe',
+        'Author-RedDress_Melinoe_Color512',
+    ]
+    assert skins['Author-RedDress']['preview'] is None
+
+
+def test_skins_map_for_skips_non_texture_replace():
+    """mesh_replace / animation_add mods don't appear in skins map even
+    if they ship texture overrides as part of their bundle."""
+    from cg3h_builder_entry import _skins_map_for
+    char_mods = [
+        {'id': 'A', 'mod_dir': '/x', 'mod': {
+            'type': 'mesh_replace',
+            'target': {'character': 'Melinoe'},
+            'assets': {'textures': [{'pkg_entry_name': 'GR2\\X.png'}]},
+        }},
+        {'id': 'B', 'mod_dir': '/x', 'mod': {
+            'type': 'texture_replace',
+            'target': {'character': 'Melinoe'},
+            'assets': {'textures': [{'pkg_entry_name': 'GR2\\Y.png'}]},
+        }},
+    ]
+    skins = _skins_map_for(char_mods)
+    assert list(skins.keys()) == ['B']
+
+
+def test_skins_map_for_handles_list_type():
+    """Mods with type as a list (mixed types) — e.g.
+    ['mesh_replace', 'texture_replace'] — count as a skin."""
+    from cg3h_builder_entry import _skins_map_for
+    char_mods = [{'id': 'C', 'mod_dir': '/x', 'mod': {
+        'type': ['mesh_replace', 'texture_replace'],
+        'target': {'character': 'Melinoe'},
+        'assets': {'textures': [{'pkg_entry_name': 'GR2\\Z.png'}]},
+    }}]
+    skins = _skins_map_for(char_mods)
+    assert 'C' in skins
+
+
+def test_skins_map_for_empty_textures():
+    """Hand-authored mod with no built textures yet → still appears
+    so the UI can show 'pending build' state.  pkg_entries is [],
+    granny_texture is None."""
+    from cg3h_builder_entry import _skins_map_for
+    char_mods = [{'id': 'D', 'mod_dir': '/x', 'mod': {
+        'type': 'texture_replace',
+        'target': {'character': 'Melinoe'},
+    }}]
+    skins = _skins_map_for(char_mods)
+    assert skins['D']['pkg_entries'] == []
+    assert skins['D']['granny_texture'] is None
+
+
+def test_sync_mod_json_folder_mirror_dedupe_with_existing():
+    """If mod.json already declares the same pkg_entry_name (e.g. via
+    Blender flow), the folder-mirror walk must NOT add a duplicate."""
+    from cg3h_build import _sync_mod_json
+    with tempfile.TemporaryDirectory() as td:
+        _make_texture_mod(td, ["GR2/Melinoe_Body_BC.png"])
+        with open(os.path.join(td, "mod.json"), "w") as f:
+            json.dump({
+                "format": "cg3h-mod/1.0",
+                "metadata": {"name": "Test", "author": "A"},
+                "type": "texture_replace",
+                "target": {"character": "Melinoe"},
+                "assets": {"textures": [{
+                    "name": "Melinoe_Body_BC",
+                    "file": "Melinoe_Body_BC.png",
+                    "replaces": True,
+                    "pkg_entry_name": "GR2\\Melinoe_Body_BC",
+                }]},
+            }, f)
+        _sync_mod_json(td)
+        with open(os.path.join(td, "mod.json")) as f:
+            mod = json.load(f)
+    pkg_entries = [t["pkg_entry_name"] for t in mod["assets"]["textures"]]
+    assert pkg_entries == ["GR2\\Melinoe_Body_BC"]
+
+
 def _anim_mod(mod_id, character, animations):
     """animation_patch mod fixture with target.animations populated."""
     mi = _make_mod(mod_id, character, mod_type='animation_patch')

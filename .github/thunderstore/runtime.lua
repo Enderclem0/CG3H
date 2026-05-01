@@ -427,11 +427,141 @@ end
 -- state.build_status which is populated by mod_state.load_status AFTER
 -- the builder writes cg3h_status.json.  main.lua calls it explicitly.
 function M.apply(state, ctx)
+    -- v3.12 B: register every enabled mod's textures unconditionally.
+    -- Skin selection no longer gates registration — every skin's
+    -- unique-named textures land in mLoadedTexture2DHash so
+    -- SetThingProperty(GrannyTexture=<unique_name>) can swap between
+    -- them at runtime without re-loading anything.  Stock revert =
+    -- SetThingProperty(GrannyTexture="").
+    local registered = {}
     for _, mod in ipairs(state.mods) do
-        M.load_textures(mod)
+        if mod.has_textures then
+            M.load_textures(mod)
+            registered[mod.id] = true
+        end
     end
+
     M.run_builder(state, ctx.builder_path, ctx.plugins_data_dir)
     M.register_gpks(state, ctx.builder_data_dir)
+
+    -- Second pass: re-scan to catch any mod whose mod.json got rewritten
+    -- by the builder (folder-mirror texture_replace mods are first
+    -- detected at build time).  Only register those NOT registered in
+    -- the first pass to avoid duplicate biome-override callbacks.
+    state.scan(ctx.plugins_data_dir)
+    for _, mod in ipairs(state.mods) do
+        if not registered[mod.id] and mod.has_textures then
+            M.load_textures(mod)
+            registered[mod.id] = true
+        end
+    end
+end
+
+-- v3.12 B: live skin swap via SetThingProperty.
+--
+-- The MelSkin pattern: each skin's atlas ships under a UNIQUE name
+-- (built into the .pkg as `<mod_id>_<basename>`), all skin pkgs are
+-- LoadPackaged at startup so their entries live in mLoadedTexture2DHash,
+-- and SetThingProperty(GrannyTexture=<unique_name>) on the live unit
+-- tells the engine which atlas to use for rendering.  Empty string
+-- reverts the engine to the model's default (stock) texture.
+--
+-- Player target = CurrentRun.Hero.ObjectId.  NPC target = whatever
+-- GetClosestUnitOfType returns for the character name (or its
+-- NPC_<char>_01 fallback).  We auto-re-apply on scene transitions
+-- via rom.on_import.post("RoomLogic.lua") so a freshly-spawned NPC
+-- gets its skin without the user re-clicking the picker.
+
+local _PLAYER_CHARS = { Melinoe = true, YoungMel = true }
+
+--- Find a live ObjectId to target for `character`.  Returns nil if
+-- the character isn't in the current scene.  Probes:
+--   1. Hero (player characters only).
+--   2. GetClosestUnitOfType with the character name as DestinationName.
+--   3. Same with `NPC_<character>_01` fallback for hub NPCs.
+local function _live_target_for(character)
+    local g = rom.game
+    if not g then return nil end
+    if _PLAYER_CHARS[character] then
+        if g.CurrentRun and g.CurrentRun.Hero then
+            return g.CurrentRun.Hero.ObjectId
+        end
+        return nil
+    end
+    if not (g.GetClosestUnitOfType and g.CurrentRun
+            and g.CurrentRun.Hero) then
+        return nil
+    end
+    for _, dest in ipairs({ character, "NPC_" .. character .. "_01" }) do
+        local id = g.GetClosestUnitOfType({
+            Id = g.CurrentRun.Hero.ObjectId,
+            DestinationName = dest,
+        })
+        if id then return id end
+    end
+    return nil
+end
+
+--- Apply the persisted skin selection (if any) to `character`'s live
+-- unit.  Returns:
+--   "live"         — applied successfully.
+--   "transition"   — character not in scene; will retry on scene change.
+--   "error"        — H2M API missing or SetThingProperty raised.
+function M.apply_skin_for_character(state, character)
+    if not (rom.game and rom.game.SetThingProperty) then return "error" end
+    local target_id = _live_target_for(character)
+    if not target_id then return "transition" end
+
+    local active = state.active_skins[character]
+    local granny_texture = ""
+    if active and active ~= "" and active ~= "stock" then
+        local rec = state.build_status[character]
+        local skin = rec and rec.skins and rec.skins[active]
+        granny_texture = (skin and skin.granny_texture) or ""
+    end
+    local ok, err = pcall(rom.game.SetThingProperty, {
+        Property = "GrannyTexture",
+        Value = granny_texture,
+        DestinationId = target_id,
+    })
+    if not ok then
+        rom.log.warning(LOG_PREFIX .. " apply_skin_for_character('"
+            .. tostring(character) .. "') raised: " .. tostring(err))
+        return "error"
+    end
+    return "live"
+end
+
+--- Re-apply every persisted skin for every character.  Called on
+-- first frame and on scene transitions.  Skins for characters not
+-- currently in the scene are silently no-op (will retry next call).
+function M.apply_all_skins(state)
+    if not state.active_skins then return end
+    for character, _ in pairs(state.active_skins) do
+        M.apply_skin_for_character(state, character)
+    end
+    -- Also re-apply explicit "stock" entries so a recent revert sticks
+    -- after a scene change (the iteration above only sees mod-id
+    -- entries; cleared selections don't appear in active_skins).
+    -- Player chars always benefit from a no-op stock apply.
+    for char, _ in pairs(_PLAYER_CHARS) do
+        if not state.active_skins[char] then
+            M.apply_skin_for_character(state, char)
+        end
+    end
+end
+
+--- Hook the scene-load lifecycle so freshly-spawned units pick up
+-- their persisted skin without user intervention.  Idempotent;
+-- main.lua calls this once at init.
+function M.install_skin_scene_hook(state)
+    if not (rom.on_import and rom.on_import.post) then return end
+    rom.on_import.post(function(script_name)
+        if script_name == "RoomLogic.lua"
+                or script_name == "RoomManager.lua" then
+            M.apply_all_skins(state)
+        end
+    end)
 end
 
 -- ── v3.8: draw-call visibility gate ────────────────────────────────────

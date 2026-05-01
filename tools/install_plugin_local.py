@@ -47,11 +47,16 @@ def _copy_plugin(r2_dir):
     plugins = os.path.join(r2_dir, 'plugins', CG3H_BUILDER_FOLDER)
     plugins_data = os.path.join(r2_dir, 'plugins_data', CG3H_BUILDER_FOLDER)
 
-    # Nuke and recreate so stale files from earlier installs can't linger.
-    for d in (plugins, plugins_data):
-        if os.path.isdir(d):
-            shutil.rmtree(d)
-        os.makedirs(d)
+    # Nuke `plugins/<mod>` so stale Lua / manifest files can't linger.
+    if os.path.isdir(plugins):
+        shutil.rmtree(plugins)
+    os.makedirs(plugins)
+    # `plugins_data/<mod>` holds user state (cg3h_mod_state.json with the
+    # user's skin / variant picks, cg3h_status.json, cache keys, the
+    # extracted .gr2.lz4 hot-reload entries).  Don't wipe — that would
+    # reset the user's selections on every redeploy.  We just overwrite
+    # the few files we own (the exe, optional icon).
+    os.makedirs(plugins_data, exist_ok=True)
 
     # Lua modules go under plugins/{folder}/
     for f in LUA_FILES:
