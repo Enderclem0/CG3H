@@ -2193,6 +2193,57 @@ def test_texture_variant_walker_deterministic_order():
     assert out1 == sorted(out1)
 
 
+def test_sync_mod_json_folder_mirror_no_blender():
+    """A pure folder-mirror mod (no GLB, no manifest) gets its textures/
+    contents written into mod.json with `texture_replace` auto-typed."""
+    from cg3h_build import _sync_mod_json
+    with tempfile.TemporaryDirectory() as td:
+        _make_texture_mod(td, [
+            "GR2/Melinoe_Body_BC.png",
+            "UI/Portraits/Melinoe.png",
+        ])
+        with open(os.path.join(td, "mod.json"), "w") as f:
+            json.dump({
+                "format": "cg3h-mod/1.0",
+                "metadata": {"name": "Test", "author": "A"},
+                "target": {"character": "Melinoe"},
+            }, f)
+        _sync_mod_json(td)
+        with open(os.path.join(td, "mod.json")) as f:
+            mod = json.load(f)
+    assert mod.get("type") == "texture_replace"
+    pkg_entries = sorted(t["pkg_entry_name"]
+                         for t in mod["assets"]["textures"])
+    assert pkg_entries == ["GR2\\Melinoe_Body_BC.png",
+                           "UI\\Portraits\\Melinoe.png"]
+
+
+def test_sync_mod_json_folder_mirror_dedupe_with_existing():
+    """If mod.json already declares the same pkg_entry_name (e.g. via
+    Blender flow), the folder-mirror walk must NOT add a duplicate."""
+    from cg3h_build import _sync_mod_json
+    with tempfile.TemporaryDirectory() as td:
+        _make_texture_mod(td, ["GR2/Melinoe_Body_BC.png"])
+        with open(os.path.join(td, "mod.json"), "w") as f:
+            json.dump({
+                "format": "cg3h-mod/1.0",
+                "metadata": {"name": "Test", "author": "A"},
+                "type": "texture_replace",
+                "target": {"character": "Melinoe"},
+                "assets": {"textures": [{
+                    "name": "Melinoe_Body_BC",
+                    "file": "Melinoe_Body_BC.png",
+                    "replaces": True,
+                    "pkg_entry_name": "GR2\\Melinoe_Body_BC.png",
+                }]},
+            }, f)
+        _sync_mod_json(td)
+        with open(os.path.join(td, "mod.json")) as f:
+            mod = json.load(f)
+    pkg_entries = [t["pkg_entry_name"] for t in mod["assets"]["textures"]]
+    assert pkg_entries == ["GR2\\Melinoe_Body_BC.png"]
+
+
 def _anim_mod(mod_id, character, animations):
     """animation_patch mod fixture with target.animations populated."""
     mi = _make_mod(mod_id, character, mod_type='animation_patch')

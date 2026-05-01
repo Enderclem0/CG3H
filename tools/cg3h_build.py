@@ -34,6 +34,7 @@ from cg3h_constants import (
     find_game_path,
 )
 from pkg_texture import build_standalone_pkg
+from texture_variant import walk_texture_overrides
 
 
 def _is_mesh_changed(gltf, mesh, blob, orig_mesh, baseline_positions=None):
@@ -426,25 +427,39 @@ def _build_conflicts_json(mod):
 def _sync_mod_json(mod_dir):
     """Detect workspace changes and update mod.json to match reality.
 
-    Compares the GLB against manifest.json to find new meshes, edited meshes,
-    and changed/new textures.  Updates mod.json's type and assets.textures
-    so that _infer_operations produces the correct build plan.
+    Two authoring flows feed in:
+      1. Blender flow — compares GLB against manifest.json to find new
+         meshes, edited meshes, changed/new textures.  Requires both
+         GLB + manifest.
+      2. Folder-mirror flow (v3.12) — walks <mod>/textures/ for PNG
+         overrides whose path mirrors the PKG entry path.  No GLB or
+         manifest required; lets a portrait-only / texture-only mod
+         author skip Blender entirely.
+
+    Updates mod.json's type and assets.textures so that
+    _infer_operations produces the correct build plan.
     """
     mod_json_path = os.path.join(mod_dir, 'mod.json')
-    manifest_path = os.path.join(mod_dir, 'manifest.json')
-    if not os.path.isfile(mod_json_path) or not os.path.isfile(manifest_path):
+    if not os.path.isfile(mod_json_path):
         return
 
     with open(mod_json_path) as f:
         mod = json.load(f)
-    with open(manifest_path) as f:
-        manifest = json.load(f)
+
+    manifest_path = os.path.join(mod_dir, 'manifest.json')
+    manifest = {}
+    if os.path.isfile(manifest_path):
+        with open(manifest_path) as f:
+            manifest = json.load(f)
 
     assets = mod.setdefault('assets', {})
     glb_name = assets.get('glb', '')
     glb_path = os.path.join(mod_dir, glb_name) if glb_name else ''
-    if not glb_path or not os.path.isfile(glb_path):
-        return
+    has_glb = bool(glb_path) and os.path.isfile(glb_path)
+    # Blender-flow paths (mesh / animation detection) require GLB +
+    # manifest both; the folder-mirror flow requires neither.  Each
+    # Blender-flow section guards on its own manifest entries, so an
+    # empty manifest dict naturally short-circuits them.
 
     changed = False
     types = set()
@@ -455,7 +470,7 @@ def _sync_mod_json(mod_dir):
 
     # ── Detect mesh changes ──
     manifest_meshes = {m['name']: m for m in manifest.get('meshes', [])}
-    if manifest_meshes:
+    if manifest_meshes and has_glb:
         try:
             gltf = pygltflib.GLTF2().load(glb_path)
             blob = gltf.binary_blob()
@@ -531,9 +546,56 @@ def _sync_mod_json(mod_dir):
         except Exception as e:
             print(f"  WARNING: texture change detection failed: {e}")
 
+    # ── v3.12: folder-mirror authoring path ──
+    # If the modder dropped PNGs under <mod>/textures/ mirroring PKG entry
+    # paths, the walker emits one descriptor per file.  We dedupe against
+    # the flat-with-manifest entries above by `pkg_entry_name`, so a mod
+    # using both modes for the same PKG path lands a single override.
+    try:
+        existing_pkg_entries = {
+            t.get('pkg_entry_name') for t in assets.get('textures', [])
+            if t.get('pkg_entry_name')
+        }
+        existing_tex_files = {
+            t.get('file') for t in assets.get('textures', [])
+            if t.get('file')
+        }
+        added_from_mirror = 0
+        for ovr in walk_texture_overrides(mod_dir):
+            pkg_entry = ovr['pkg_entry']
+            if pkg_entry in existing_pkg_entries:
+                continue
+            # Use the relative path from textures/ (forward-slash form)
+            # as both the file ref and the texture name.  Slash-separated
+            # so cross-platform builds produce identical mod.json output.
+            rel = ovr['rel_path']
+            file_ref = f"textures/{rel}"
+            if file_ref in existing_tex_files:
+                continue
+            tex_name = os.path.splitext(rel)[0]
+            assets.setdefault('textures', []).append({
+                'name': tex_name,
+                'file': file_ref,
+                'replaces': True,
+                'pkg_entry_name': pkg_entry,
+            })
+            existing_pkg_entries.add(pkg_entry)
+            existing_tex_files.add(file_ref)
+            added_from_mirror += 1
+        if added_from_mirror:
+            if 'texture_replace' not in types:
+                types.add('texture_replace')
+            changed = True
+            print(f"  detected {added_from_mirror} texture override(s) "
+                  f"from textures/ folder")
+    except Exception as e:
+        print(f"  WARNING: folder-mirror texture detection failed: {e}")
+
     # ── Pick up custom textures from new meshes ──
-    # The converter writes *_custom_textures.json; also check build output
-    for search_dir in [mod_dir, os.path.join(mod_dir, 'build')]:
+    # The converter writes *_custom_textures.json; also check build
+    # output.  Requires GLB (we extract PNGs from it via pygltflib).
+    custom_tex_dirs = [mod_dir, os.path.join(mod_dir, 'build')] if has_glb else []
+    for search_dir in custom_tex_dirs:
         for root, dirs, files in os.walk(search_dir):
             for fname in files:
                 if fname.endswith('_custom_textures.json'):
