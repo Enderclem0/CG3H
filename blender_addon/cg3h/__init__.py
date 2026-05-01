@@ -1118,21 +1118,98 @@ class CG3H_OT_Export(bpy.types.Operator):
                 # accessories of any scale get a proportional outline.
                 bbox_diag = self._bbox_diagonal(src)
                 strength = bbox_diag * max(0.001, min(0.5, push))
-                dupe = self._duplicate_with_modifier(
+                dupe = self._build_outline_dupe(
                     context, src,
                     new_name=f"{base_name}Outline_MeshShape",
-                    modifier_type='DISPLACE',
-                    modifier_attrs={
-                        'direction': 'NORMAL',
-                        'strength': strength,
-                        'mid_level': 0.0,
-                    })
+                    strength=strength)
                 if dupe is not None:
                     dupes.append(dupe)
                     print(f"[CG3H]   auto-gen outline: "
                           f"{src.name} → {dupe.name} "
                           f"(push {push*100:.1f}% = {strength:.3f})")
         return dupes
+
+    @staticmethod
+    def _build_outline_dupe(context, src, new_name, strength):
+        """Duplicate `src` and push every vertex along a face-derived
+        unit normal by `strength` mesh-space units.
+
+        Bypasses Blender's Displace modifier on purpose.  Displace
+        with direction='NORMAL' uses whatever vertex normals are
+        stored on the mesh, and CG3H imports normals from the GR2
+        verbatim (the engine encodes direction, not unit length, so
+        magnitudes can be ≠1).  Computing face-averaged unit normals
+        via bmesh sidesteps that — face normals are always derived
+        from geometry and are unit length by construction.
+        """
+        import bmesh
+        import mathutils
+
+        # Use the same scaffolding as _duplicate_with_modifier for the
+        # selection / active dance.
+        prev_active = context.view_layer.objects.active
+        prev_selected = list(context.selected_objects)
+        try:
+            bpy.ops.object.select_all(action='DESELECT')
+            src.select_set(True)
+            context.view_layer.objects.active = src
+            bpy.ops.object.duplicate(linked=False)
+            dupe = context.view_layer.objects.active
+        finally:
+            bpy.ops.object.select_all(action='DESELECT')
+            for o in prev_selected:
+                try:
+                    o.select_set(True)
+                except Exception:
+                    pass
+            context.view_layer.objects.active = prev_active
+
+        if dupe is src or dupe is None:
+            return None
+        if new_name in bpy.data.objects:
+            print(f"[CG3H]   skip auto-gen: {new_name!r} already exists")
+            try:
+                bpy.data.objects.remove(dupe, do_unlink=True)
+            except Exception:
+                pass
+            return None
+        dupe.name = new_name
+        if dupe.data:
+            dupe.data.name = new_name
+
+        # Push each vertex along the average of its incident face
+        # normals.  bmesh face normals are always unit length —
+        # they're computed from positions on demand.
+        bm = bmesh.new()
+        bm.from_mesh(dupe.data)
+        bm.normal_update()
+        zero = mathutils.Vector((0.0, 0.0, 0.0))
+        for v in bm.verts:
+            if not v.link_faces:
+                continue
+            n = zero.copy()
+            for f in v.link_faces:
+                n += f.normal
+            if n.length > 1e-9:
+                n.normalize()
+                v.co = v.co + n * strength
+        bm.to_mesh(dupe.data)
+        bm.free()
+        dupe.data.update()
+
+        # Match the post-conditions of _duplicate_with_modifier so the
+        # rest of the export flow (cleanup, routing) treats this dupe
+        # the same way.
+        try:
+            dupe.cg3h_gen_shadow = False
+            dupe.cg3h_gen_outline = False
+        except Exception:
+            pass
+        try:
+            dupe.select_set(True)
+        except Exception:
+            pass
+        return dupe
 
     @staticmethod
     def _bbox_diagonal(obj):
@@ -1191,27 +1268,6 @@ class CG3H_OT_Export(bpy.types.Operator):
         dupe.name = new_name
         if dupe.data:
             dupe.data.name = new_name
-
-        # Strip custom split normals before adding a normal-driven
-        # modifier (Displace direction='NORMAL').  The CG3H importer
-        # writes per-vertex normals from the GR2 verbatim, and those
-        # normals can be non-unit length (the engine doesn't require
-        # unit normals; they just have to encode direction).  Blender's
-        # Displace multiplies those non-unit normals by the strength,
-        # so a 1% bbox-diag strength can produce a 100x-larger
-        # displacement than intended.  Clearing custom split normals
-        # forces Blender to recompute unit-length normals from face
-        # geometry, which gives Displace the expected behaviour.
-        if modifier_type == 'DISPLACE' and dupe.data.has_custom_normals:
-            prev_act_n = context.view_layer.objects.active
-            try:
-                context.view_layer.objects.active = dupe
-                bpy.ops.mesh.customdata_custom_splitnormals_clear()
-            except Exception as e:
-                print(f"[CG3H]   WARNING: clearing custom normals on "
-                      f"{dupe.name} raised: {e}")
-            finally:
-                context.view_layer.objects.active = prev_act_n
 
         mod = dupe.modifiers.new(name=f"cg3h_{modifier_type.lower()}",
                                  type=modifier_type)
