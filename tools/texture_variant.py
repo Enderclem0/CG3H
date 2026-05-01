@@ -61,8 +61,13 @@ def walk_texture_overrides(mod_dir):
             abs_path = os.path.join(dirpath, fname)
             rel_path = os.path.relpath(abs_path, textures_root)
             # PKG entry paths use backslashes; normalize whatever the
-            # host OS gave us.
-            pkg_entry = rel_path.replace(os.sep, "\\").replace("/", "\\")
+            # host OS gave us.  Drop the file extension — the game's
+            # PKG manifest stores entries by base name (no .png), so
+            # `textures/GR2/Melinoe_Color512.png` overrides
+            # `GR2\Melinoe_Color512`.
+            pkg_entry_with_ext = rel_path.replace(os.sep, "\\") \
+                                         .replace("/", "\\")
+            pkg_entry = os.path.splitext(pkg_entry_with_ext)[0]
             yield {
                 "pkg_entry": pkg_entry,
                 "source_path": abs_path,

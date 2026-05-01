@@ -61,12 +61,10 @@ CG3H_MOD_STATE_SCHEMA_VERSION = 1
 def _skins_map_for(char_mods):
     """v3.12: per-character skins registry for cg3h_status.json.
 
-    Returns `{ mod_id: { name, version, pkg_entries, preview } }` for
-    every `texture_replace` mod in `char_mods`.  Drives the in-game
-    manager's Skin dropdown without each consumer re-walking mod.json.
-    Mods whose `assets.textures` is empty still appear (lets the UI
-    show a hand-authored mod that hasn't been built yet) — the manager
-    filters them when rendering the picker.
+    Returns `{ mod_id: { name, version, granny_texture, pkg_entries,
+    preview } }` for every `texture_replace` mod in `char_mods`.
+    `granny_texture` is the unique-renamed PKG entry the runtime feeds
+    to `SetThingProperty(GrannyTexture=...)` for live skin swap.
     """
     skins = {}
     for mi in char_mods:
@@ -78,10 +76,19 @@ def _skins_map_for(char_mods):
             continue
         metadata = mod.get('metadata', {})
         textures = mod.get('assets', {}).get('textures', []) or []
-        pkg_entries = sorted({
-            t.get('pkg_entry_name') for t in textures
-            if t.get('pkg_entry_name')
-        })
+        # Match the second-pass rename rule: `<mod_id>_<basename>` per
+        # entry; first one is the primary atlas.
+        pkg_entries = []
+        granny_texture = None
+        for t in textures:
+            pkg_entry_name = t.get('pkg_entry_name')
+            if not pkg_entry_name:
+                continue
+            basename = pkg_entry_name.replace('\\', '/').split('/')[-1]
+            unique_name = f"{mi['id']}_{basename}"
+            pkg_entries.append(unique_name)
+            if granny_texture is None:
+                granny_texture = unique_name
         preview = None
         preview_path = os.path.join(mi.get('mod_dir', ''), 'preview.png')
         if mi.get('mod_dir') and os.path.isfile(preview_path):
@@ -89,7 +96,8 @@ def _skins_map_for(char_mods):
         skins[mi['id']] = {
             'name': metadata.get('name', mi['id']),
             'version': metadata.get('version', ''),
-            'pkg_entries': pkg_entries,
+            'granny_texture': granny_texture,
+            'pkg_entries': sorted(pkg_entries),
             'preview': preview,
         }
     return skins
@@ -240,9 +248,14 @@ if sys.stdout and sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8'
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
 from anim_sjson_routing import alias_home_for
-from cg3h_constants import CG3H_VERSION
-from cg3h_constants import find_game_path as _find_game_path
+from cg3h_build import _sync_mod_json
+from cg3h_constants import (
+    CG3H_BUILDER_FOLDER,
+    CG3H_VERSION,
+    find_game_path as _find_game_path,
+)
 from gltf_to_gr2 import convert
+from pkg_texture import build_standalone_pkg
 
 
 def _merge_manifests(char_mods, collisions=None):
@@ -1691,6 +1704,143 @@ def scan_and_build_all(plugins_data_dir, game_dir=None, only_character=None):
                 disabled_mods=disabled_mods)
 
     print(f"\nScan complete: {built} built, {cached} cached, {failed} failed")
+
+    # v3.12: second pass for texture-only mods (no GLB).  These are
+    # `texture_replace` mods authored entirely via the folder-mirror
+    # convention — they don't need to be in by_character (which drives
+    # the GPK merge loop) but they DO need their .pkg built and a skin
+    # entry in cg3h_status.json.
+    texture_only_skins = {}  # character → { mod_id: skin_record }
+    for entry in sorted(os.listdir(plugins_data_dir)):
+        mod_dir = os.path.join(plugins_data_dir, entry)
+        if not os.path.isdir(mod_dir):
+            continue
+        mod_json_path = os.path.join(mod_dir, 'mod.json')
+        if not os.path.isfile(mod_json_path):
+            for sub in os.listdir(mod_dir):
+                cand = os.path.join(mod_dir, sub, 'mod.json')
+                if os.path.isfile(cand):
+                    mod_json_path = cand
+                    mod_dir = os.path.dirname(cand)
+                    break
+        if not os.path.isfile(mod_json_path):
+            continue
+        try:
+            with open(mod_json_path) as f:
+                mod = json.load(f)
+        except Exception:
+            continue
+        if not mod.get('format', '').startswith('cg3h-mod'):
+            continue
+        # Skip mods that already went through the mesh build loop.
+        if mod.get('assets', {}).get('glb'):
+            continue
+        # Only handle texture_replace types here.  Other GLB-less
+        # types (animation_only, animation_add) have their own paths.
+        mod_type = mod.get('type', '')
+        types = mod_type if isinstance(mod_type, list) \
+            else [mod_type] if mod_type else []
+        if 'texture_replace' not in types:
+            continue
+        character = mod.get('target', {}).get('character', '')
+        if not character:
+            continue
+        if not _is_mod_enabled(mod_state, entry):
+            continue
+
+        # Sync mod.json with the textures/ folder layout, then read it
+        # back to get the populated assets.textures.
+        try:
+            _sync_mod_json(mod_dir)
+        except Exception as e:
+            print(f"  WARNING: {entry}: _sync_mod_json failed: {e}")
+            continue
+        with open(mod_json_path) as f:
+            mod = json.load(f)
+        textures = mod.get('assets', {}).get('textures', []) or []
+        replaces = [t for t in textures if t.get('replaces')]
+        if not replaces:
+            continue
+
+        # Build the per-mod replacement PKG NEXT TO mod.json.  Runtime
+        # `load_textures` resolves the pkg as <mod.path>/<filename>,
+        # where mod.path is the dir containing mod.json — which is
+        # `mod_dir` here (already adjusted for r2modman nesting above).
+        #
+        # v3.12 B: rename each PKG entry to a unique form (`<mod_id>_
+        # <basename>`) so it doesn't collide with the stock entry of the
+        # same name.  The runtime then calls SetThingProperty(
+        # GrannyTexture=<unique_name>) for live skin swap (MelSkin-style).
+        # The modder's folder-mirror layout is unchanged — it tells us
+        # WHICH stock atlas to swap; we just rebrand at pack time.
+        pkg_path = os.path.join(
+            mod_dir, f"{CG3H_BUILDER_FOLDER}-{entry}.pkg")
+        pkg_textures = []
+        granny_texture_name = None  # primary atlas → SetThingProperty target
+        for tex in replaces:
+            pkg_entry_name = tex.get('pkg_entry_name')
+            tex_file = tex.get('file', '')
+            full_path = os.path.join(mod_dir, tex_file)
+            if not pkg_entry_name or not os.path.isfile(full_path):
+                continue
+            basename = pkg_entry_name.replace('\\', '/').split('/')[-1]
+            unique_name = f"{entry}_{basename}"
+            pkg_textures.append({
+                'name': unique_name, 'png_path': full_path,
+                'width': 512, 'height': 512, 'fmt': 0x1C, 'mip_count': 6,
+            })
+            # The first texture in the list becomes the primary atlas
+            # SetThingProperty targets.  Multi-texture skins are out of
+            # scope for live swap in v3.12.0.
+            if granny_texture_name is None:
+                granny_texture_name = unique_name
+        if not pkg_textures:
+            continue
+        try:
+            build_standalone_pkg(pkg_textures, pkg_path)
+            print(f"  {entry}: built texture PKG with "
+                  f"{len(pkg_textures)} replacement(s), "
+                  f"primary={granny_texture_name!r}")
+        except Exception as e:
+            print(f"  WARNING: {entry}: PKG build failed: {e}")
+            continue
+
+        # Stash for status.json — the main skins-merge code below picks
+        # this up alongside the mesh-bearing builds' skins.
+        meta = mod.get('metadata', {})
+        texture_only_skins.setdefault(character, {})[entry] = {
+            'name': meta.get('name', entry),
+            'version': meta.get('version', ''),
+            'granny_texture': granny_texture_name,  # SetThingProperty target
+            'pkg_entries': sorted(p['name'] for p in pkg_textures),
+            'preview': None,
+        }
+        # Make sure the character has at least a stub status record so
+        # the manager renders a Characters-tab entry for skin-only mods.
+        if character not in status_characters:
+            status_characters[character] = {
+                'state': 'cached',
+                'gpk_path': None,
+                'mods': [entry],
+                'mod_details': [{
+                    'id': entry,
+                    'name': meta.get('name', entry),
+                    'version': meta.get('version', ''),
+                    'author': meta.get('author', ''),
+                    'enabled': True,
+                }],
+                'error': None,
+                'duration_ms': 0,
+            }
+
+    # Merge texture-only skins into the per-character skins block.
+    # texture_replace mods that ride alongside a mesh_replace mod for
+    # the same character were already covered by the mesh-build loop's
+    # _skins_map_for; this only adds the no-GLB-only ones.
+    for character, skins in texture_only_skins.items():
+        existing = status_characters.setdefault(character, {}).get("skins", {})
+        existing.update(skins)
+        status_characters[character]["skins"] = existing
 
     # v3.7: write the status JSON.  Consumed by the in-game mod manager
     # Lua plugin.  Best-effort — builder success does not depend on the

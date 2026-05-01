@@ -208,6 +208,52 @@ local function _draw_characters_tab(state, ctx)
                 ImGui.Unindent()
             end
 
+            -- v3.12: Skin picker.  Mutually-exclusive selection over
+            -- enabled `texture_replace` mods for this character.  "Stock"
+            -- = stack everything (v3.11 behaviour, last-wins).  Selecting
+            -- one applies its overrides exclusively on next launch.
+            local char_skins = rec.skins
+            if char_skins and next(char_skins) and ctx.on_set_active_skin then
+                ImGui.Spacing()
+                ImGui.Text("Skin:")
+                ImGui.SameLine()
+                local active_skin = state.get_active_skin(char)
+                local skin_label = "Stock"
+                if active_skin ~= "stock" and char_skins[active_skin] then
+                    skin_label = char_skins[active_skin].name or active_skin
+                end
+                if ImGui.BeginCombo("##skin_" .. char, skin_label) then
+                    -- Stock entry first, then mods sorted by id for stability.
+                    if ImGui.Selectable("Stock##skin_" .. char .. "_stock",
+                            active_skin == "stock") then
+                        if active_skin ~= "stock" then
+                            _run_and_banner(function()
+                                return ctx.on_set_active_skin(char, "stock")
+                            end, char)
+                        end
+                    end
+                    local skin_ids = {}
+                    for skin_id, _ in pairs(char_skins) do
+                        table.insert(skin_ids, skin_id)
+                    end
+                    table.sort(skin_ids)
+                    for i, skin_id in ipairs(skin_ids) do
+                        local entry = char_skins[skin_id]
+                        local lbl = (entry.name ~= "" and entry.name) or skin_id
+                        local selected = (skin_id == active_skin)
+                        if ImGui.Selectable(lbl .. "##skin_" .. char .. "_" .. i,
+                                selected) then
+                            if skin_id ~= active_skin then
+                                _run_and_banner(function()
+                                    return ctx.on_set_active_skin(char, skin_id)
+                                end, char)
+                            end
+                        end
+                    end
+                    ImGui.EndCombo()
+                end
+            end
+
             -- Accessories: mesh_add mods.  Each checkbox toggles that
             -- accessory on/off.  Toggle rebuilds the merged GPK (the
             -- draw-gate only hides whole mesh entries, not individual

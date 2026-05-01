@@ -962,7 +962,15 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
         for old, new in texture_renames.items():
             print(f"  INFO: texture {old!r} auto-prefixed -> {new!r}")
 
-    if custom_textures:
+    # v3.12: replacement textures (folder-mirror or flat-with-manifest).
+    # These ship a PNG that overrides an existing PKG entry — pkg_entry_name
+    # is taken verbatim from the asset list, no GR2 prefix forced, no mod-id
+    # auto-prefix on the texture name (we WANT to collide with the stock
+    # entry to override it).
+    replaces_textures = [t for t in tex_list
+                         if t.get('replaces') and not t.get('custom')]
+
+    if custom_textures or replaces_textures:
         # PKG filename must contain a registered H2M module GUID.  Data-
         # only CG3H mods don't have a main.lua so they aren't registered,
         # but the caller (Enderclem-CG3HBuilder) is.  H2M's LoadPackages
@@ -972,7 +980,16 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
         pkg_path = os.path.join(
             plugins_data, f"{CG3H_BUILDER_FOLDER}-{mod_id}.pkg")
 
-        print(f"\n  Building standalone PKG: {len(custom_textures)} custom texture(s)")
+        n_custom = len(custom_textures)
+        n_replaces = len(replaces_textures)
+        if n_custom and n_replaces:
+            print(f"\n  Building standalone PKG: {n_custom} custom + "
+                  f"{n_replaces} replacement texture(s)")
+        elif n_custom:
+            print(f"\n  Building standalone PKG: {n_custom} custom texture(s)")
+        else:
+            print(f"\n  Building standalone PKG: {n_replaces} replacement "
+                  f"texture(s)")
 
         pkg_textures = []
         new_tex_names = []
@@ -994,6 +1011,29 @@ def build_mod(mod_dir, game_dir=None, r2_plugins_dir=None):
             elif full_path.lower().endswith('.dds'):
                 pkg_textures.append({'name': entry_name, 'dds_path': full_path})
             new_tex_names.append(tex_name)
+        for tex in replaces_textures:
+            tex_file = tex.get('file', '')
+            full_path = os.path.join(mod_dir, tex_file)
+            if not os.path.isfile(full_path):
+                print(f"  WARNING: texture file not found: {full_path}")
+                continue
+            # pkg_entry_name is the EXACT path the engine looks up — no
+            # GR2 prefix, no mod-id rename.  We want to collide with the
+            # stock entry's name to override it.
+            entry_name = tex.get('pkg_entry_name')
+            if not entry_name:
+                print(f"  WARNING: replacement texture {tex_file!r} has no "
+                      f"pkg_entry_name; skipping")
+                continue
+            w = min(tex.get('width', 512), 512)
+            h = min(tex.get('height', 512), 512)
+            if full_path.lower().endswith('.png'):
+                pkg_textures.append({
+                    'name': entry_name, 'png_path': full_path,
+                    'width': w, 'height': h, 'fmt': 0x1C, 'mip_count': 6,
+                })
+            elif full_path.lower().endswith('.dds'):
+                pkg_textures.append({'name': entry_name, 'dds_path': full_path})
         if pkg_textures:
             build_standalone_pkg(pkg_textures, pkg_path)
 

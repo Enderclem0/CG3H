@@ -2130,6 +2130,8 @@ def _make_texture_mod(td, files):
 
 
 def test_texture_variant_walker_basic():
+    """PKG entry paths drop the file extension — the game looks up
+    `GR2\\Melinoe_Body_BC`, not `GR2\\Melinoe_Body_BC.png`."""
     from texture_variant import collect_overrides
     with tempfile.TemporaryDirectory() as td:
         _make_texture_mod(td, [
@@ -2138,8 +2140,7 @@ def test_texture_variant_walker_basic():
         ])
         out = collect_overrides(td)
     pkgs = sorted(o["pkg_entry"] for o in out)
-    assert pkgs == ["GR2\\Melinoe_Body_BC.png",
-                    "UI\\Portraits\\Melinoe.png"]
+    assert pkgs == ["GR2\\Melinoe_Body_BC", "UI\\Portraits\\Melinoe"]
 
 
 def test_texture_variant_walker_deep_nesting():
@@ -2152,7 +2153,7 @@ def test_texture_variant_walker_deep_nesting():
         ])
         out = collect_overrides(td)
     assert len(out) == 1
-    assert out[0]["pkg_entry"] == "Characters\\Hub\\Decor\\Melinoe_idle.png"
+    assert out[0]["pkg_entry"] == "Characters\\Hub\\Decor\\Melinoe_idle"
 
 
 def test_texture_variant_walker_skips_unsupported_and_hidden():
@@ -2168,7 +2169,7 @@ def test_texture_variant_walker_skips_unsupported_and_hidden():
         ])
         out = collect_overrides(td)
     pkgs = [o["pkg_entry"] for o in out]
-    assert pkgs == ["GR2\\Body.png"]
+    assert pkgs == ["GR2\\Body"]
 
 
 def test_texture_variant_walker_missing_textures_dir():
@@ -2214,12 +2215,13 @@ def test_sync_mod_json_folder_mirror_no_blender():
     assert mod.get("type") == "texture_replace"
     pkg_entries = sorted(t["pkg_entry_name"]
                          for t in mod["assets"]["textures"])
-    assert pkg_entries == ["GR2\\Melinoe_Body_BC.png",
-                           "UI\\Portraits\\Melinoe.png"]
+    assert pkg_entries == ["GR2\\Melinoe_Body_BC", "UI\\Portraits\\Melinoe"]
 
 
 def test_skins_map_for_basic():
-    """One texture_replace mod → one skin entry with sorted pkg_entries."""
+    """One texture_replace mod → one skin entry with the FIRST entry
+    as the primary granny_texture and pkg_entries renamed to unique
+    `<mod_id>_<basename>` form for live SetThingProperty swap."""
     from cg3h_builder_entry import _skins_map_for
     char_mods = [{
         'id': 'Author-RedDress',
@@ -2229,8 +2231,8 @@ def test_skins_map_for_basic():
             'metadata': {'name': 'RedDress', 'version': '1.0.0'},
             'target': {'character': 'Melinoe'},
             'assets': {'textures': [
-                {'pkg_entry_name': 'GR2\\Melinoe_Body_BC.png'},
-                {'pkg_entry_name': 'UI\\Portraits\\Melinoe.png'},
+                {'pkg_entry_name': 'GR2\\Melinoe_Color512'},
+                {'pkg_entry_name': 'UI\\Portraits\\Melinoe'},
             ]},
         },
     }]
@@ -2238,9 +2240,13 @@ def test_skins_map_for_basic():
     assert list(skins.keys()) == ['Author-RedDress']
     assert skins['Author-RedDress']['name'] == 'RedDress'
     assert skins['Author-RedDress']['version'] == '1.0.0'
+    # Primary atlas = first declared entry.
+    assert skins['Author-RedDress']['granny_texture'] == \
+        'Author-RedDress_Melinoe_Color512'
+    # Both entries renamed to unique form, sorted.
     assert skins['Author-RedDress']['pkg_entries'] == [
-        'GR2\\Melinoe_Body_BC.png',
-        'UI\\Portraits\\Melinoe.png',
+        'Author-RedDress_Melinoe',
+        'Author-RedDress_Melinoe_Color512',
     ]
     assert skins['Author-RedDress']['preview'] is None
 
@@ -2280,7 +2286,8 @@ def test_skins_map_for_handles_list_type():
 
 def test_skins_map_for_empty_textures():
     """Hand-authored mod with no built textures yet → still appears
-    so the UI can show 'pending build' state.  pkg_entries is []."""
+    so the UI can show 'pending build' state.  pkg_entries is [],
+    granny_texture is None."""
     from cg3h_builder_entry import _skins_map_for
     char_mods = [{'id': 'D', 'mod_dir': '/x', 'mod': {
         'type': 'texture_replace',
@@ -2288,6 +2295,7 @@ def test_skins_map_for_empty_textures():
     }}]
     skins = _skins_map_for(char_mods)
     assert skins['D']['pkg_entries'] == []
+    assert skins['D']['granny_texture'] is None
 
 
 def test_sync_mod_json_folder_mirror_dedupe_with_existing():
@@ -2306,14 +2314,14 @@ def test_sync_mod_json_folder_mirror_dedupe_with_existing():
                     "name": "Melinoe_Body_BC",
                     "file": "Melinoe_Body_BC.png",
                     "replaces": True,
-                    "pkg_entry_name": "GR2\\Melinoe_Body_BC.png",
+                    "pkg_entry_name": "GR2\\Melinoe_Body_BC",
                 }]},
             }, f)
         _sync_mod_json(td)
         with open(os.path.join(td, "mod.json")) as f:
             mod = json.load(f)
     pkg_entries = [t["pkg_entry_name"] for t in mod["assets"]["textures"]]
-    assert pkg_entries == ["GR2\\Melinoe_Body_BC.png"]
+    assert pkg_entries == ["GR2\\Melinoe_Body_BC"]
 
 
 def _anim_mod(mod_id, character, animations):

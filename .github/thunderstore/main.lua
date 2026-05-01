@@ -130,8 +130,25 @@ end
 if rom.game then
     rom.game.CG3H_API = rom.game.CG3H_API or {}
     rom.game.CG3H_API.play_animation = runtime.play_animation
-    rom.game.CG3H_API.version = "3.11.0"
+    -- v3.12 B: skin selection persists immediately and applies live
+    -- via SetThingProperty when the target unit is in the scene.
+    -- Out-of-scene targets get auto-applied on the next room load
+    -- (via runtime.install_skin_scene_hook below).
+    rom.game.CG3H_API.set_active_skin = function(character, mod_id)
+        mod_state.set_active_skin(character, mod_id, builder_data_dir)
+        return runtime.apply_skin_for_character(mod_state, character)
+    end
+    rom.game.CG3H_API.clear_skin = function(character)
+        mod_state.set_active_skin(character, nil, builder_data_dir)
+        return runtime.apply_skin_for_character(mod_state, character)
+    end
+    rom.game.CG3H_API.version = "3.12.0"
 end
+
+-- v3.12 B: hook scene loads so freshly-spawned NPCs (and the hero
+-- after a hub→biome transition) pick up their persisted skin without
+-- the user re-clicking the picker.
+runtime.install_skin_scene_hook(mod_state)
 
 -- NOTE: apply_visibility is NOT called at startup because HashGuid::Lookup
 -- returns 0 before the first scene loads.  The builder respects mod_state
@@ -186,6 +203,15 @@ local ui_ctx = {
         end
         return runtime.swap_character_all(character, mod_id, mod_state)
     end,
+    on_set_active_skin = function(character, mod_id)
+        -- v3.12 B: persist first so apply_skin_for_character reads the
+        -- new selection, then call SetThingProperty for the live swap.
+        -- Returns "live" when applied, "transition" when the target
+        -- isn't in the current scene (skin will apply on next room
+        -- load via the post-import hook).
+        mod_state.set_active_skin(character, mod_id, builder_data_dir)
+        return runtime.apply_skin_for_character(mod_state, character)
+    end,
     on_play_animation = function(target_id, anim_name)
         return runtime.play_animation(target_id, anim_name)
     end,
@@ -194,6 +220,11 @@ local ui_ctx = {
             rom.data.draw_sanity_check_gmd("HecateHub_Mesh")
         end
         runtime.apply_active_variants(mod_state)
+        -- v3.12 B: replay every persisted skin on its live target.
+        -- Characters not in the current scene get re-applied
+        -- automatically on the next room load via the on_import hook
+        -- installed below.
+        runtime.apply_all_skins(mod_state)
     end,
 }
 

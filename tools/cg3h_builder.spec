@@ -6,6 +6,12 @@ binaries = []
 hiddenimports = ['numpy', 'lz4.block', 'pygltflib', 'PIL']
 tmp_ret = collect_all('etcpak')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+# v3.12: build_standalone_pkg's PNG → DDS path imports archspec for
+# CPU feature detection (transitive dep).  Need its .json data
+# bundled or the texture-replace PKG build path crashes at runtime
+# with "microarchitectures.json not found".
+tmp_ret = collect_all('archspec')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
