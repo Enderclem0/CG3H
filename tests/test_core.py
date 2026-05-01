@@ -2180,6 +2180,30 @@ def test_texture_variant_walker_missing_textures_dir():
         assert collect_overrides(td) == []
 
 
+def test_load_or_build_pkg_entry_set_missing_game_dir():
+    """No game_dir → empty set, no error.  Validation falls back to
+    permissive mode (warning suppressed) when scanning isn't possible."""
+    from texture_variant import load_or_build_pkg_entry_set
+    with tempfile.TemporaryDirectory() as cache:
+        assert load_or_build_pkg_entry_set("", cache) == set()
+        assert load_or_build_pkg_entry_set(None, cache) == set()
+
+
+def test_load_or_build_pkg_entry_set_caches():
+    """Cache file gets written on first call and re-read on second."""
+    from texture_variant import load_or_build_pkg_entry_set
+    with tempfile.TemporaryDirectory() as game:
+        # Empty Content/Packages/1080p — scan returns empty set,
+        # but cache still gets written.
+        os.makedirs(os.path.join(game, "Content", "Packages", "1080p"))
+        with tempfile.TemporaryDirectory() as cache:
+            r1 = load_or_build_pkg_entry_set(game, cache)
+            assert r1 == set()
+            assert os.path.isfile(os.path.join(cache, "_pkg_entry_set.json"))
+            r2 = load_or_build_pkg_entry_set(game, cache)
+            assert r2 == set()
+
+
 def test_texture_variant_walker_deterministic_order():
     """Output order must be deterministic so cache keys built on top
     of the walk don't churn."""

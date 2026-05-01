@@ -256,6 +256,7 @@ from cg3h_constants import (
 )
 from gltf_to_gr2 import convert
 from pkg_texture import build_standalone_pkg
+from texture_variant import load_or_build_pkg_entry_set
 
 
 def _merge_manifests(char_mods, collisions=None):
@@ -1711,6 +1712,17 @@ def scan_and_build_all(plugins_data_dir, game_dir=None, only_character=None):
     # the GPK merge loop) but they DO need their .pkg built and a skin
     # entry in cg3h_status.json.
     texture_only_skins = {}  # character → { mod_id: skin_record }
+
+    # v3.12: cache stock PKG entry names so we can warn modders when
+    # they ship a texture for a path the game doesn't actually own
+    # (typo prevention, surfaces silent no-ops at build time).  Empty
+    # set → permissive mode (validation skipped).
+    stock_pkg_entries = load_or_build_pkg_entry_set(game_dir, builder_dir)
+    if stock_pkg_entries:
+        print(f"PKG entry validation: {len(stock_pkg_entries)} stock "
+              f"entries indexed")
+    # Lowercase fast-lookup mirror for case-insensitive matching.
+    stock_pkg_entries_ci = {e.lower() for e in stock_pkg_entries}
     for entry in sorted(os.listdir(plugins_data_dir)):
         mod_dir = os.path.join(plugins_data_dir, entry)
         if not os.path.isdir(mod_dir):
@@ -1783,6 +1795,17 @@ def scan_and_build_all(plugins_data_dir, game_dir=None, only_character=None):
             full_path = os.path.join(mod_dir, tex_file)
             if not pkg_entry_name or not os.path.isfile(full_path):
                 continue
+            # v3.12: validation — warn (don't fail) when the modder
+            # mirrored a path the game doesn't own.  Catches typos
+            # like `textures/GR2/melinoe_color512.png` (lowercase)
+            # before they ship as silent no-ops.  Skipped when the
+            # stock index is empty (no game_dir or scan failed).
+            if (stock_pkg_entries_ci
+                    and pkg_entry_name.lower() not in stock_pkg_entries_ci):
+                print(f"  WARNING: {entry}: {tex_file} mirrors "
+                      f"PKG path {pkg_entry_name!r} which is NOT in any "
+                      f"stock pkg_manifest — possible typo, override "
+                      f"will silently no-op in-game")
             basename = pkg_entry_name.replace('\\', '/').split('/')[-1]
             unique_name = f"{entry}_{basename}"
             pkg_textures.append({
