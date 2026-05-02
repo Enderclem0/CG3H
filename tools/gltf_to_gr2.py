@@ -542,12 +542,177 @@ def _apply_glb_tracks_to_gr2(dll, gr2_bytes, str_db, glb_tracks,
     return new_bytes, tracks_modified
 
 
+def _match_and_patch_anim_entry(dll, str_db, dak32f_type_ptr,
+                                 entry_name, gr2_bytes,
+                                 glb_by_exact, glb_by_norm, norm_func):
+    """Per-entry worker for patch_animation_entries.
+
+    Loads `gr2_bytes`, attempts a GLB-action match against the four
+    keys (entry_name + GR2 anim_name, exact + normalized), patches
+    matching tracks if any, and returns the freshly-serialized
+    bytes (or None if no patch happened).
+
+    Pure function once (dll, str_db, dak32f_type_ptr) are bound — so
+    it's safe to call from a multiprocessing worker after worker-init
+    has bound those globals.  Frees the GR2 file before returning.
+    """
+    gr2_buf = ctypes.create_string_buffer(gr2_bytes)
+    gr2_file = dll.GrannyReadEntireFileFromMemory(len(gr2_bytes), gr2_buf)
+    if not gr2_file:
+        return None
+    try:
+        dll.GrannyRemapFileStrings(gr2_file, str_db)
+        fi = dll.GrannyGetFileInfo(gr2_file)
+        if not fi:
+            return None
+
+        anim_count = ri(fi, 0x78)
+        if anim_count == 0:
+            return None
+
+        anim0 = rq(rq(fi, 0x7C), 0)
+        anim_name = read_cstr(rq(anim0, 0))
+
+        glb_tracks = (glb_by_exact.get(entry_name)
+                      or glb_by_exact.get(anim_name)
+                      or glb_by_norm.get(entry_name)
+                      or glb_by_norm.get(anim_name)
+                      or glb_by_norm.get(norm_func(anim_name)))
+        if glb_tracks is None:
+            return None
+
+        tg_count = ri(fi, 0x6C)
+        if tg_count == 0:
+            return None
+        tg0 = rq(rq(fi, 0x70), 0)
+        tt_count = ri(tg0, 0x14)
+        tt_ptr = rq(tg0, 0x18)
+        if tt_count == 0 or not _valid_ptr(tt_ptr):
+            return None
+
+        tracks_modified = 0
+        for ti in range(tt_count):
+            t_base = tt_ptr + ti * ANIM_TRACK_STRIDE
+            t_name = read_cstr(rq(t_base, 0))
+
+            bone_data = glb_tracks.get(t_name)
+            if bone_data is None:
+                short = t_name.split(':')[-1]
+                bone_data = glb_tracks.get(short)
+            if bone_data is None:
+                continue
+
+            for path, coff, dim in [('rotation', 0x0C, 4),
+                                     ('translation', 0x1C, 3),
+                                     ('scale', 0x2C, 3)]:
+                if path not in bone_data:
+                    continue
+                times, values = bone_data[path]
+                if len(times) == 0:
+                    continue
+
+                if path == 'scale' and values.shape[-1] == 3:
+                    mat_values = np.zeros((len(values), 9), dtype=np.float32)
+                    mat_values[:, 0] = values[:, 0]
+                    mat_values[:, 4] = values[:, 1]
+                    mat_values[:, 8] = values[:, 2]
+                    values = mat_values
+
+                if path == 'rotation' and values.shape[-1] == 4:
+                    _fixup_quat_signs(values)
+
+                if path == 'rotation' and values.shape[-1] == 4:
+                    data_p = rq(t_base, coff + 8)
+                    if _valid_ptr(data_p) and safe_bytes(data_p, 1)[0] in (8, 9):
+                        if _patch_quantized_curve_inplace(dll, t_base + coff, data_p, values):
+                            tracks_modified += 1
+                            continue
+
+                data_buf, knots_buf, ctrls_buf = _build_dak32f_curve(times, values, degree=2)
+                _keepalive.extend([data_buf, knots_buf, ctrls_buf])
+                struct.pack_into('<Q', (ctypes.c_uint8 * 8).from_address(t_base + coff),
+                                 0, dak32f_type_ptr)
+                struct.pack_into('<Q', (ctypes.c_uint8 * 8).from_address(t_base + coff + 8),
+                                 0, ctypes.addressof(data_buf))
+                tracks_modified += 1
+
+        if tracks_modified == 0:
+            return None
+        new_bytes = build_gr2_bytes(dll, fi, gr2_bytes, {}, 0)
+        # Drop the curve-buffer keepalives now that the bytes are
+        # serialized.  In a worker process this matters — _keepalive
+        # is module-global and would accumulate one set per entry
+        # otherwise (843 entries × few KB each adds up).
+        _keepalive.clear()
+        return new_bytes
+    finally:
+        dll.GrannyFreeFile(gr2_file)
+
+
+# multiprocessing worker state — populated per process by _patch_worker_init.
+_patch_worker_state: dict = {}
+
+
+def _patch_worker_init(dll_path, sdb_bytes, glb_by_exact, glb_by_norm,
+                       norm_suffixes):
+    """Initialize per-worker DLL + SDB + match tables exactly once.
+    Args are picklable (paths, bytes, plain dicts of numpy arrays);
+    no ctypes objects cross the process boundary."""
+    dll = setup_granny(dll_path)
+    sdb_buf = ctypes.create_string_buffer(sdb_bytes)
+    sdb_file = dll.GrannyReadEntireFileFromMemory(len(sdb_bytes), sdb_buf)
+    if not sdb_file:
+        raise RuntimeError("worker: GrannyReadEntireFileFromMemory failed for SDB")
+    str_db = dll.GrannyGetStringDatabase(sdb_file)
+    sym_addr = ctypes.c_void_p.in_dll(dll, 'GrannyCurveDataDaK32fC32fType').value
+
+    # Re-build the local _norm_anim_name in the worker; passing a
+    # closure won't pickle, and the suffix list is small.
+    suffix_tuple = tuple(norm_suffixes)
+    _suffix_re = re.compile(r'\.\d{3,}$')
+    def _worker_norm(name):
+        n = name
+        for s in suffix_tuple:
+            if n.endswith(s):
+                n = n[:-len(s)]
+                break
+        return _suffix_re.sub('', n)
+
+    _patch_worker_state.update(
+        dll=dll,
+        str_db=str_db,
+        dak32f_type_ptr=sym_addr,
+        sdb_buf=sdb_buf,
+        sdb_file=sdb_file,
+        glb_by_exact=glb_by_exact,
+        glb_by_norm=glb_by_norm,
+        norm_func=_worker_norm,
+    )
+
+
+def _patch_worker_task(args):
+    """Per-task wrapper called by the worker pool."""
+    entry_name, gr2_bytes = args
+    s = _patch_worker_state
+    new_bytes = _match_and_patch_anim_entry(
+        s['dll'], s['str_db'], s['dak32f_type_ptr'],
+        entry_name, gr2_bytes,
+        s['glb_by_exact'], s['glb_by_norm'], s['norm_func'])
+    return entry_name, new_bytes
+
+
 def patch_animation_entries(dll, gpk_entries, sdb_bytes, glb_animations,
-                            anim_patch_filter=None):
+                            anim_patch_filter=None, dll_path=None):
     """
     Patch animation entries in the GPK using data from glTF animations.
     Only patches GPK entries that have a matching animation in the GLB.
     Optional anim_patch_filter pre-filters GPK entries by substring.
+
+    `dll_path` enables parallel patching via multiprocessing — each
+    worker re-creates its own DLL/SDB state.  When None or when only
+    a single worker is configured, falls back to the in-process serial
+    path (same one the previous version used).  Worker count comes
+    from CG3H_ANIM_PARALLEL (default = os.cpu_count()).
     """
     if not glb_animations:
         return 0
@@ -637,109 +802,55 @@ def patch_animation_entries(dll, gpk_entries, sdb_bytes, glb_animations,
                   flush=True)
 
     total = len(anim_entries)
-    for idx, (entry_name, gr2_bytes) in enumerate(anim_entries.items()):
-        gr2_buf = ctypes.create_string_buffer(gr2_bytes)
-        gr2_file = dll.GrannyReadEntireFileFromMemory(len(gr2_bytes), gr2_buf)
-        if not gr2_file:
-            continue
-        dll.GrannyRemapFileStrings(gr2_file, str_db)
-        fi = dll.GrannyGetFileInfo(gr2_file)
-        if not fi:
-            dll.GrannyFreeFile(gr2_file)
-            continue
 
-        anim_count = ri(fi, 0x78)
-        if anim_count == 0:
-            dll.GrannyFreeFile(gr2_file)
-            continue
-
-        anim0 = rq(rq(fi, 0x7C), 0)
-        anim_name = read_cstr(rq(anim0, 0))
-
-        # Match GLB animation: try GPK entry name (exact), then internal name, then normalized
-        glb_tracks = (glb_by_exact.get(entry_name)
-                      or glb_by_exact.get(anim_name)
-                      or glb_by_norm.get(entry_name)
-                      or glb_by_norm.get(anim_name)
-                      or glb_by_norm.get(_norm_anim_name(anim_name)))
-        if glb_tracks is None:
-            dll.GrannyFreeFile(gr2_file)
-            continue
-
-        # Walk transform tracks and patch matching curves
-        tg_count = ri(fi, 0x6C)
-        if tg_count == 0:
-            dll.GrannyFreeFile(gr2_file)
-            continue
-        tg0 = rq(rq(fi, 0x70), 0)
-        tt_count = ri(tg0, 0x14)
-        tt_ptr = rq(tg0, 0x18)
-        if tt_count == 0 or not _valid_ptr(tt_ptr):
-            dll.GrannyFreeFile(gr2_file)
-            continue
-
-        tracks_modified = 0
-
-        for ti in range(tt_count):
-            t_base = tt_ptr + ti * ANIM_TRACK_STRIDE
-            t_name = read_cstr(rq(t_base, 0))
-
-            bone_data = glb_tracks.get(t_name)
-            if bone_data is None:
-                short = t_name.split(':')[-1]
-                bone_data = glb_tracks.get(short)
-            if bone_data is None:
-                continue
-
-            for path, coff, dim in [('rotation', 0x0C, 4),
-                                     ('translation', 0x1C, 3),
-                                     ('scale', 0x2C, 3)]:
-                if path not in bone_data:
-                    continue
-                times, values = bone_data[path]
-                if len(times) == 0:
-                    continue
-
-                if path == 'scale' and values.shape[-1] == 3:
-                    mat_values = np.zeros((len(values), 9), dtype=np.float32)
-                    mat_values[:, 0] = values[:, 0]
-                    mat_values[:, 4] = values[:, 1]
-                    mat_values[:, 8] = values[:, 2]
-                    values = mat_values
-
-                if path == 'rotation' and values.shape[-1] == 4:
-                    _fixup_quat_signs(values)
-
-                # Try in-place quantized patching first (preserves original format)
-                if path == 'rotation' and values.shape[-1] == 4:
-                    data_p = rq(t_base, coff + 8)
-                    if _valid_ptr(data_p) and safe_bytes(data_p, 1)[0] in (8, 9):
-                        if _patch_quantized_curve_inplace(dll, t_base + coff, data_p, values):
-                            tracks_modified += 1
-                            continue  # patched in-place, no reserialization needed
-
-                # Fallback: allocate new DaK32fC32f curve
-                data_buf, knots_buf, ctrls_buf = _build_dak32f_curve(times, values, degree=2)
-                _keepalive.extend([data_buf, knots_buf, ctrls_buf])
-                struct.pack_into('<Q', (ctypes.c_uint8 * 8).from_address(t_base + coff),
-                                 0, dak32f_type_ptr)
-                struct.pack_into('<Q', (ctypes.c_uint8 * 8).from_address(t_base + coff + 8),
-                                 0, ctypes.addressof(data_buf))
-                tracks_modified += 1
-
-        if tracks_modified > 0:
-            # Only re-serialize if we used DaK32fC32f fallback (changed format).
-            # In-place patches modify the existing buffer directly — serialize always
-            # to capture the changes in the output GR2.
-            new_gr2 = build_gr2_bytes(dll, fi, gr2_bytes, {}, 0)
-            gpk_entries[entry_name] = new_gr2
-            patched += 1
-            print(f"    Patched: {entry_name}", flush=True)
-
-        dll.GrannyFreeFile(gr2_file)
-
-        if (idx + 1) % 25 == 0 or idx + 1 == total:
-            print(f"    {idx+1}/{total} entries scanned ({patched} patched)", flush=True)
+    # Decide serial vs parallel.  The pickling + worker-init costs
+    # (DLL re-load, SDB re-index, ~50-200 MB of GLB tracks broadcast
+    # to each worker) only pay back when there are enough entries to
+    # patch.  Heuristic: auto-parallelize only when total > 50.
+    # CG3H_ANIM_PARALLEL=N (N>=1) overrides — explicit values bypass
+    # the threshold so the parallel path is testable on small fixtures.
+    parallel_env = os.environ.get('CG3H_ANIM_PARALLEL', '').strip()
+    parallel_explicit = bool(parallel_env)
+    parallel_n = int(parallel_env or '0')
+    if parallel_n <= 0:
+        parallel_n = (os.cpu_count() or 1) if total > 50 else 1
+    if dll_path is None or parallel_n <= 1 or (
+            not parallel_explicit and total <= 50):
+        # ─── serial path ───
+        for idx, (entry_name, gr2_bytes) in enumerate(anim_entries.items()):
+            new_bytes = _match_and_patch_anim_entry(
+                dll, str_db, dak32f_type_ptr,
+                entry_name, gr2_bytes,
+                glb_by_exact, glb_by_norm, _norm_anim_name)
+            if new_bytes is not None:
+                gpk_entries[entry_name] = new_bytes
+                patched += 1
+                print(f"    Patched: {entry_name}", flush=True)
+            if (idx + 1) % 25 == 0 or idx + 1 == total:
+                print(f"    {idx+1}/{total} entries scanned ({patched} patched)",
+                      flush=True)
+    else:
+        # ─── parallel path ───
+        print(f"    parallel: {parallel_n} workers across {total} entries",
+              flush=True)
+        from multiprocessing import Pool
+        norm_suffixes = ('_Melinoe_Skin', '_Armature', '_Skin')
+        with Pool(processes=parallel_n,
+                  initializer=_patch_worker_init,
+                  initargs=(dll_path, sdb_bytes, glb_by_exact, glb_by_norm,
+                            norm_suffixes)) as pool:
+            done = 0
+            for entry_name, new_bytes in pool.imap_unordered(
+                    _patch_worker_task,
+                    [(k, v) for k, v in anim_entries.items()],
+                    chunksize=4):
+                done += 1
+                if new_bytes is not None:
+                    gpk_entries[entry_name] = new_bytes
+                    patched += 1
+                if done % 50 == 0 or done == total:
+                    print(f"    {done}/{total} entries scanned "
+                          f"({patched} patched)", flush=True)
 
     dll.GrannyFreeFile(sdb_file)
     _keepalive.clear()
@@ -2182,7 +2293,8 @@ def convert(
         _phase("[6/6] Patching animation entries")
         print("[6/6] Patching animation entries")
         n_anim_patched = patch_animation_entries(dll, gpk_entries, sdb_bytes, glb_animations,
-                                                    anim_patch_filter=anim_patch_filter)
+                                                    anim_patch_filter=anim_patch_filter,
+                                                    dll_path=dll_path)
         print(f"  {n_anim_patched} animation(s) patched")
 
     # v3.11 animation_add: emit brand-new GPK entries.  Two modes:
