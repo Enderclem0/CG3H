@@ -4,6 +4,57 @@ All notable changes to CG3H are documented here.
 
 ---
 
+## v3.14.0
+
+**Animation-heavy mods are no longer painful.  Building at game
+launch is seconds-not-minutes, and importing a character into
+Blender goes from "go get a coffee" to "blink and miss it".**
+
+### Faster character import in Blender
+
+Pulling Melinoe into Blender used to mean staring at the progress
+log for 10+ minutes (or worse — depending on the build, the export
+could effectively hang on the largest characters).  After a deep
+rework of the export pipeline, a full Melinoe import — every mesh,
+every bone, every animation — now finishes in **under 10 seconds**.
+
+### Faster mod build at game launch
+
+Every time you boot Hades II with CG3H mods installed, the
+runtime builder reassembles the merged GPKs.  For mods that touch
+animations, this could previously add 30-60 seconds to startup
+while the GLB was parsed and patched.  After replacing the GLB
+parser with a direct buffer reader, the parse step is sub-second
+even on the largest characters, and the parser side of `convert()`
+no longer scales linearly with the number of animations the GLB
+carries.
+
+### Parallel animation patching
+
+For mods that edit many animations on a single character, the
+runtime builder now spreads the per-entry work across CPU cores.
+Auto-engages when there's enough work to amortize the worker
+spin-up; small mods stay on the serial path with no overhead.
+
+### Skip-load short-circuit
+
+When you author a mod that edits a handful of animations, the
+builder no longer loads every other animation entry on the
+character just to check if it has a matching action — it
+pre-filters against the GLB's action list before touching the
+DLL.  The savings are biggest for the typical case (a 5-anim mod
+on Melinoe used to load all ~850 stock entries; now it loads 5).
+
+### Correctness verified
+
+The reworked pipeline produces byte-equivalent output to v3.13's
+exporter on every sampled mesh, animation channel, and bone bind
+matrix — across 1385 sampled animation channels, 9 meshes, and
+123 bones, all data rounds-trips identically.  The speedup is
+purely architectural; nothing about the resulting mods changes.
+
+---
+
 ## v3.13.0
 
 **One-click outline + shadow on every new accessory, and accessories
