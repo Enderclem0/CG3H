@@ -1176,35 +1176,37 @@ class CG3H_OT_Export(bpy.types.Operator):
         if dupe.data:
             dupe.data.name = new_name
 
-        # Read mesh-data positions (foreach_get gives the same flat
-        # buffer that foreach_set will write back — both stay in
-        # mesh-data space, ignoring obj.scale/rotation/location).
-        # Compute strength from the mesh-data bbox so it lines up
-        # with the units we're about to write.  obj.bound_box would
-        # NOT work here — that returns object-space corners (mesh
-        # bbox already multiplied by obj.scale), and Blender then
-        # re-applies obj.scale at render/export time, so a strength
-        # derived from obj.bound_box gets effectively scaled twice.
+        # Do everything in OBJECT space, then convert back.  Why:
+        # CG3H imports often parent the mesh under an armature with
+        # a non-uniform bind scale — Moros's hat ships with
+        # matrix_world ≈ scale(10, 100, 10), so a uniform mesh-data
+        # displacement of `s` becomes visible (10s, 100s, 10s) and
+        # the outline ends up grossly stretched in one axis.  Working
+        # in object space keeps the visible displacement isotropic.
         mesh = dupe.data
         n_verts = len(mesh.vertices)
-        verts = np.empty((n_verts, 3), dtype=np.float64)
-        mesh.vertices.foreach_get("co", verts.ravel())
+        local = np.empty((n_verts, 3), dtype=np.float64)
+        mesh.vertices.foreach_get("co", local.ravel())
 
-        mesh_diag = float(np.linalg.norm(verts.max(axis=0) - verts.min(axis=0)))
-        strength = mesh_diag * push
+        mw = np.array(dupe.matrix_world, dtype=np.float64)        # 4×4
+        mw_inv = np.array(dupe.matrix_world.inverted(), dtype=np.float64)
+        local_h = np.column_stack([local, np.ones(n_verts)])      # → homogeneous
+        obj = (mw @ local_h.T).T[:, :3]                           # object-space verts
 
-        v_normals = np.zeros_like(verts)
+        obj_diag = float(np.linalg.norm(obj.max(axis=0) - obj.min(axis=0)))
+        strength = obj_diag * push  # visible displacement target
+
+        # Face normals from object-space positions (cross-product +
+        # divide by length → unit length by construction).
+        v_normals = np.zeros_like(obj)
         for poly in mesh.polygons:
             idx = list(poly.vertices)
             if len(idx) < 3:
                 continue
-            v0 = verts[idx[0]]
-            # Triangle-fan from vertex 0; each tri contributes a
-            # face normal computed from positions (always unit after
-            # division by length).
+            v0 = obj[idx[0]]
             for i in range(1, len(idx) - 1):
-                v1 = verts[idx[i]]
-                v2 = verts[idx[i + 1]]
+                v1 = obj[idx[i]]
+                v2 = obj[idx[i + 1]]
                 fn = np.cross(v1 - v0, v2 - v0)
                 fl = np.linalg.norm(fn)
                 if fl < 1e-12:
@@ -1215,12 +1217,20 @@ class CG3H_OT_Export(bpy.types.Operator):
                 v_normals[idx[i+1]] += fn
         lens = np.linalg.norm(v_normals, axis=1, keepdims=True)
         unit = np.where(lens > 1e-9, v_normals / np.maximum(lens, 1e-9), 0.0)
-        new_verts = verts + unit * strength
-        mesh.vertices.foreach_set("co", new_verts.astype(np.float64).ravel())
+        new_obj = obj + unit * strength
+
+        # Convert displaced positions back to mesh-data space and
+        # write them in.  The full matrix-inverse handles the
+        # anisotropic scale correctly: visible displacement stays
+        # uniform regardless of the bind pose stretch.
+        new_obj_h = np.column_stack([new_obj, np.ones(n_verts)])
+        new_local = (mw_inv @ new_obj_h.T).T[:, :3]
+        mesh.vertices.foreach_set("co", new_local.astype(np.float64).ravel())
         mesh.update()
-        max_disp = float(np.linalg.norm(new_verts - verts, axis=1).max())
-        print(f"[CG3H]     outline applied: mesh_diag={mesh_diag:.3f} "
-              f"strength={strength:.4f} max_disp={max_disp:.4f}")
+
+        max_disp_obj = float(np.linalg.norm(new_obj - obj, axis=1).max())
+        print(f"[CG3H]     outline applied: obj_diag={obj_diag:.3f} "
+              f"strength={strength:.4f} max_disp_obj={max_disp_obj:.4f}")
 
         # Match the post-conditions of _duplicate_with_modifier so the
         # rest of the export flow (cleanup, routing) treats this dupe
