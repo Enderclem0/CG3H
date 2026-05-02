@@ -5,7 +5,7 @@ import re
 # Single source of truth for the CG3H release version.  Bump this on
 # release; tests/test_core.py::test_version_consistency enforces that
 # .github/thunderstore/manifest.json matches.
-CG3H_VERSION = "3.12.0"
+CG3H_VERSION = "3.13.0"
 
 # Thunderstore dependency string.  The folder name AuthorName-ModName
 # is required by Hell2Modding's plugin loader (lua_manager.cpp:89

@@ -4,6 +4,60 @@ All notable changes to CG3H are documented here.
 
 ---
 
+## v3.13.0
+
+**One-click outline + shadow on every new accessory, and accessories
+no longer drift forward on scene load.**
+
+### Auto-gen outline + shadow siblings
+
+Adding a hat or a pair of glasses used to mean shipping just the
+body mesh — the engine can't render an outline rim or cast a
+shadow for a mesh that's missing those sibling passes, so
+accessories looked flat and floated above the floor without
+grounding.
+
+The Blender addon's CG3H panel now exposes two checkboxes per new
+mesh: **Shadow** (with a decimate ratio for the proxy) and
+**Outline** (with a push percentage for the rim thickness).  At
+export time the addon duplicates the source mesh, applies the
+chosen modifier, renames it with the engine-recognised suffix, and
+ships it alongside.  Modders don't have to author the proxies by
+hand; defaults (decimate 0.30, push 1%) match how stock characters
+ship their siblings.
+
+Original (imported) meshes don't expose the toggles — they already
+have stock outline and shadow siblings in the GR2.
+
+### No more bind-pose lag on accessories
+
+Freshly-loaded accessories used to render at a bind-pose offset for
+several seconds after a scene load — the hat would float in front
+of Melinoe at hub start and only snap into place when the in-game
+mod manager was opened.  The scene-load hook now runs the
+draw-state refresh pass automatically, so accessory bone tracks
+bind on the very first frame the character is on screen.
+
+### Inspectable export workflow
+
+`File > Export > Hades II Mod (CG3H)` now leaves the assembled mod
+under `<workspace>/build/plugins[_data]/<mod_id>/...` as a plain
+folder you can browse, instead of producing a Thunderstore zip
+directly.  When you're happy with what's in the folder, zip its
+contents yourself for upload.  Intermediate scaffolding (the
+source GLB, manifest, baseline) is swept after the build so the
+workspace stays clean between exports.
+
+### Misc
+
+- Selective per-mesh routing on `mesh_add` mods is now stable
+  across re-exports within a single Blender session — previously
+  an orphan mesh data-block from a prior export could silently
+  drift the routing keys away from the GLB mesh names, requiring
+  a Blender restart between exports for the routing to apply.
+
+---
+
 ## v3.12.0
 
 **`texture_replace` mods can now be authored without Blender, and a
