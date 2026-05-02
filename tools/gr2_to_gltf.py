@@ -1105,6 +1105,92 @@ def build_gltf(character_name, mesh_data_list, mesh_names, bones, animations=Non
     return gltf, anim_dict_list
 
 
+def _pygltflib_to_dict(obj):
+    """Walk a pygltflib dataclass tree and emit a plain dict matching
+    the glTF spec.  Sidesteps `pygltflib.save()` which spends ~25s
+    on Mel via `gltf_to_json` → `_asdict_inner` → `deepcopy` (8M+
+    recursions).  Direct __dict__ walking + None-pruning cuts that
+    to under a second.
+
+    Drops fields whose value is None or an empty list/dict, matching
+    pygltflib's `delete_empty_keys` behavior.
+    """
+    if obj is None:
+        return None
+    if isinstance(obj, (str, int, float, bool)):
+        return obj
+    if hasattr(obj, 'item'):  # numpy scalars
+        return obj.item()
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            cv = _pygltflib_to_dict(v)
+            if cv is None or cv == [] or cv == {}:
+                continue
+            out[k] = cv
+        return out
+    if isinstance(obj, (list, tuple)):
+        return [_pygltflib_to_dict(v) for v in obj]
+    if hasattr(obj, '__dict__'):
+        out = {}
+        for k, v in vars(obj).items():
+            if k.startswith('_'):
+                continue
+            cv = _pygltflib_to_dict(v)
+            if cv is None or cv == [] or cv == {}:
+                continue
+            out[k] = cv
+        return out
+    raise TypeError(f"don't know how to serialize {type(obj).__name__}")
+
+
+def _save_glb_fast(gltf, anim_dicts, out_path):
+    """Write a GLB without going through pygltflib's slow save path.
+
+    Walks the pygltflib object tree via __dict__ (fast), splices
+    in `anim_dicts` (already plain dicts from build_gltf), serializes
+    JSON, packs into a GLB binary by hand.
+
+    Replaces `gltf.save(out_path) + _inject_animations_into_glb(...)`
+    in one shot — cuts the dominant remaining cost of the export
+    pipeline.  For Mel, save+inject went from 33s to <2s.
+    """
+    bin_blob = gltf.binary_blob() or b''
+    if isinstance(bin_blob, memoryview):
+        bin_blob = bytes(bin_blob)
+    js = _pygltflib_to_dict(gltf)
+    # `binary_blob` is exposed as a private/internal field on pygltflib's
+    # GLTF2 object; the to_dict walker may or may not pick it up depending
+    # on how pygltflib stores it.  Always strip to be safe — we serialise
+    # it explicitly as the BIN chunk.
+    js.pop('_glb_data', None)
+    js.pop('_glb_data_b64', None)
+    if anim_dicts:
+        js['animations'] = anim_dicts
+
+    def _coerce(o):
+        if hasattr(o, 'item'):
+            return o.item()
+        raise TypeError(f"unhashable for json: {type(o).__name__}")
+    json_bytes = json.dumps(js, separators=(',', ':'),
+                            default=_coerce).encode('utf-8')
+    json_pad = (4 - len(json_bytes) % 4) % 4
+    json_bytes = json_bytes + b'\x20' * json_pad
+
+    bin_pad = (4 - len(bin_blob) % 4) % 4
+    if bin_pad:
+        bin_blob = bin_blob + b'\x00' * bin_pad
+
+    total = 12 + 8 + len(json_bytes) + (8 + len(bin_blob) if bin_blob else 0)
+    with open(out_path, 'wb') as f:
+        f.write(b'glTF')
+        f.write((2).to_bytes(4, 'little'))
+        f.write(total.to_bytes(4, 'little'))
+        f.write(len(json_bytes).to_bytes(4, 'little') + b'JSON' + json_bytes)
+        if bin_blob:
+            f.write(len(bin_blob).to_bytes(4, 'little') + b'BIN\x00' + bin_blob)
+
+
 def _inject_animations_into_glb(glb_path, anim_dicts):
     """Re-pack a GLB to include animations injected as plain dicts.
 
@@ -2003,14 +2089,9 @@ def main():
     print(f"[{step}] Building glTF -> {out_path}", flush=True)
     gltf, anim_dicts = build_gltf(args.name, mesh_data_list, mesh_names, bones,
                                    animations=anim_data, texture_map=texture_map)
-    _phase("  Saving GLB (pygltflib)")
+    _phase("  Saving GLB (fast path)")
     print("  Saving GLB file...", flush=True)
-    gltf.save(out_path)
-    if anim_dicts:
-        _phase(f"  Injecting {len(anim_dicts)} animation(s) into GLB")
-        print(f"  Injecting {len(anim_dicts)} animation(s) into GLB JSON...",
-              flush=True)
-        _inject_animations_into_glb(out_path, anim_dicts)
+    _save_glb_fast(gltf, anim_dicts, out_path)
     _phase("[end]")
     if len(_phase_marks) > 1:
         print("\n  exporter phase breakdown:")
