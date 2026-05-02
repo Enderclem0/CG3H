@@ -1977,6 +1977,12 @@ def convert(
         Pair each entry with an SJSON-side alias (registered at runtime)
         so modders can SetAnimation({Name=alias}) on the new key.
     """
+    import time as _t  # local alias so callers don't see the global
+    _phase_t0 = _t.monotonic()
+    _phase_marks = []  # (label, elapsed_at_start, elapsed_at_end)
+    def _phase(label):
+        _phase_marks.append((label, _t.monotonic() - _phase_t0))
+    _phase("[1/6] Parsing GLB")
     print(f"[1/6] Parsing GLB: {glb_path}")
     glb_meshes = parse_glb(glb_path)
     print(f"  Found {len(glb_meshes)} mesh(es) in GLB")
@@ -1986,6 +1992,7 @@ def convert(
         glb_animations, _ = parse_glb_animations(glb_path)
         print(f"  Found {len(glb_animations)} animation(s) in GLB")
 
+    _phase("[2/6] Extracting GPK")
     print(f"[2/6] Extracting GPK: {gpk_path}")
     gpk_entries = extract_gpk(gpk_path)
 
@@ -2028,10 +2035,12 @@ def convert(
     if manifest:
         print(f"  Manifest: {len(manifest.get('meshes', []))} meshes")
 
+    _phase("[3/6] Reading SDB")
     print(f"[3/6] Reading SDB: {sdb_path}")
     with open(sdb_path, 'rb') as f:
         sdb_bytes = f.read()
 
+    _phase("[4/6] Loading Granny DLL + type map")
     print("[4/6] Loading Granny DLL + type map")
     dll = setup_granny(dll_path)
 
@@ -2050,6 +2059,8 @@ def convert(
     if not glb_meshes:
         entries_to_patch = []
 
+    if entries_to_patch:
+        _phase("[5/6] Patching mesh entries")
     for entry_idx, entry_key in enumerate(entries_to_patch):
         entry_meshes = routing[entry_key]
         gr2_bytes = gpk_entries[entry_key]
@@ -2105,6 +2116,7 @@ def convert(
     # Patch animation entries if requested
     n_anim_patched = 0
     if glb_animations:
+        _phase("[6/6] Patching animation entries")
         print("[6/6] Patching animation entries")
         n_anim_patched = patch_animation_entries(dll, gpk_entries, sdb_bytes, glb_animations,
                                                     anim_patch_filter=anim_patch_filter)
@@ -2205,7 +2217,9 @@ def convert(
         if msg_parts:
             print(f"  animation_add: {', '.join(msg_parts)}")
 
+    _phase("[done] Packing output GPK")
     pack_gpk(gpk_entries, output_gpk)
+    _phase("[end]")
     entries_msg = f" across {len(entries_to_patch)} entries" if len(entries_to_patch) > 1 else ""
     anim_msg = f", {n_anim_patched} animation(s)" if n_anim_patched else ""
     add_msg = ""
@@ -2215,6 +2229,17 @@ def convert(
         if n_anim_authored: bits.append(f"{n_anim_authored} authored")
         add_msg = f", {' + '.join(bits)} new animation(s)"
     print(f"\nDone!  {total_patched} mesh(es){entries_msg}{anim_msg}{add_msg} patched -> {output_gpk!r}")
+    # v3.14 — phase breakdown so we can see where convert() actually
+    # spends its time.  Each entry is the elapsed at the START of the
+    # phase; the delta to the next entry is that phase's wall time.
+    if len(_phase_marks) > 1:
+        print("\n  phase breakdown:")
+        for i in range(len(_phase_marks) - 1):
+            label, t_start = _phase_marks[i]
+            _, t_next = _phase_marks[i + 1]
+            print(f"    {t_next - t_start:6.2f}s  {label}")
+        print(f"    ------")
+        print(f"    {_phase_marks[-1][1]:6.2f}s  total")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
