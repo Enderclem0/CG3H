@@ -274,6 +274,141 @@ def _new_actions(context):
     return [a for a in bpy.data.actions if a.name not in stock]
 
 
+def _apply_vanilla_nla(context, character, game_dir):
+    """v3.15: lay every stock Animation entry from the character's SJSON
+    onto the active armature's NLA tracks.  One NLA track per SJSON
+    file (so the categorical structure stays visible — Idle file,
+    Locomotion file, Personality file, weapon-specific files, etc.).
+    Each strip carries the entry's Name (= what SetAnimation looks up),
+    its Action (= curve source), and metadata from the SJSON
+    (Loop -> use_cyclic, Blends.Duration max -> blend_in,
+    gameplay flags -> CG3H custom props).
+
+    Skips entries whose GrannyAnimation doesn't match an imported
+    Action — happens when the user imported with `--anim-filter` set
+    or when an SJSON entry references an anim from a DIFFERENT
+    character GPK that the engine pulls in at runtime.
+    """
+    from . import cg3h_sjson_anim
+    by_file = cg3h_sjson_anim.load_animations(game_dir, character)
+    if not by_file:
+        print(f"[CG3H] no stock SJSON for {character!r}; skipping NLA setup")
+        return
+
+    arm = _armature_for_anim(context)
+    if not arm:
+        print("[CG3H] no armature found for vanilla NLA setup")
+        return
+    if not arm.animation_data:
+        arm.animation_data_create()
+
+    # Index Blender Actions by name so we can look up by GrannyAnimation.
+    actions_by_name = {a.name: a for a in bpy.data.actions}
+
+    n_strips = 0
+    n_skipped = 0
+    for fname, anims in by_file.items():
+        # Track name = SJSON basename (no .sjson).  Skip files with no
+        # entries that can be mapped (no curve source = nothing to show).
+        track = None  # lazy create on first strip
+        track_pos = 1.0  # next free frame slot
+
+        for entry in anims:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get('Name')
+            granny = entry.get('GrannyAnimation')
+            if not name or not granny or granny == 'null':
+                continue
+            action = actions_by_name.get(granny)
+            if not action:
+                n_skipped += 1
+                continue
+
+            # Lazy-create the track now that we know we have at least
+            # one mappable strip in this file.
+            if track is None:
+                track = arm.animation_data.nla_tracks.new()
+                track.name = fname.replace('.sjson', '')
+
+            # Strip duration = the Action's natural keyframe span.
+            try:
+                fr = action.frame_range
+                duration = max(1.0, float(fr[1] - fr[0]))
+            except Exception:
+                duration = 30.0
+
+            try:
+                strip = track.strips.new(
+                    name=name, start=int(track_pos), action=action)
+            except RuntimeError:
+                # Overlap with previous strip — bump and retry.
+                track_pos += duration + 1.0
+                try:
+                    strip = track.strips.new(
+                        name=name, start=int(track_pos), action=action)
+                except RuntimeError:
+                    n_skipped += 1
+                    continue
+            track_pos = strip.frame_end + 1.0
+
+            # Map SJSON metadata onto strip properties.
+            strip.use_cyclic = bool(entry.get('Loop'))
+            # Blend In: max Duration across the Blends array.  When
+            # source-specific blends matter the v3.15 export path will
+            # derive them from NLA adjacency; this just gives the
+            # imported strip a sane default fade-in.
+            blends = entry.get('Blends') or []
+            max_dur = 0.0
+            for b in blends:
+                if isinstance(b, dict):
+                    d = b.get('Duration')
+                    if isinstance(d, (int, float)) and d > max_dur:
+                        max_dur = float(d)
+            if max_dur > 0:
+                try:
+                    strip.blend_in = max_dur
+                except Exception:
+                    pass
+
+            # Gameplay flags — direct mapping SJSON PascalCase
+            # → strip cg3h_* property.
+            for sjson_key, prop in (
+                ('CancelOnOwnerMove',         'cg3h_cancel_on_owner_move'),
+                ('HoldLastFrame',             'cg3h_hold_last_frame'),
+                ('AllowRestart',              'cg3h_allow_restart'),
+                ('OwnerInvulnerable',         'cg3h_owner_invulnerable'),
+                ('OwnerImmobile',             'cg3h_owner_immobile'),
+                ('OwnerHasNoCollision',       'cg3h_owner_has_no_collision'),
+                ('OwnerUntargetable',         'cg3h_owner_untargetable'),
+                ('DisableOwnerManualInteract','cg3h_disable_owner_manual_interact'),
+            ):
+                if entry.get(sjson_key) is True:
+                    setattr(strip, prop, True)
+            shadow = entry.get('Enable3DShadow')
+            if shadow is True:
+                strip.cg3h_enable_3d_shadow = 'ON'
+            elif shadow is False:
+                strip.cg3h_enable_3d_shadow = 'OFF'
+            ct = entry.get('ChainTo')
+            if ct and ct != 'null':
+                strip.cg3h_chain_to_override = str(ct)
+            ifr = entry.get('InheritFrom')
+            if ifr:
+                strip.cg3h_inherit_from_override = str(ifr)
+            sc = entry.get('Scale')
+            if isinstance(sc, (int, float)) and sc > 0 and sc != 1.0:
+                strip.cg3h_scale = float(sc)
+            nm = entry.get('NativeMoveSpeed')
+            if isinstance(nm, (int, float)) and nm > 0:
+                strip.cg3h_native_move_speed = float(nm)
+            n_strips += 1
+
+    print(f"[CG3H] vanilla NLA setup: {n_strips} strip(s) across "
+          f"{len(by_file)} SJSON file(s); {n_skipped} entries skipped "
+          f"(no matching imported Action)")
+
+
 def _armature_for_anim(context):
     """Pick the armature whose NLA tracks we walk for animation_add.
     Heuristic: the active object if it's an armature, else the first
@@ -733,6 +868,19 @@ class CG3H_OT_Import(bpy.types.Operator, ImportHelper):
             os.unlink(tmp_glb)
         except OSError:
             pass  # temp GLB cleanup is best-effort
+
+        # v3.15: lay every stock Animation entry from the character's
+        # SJSON files onto the imported armature's NLA tracks, with
+        # metadata pre-populated.  Modders see each anim as a named
+        # strip carrying its loop / blends / gameplay flags from the
+        # game's own SJSON — duplicating a strip and renaming it gives
+        # a fully-tagged baseline for a new animation_add entry.
+        if self.animations:
+            try:
+                _apply_vanilla_nla(context, name, _prefs().game_path)
+            except Exception as e:
+                self.report({'WARNING'},
+                            f"Vanilla NLA setup failed: {e}")
 
         # Auto-load mesh entries for the CG3H panel
         entries = _read_gpk_entries(name)
