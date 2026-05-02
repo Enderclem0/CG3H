@@ -890,11 +890,19 @@ class CG3H_OT_Export(bpy.types.Operator):
                     mesh_entries.append(entry)
             # Always write routing for new meshes so runtime per-mesh
             # visibility can locate them (rom.data.set_mesh_visible).
-            # The routing's value may be the full entry list — that's
-            # fine; partial vs full is distinguished by content, not by
-            # the presence of the key.
+            # Key off `obj.data.name` (mesh data-block name), NOT
+            # `obj.name`: the GLB exporter writes the data-block name
+            # into `gltf.meshes[i].name`, and the runtime cg3h_builder
+            # matches routing keys against THAT.  The two names usually
+            # agree, but if Blender hit a name collision against an
+            # orphan data block it appends `.001` to the data name and
+            # leaves the object name clean — routing then silently
+            # misses the mesh and the runtime fallback (route to all
+            # entries) kicks in, masking the bug until selective routing
+            # actually matters.
             if has_props and mesh_entries:
-                new_mesh_routing[obj.name] = mesh_entries
+                key = obj.data.name if obj.data else obj.name
+                new_mesh_routing[key] = mesh_entries
 
         target = {
             "character": character,
@@ -905,16 +913,29 @@ class CG3H_OT_Export(bpy.types.Operator):
 
         # Auto-gen siblings have done their job — they're in the GLB
         # (use_selection picked them up) and in new_mesh_routing
-        # (the loop above walked them).  Now pull them out of the
-        # scene so the modder's working state matches what they had
-        # pre-export.  Errors are non-fatal — the artefacts are
-        # already written.
+        # (the loop above walked them, keyed by data-block name).
+        # Pull them out of the scene so the modder's working state
+        # matches what they had pre-export.  Also remove the dupe's
+        # mesh data-block so the next export doesn't see it as an
+        # orphan and rename a fresh dupe to `.001`.  Errors are
+        # non-fatal — the artefacts are already written.
         for dupe in auto_gen_dupes:
+            data = dupe.data
             try:
                 bpy.data.objects.remove(dupe, do_unlink=True)
             except Exception as e:
                 print(f"[CG3H]   WARNING: could not remove auto-gen "
                       f"duplicate {dupe.name}: {e}")
+            # Remove the now-orphan mesh data-block too — keeping it
+            # around would force Blender to rename next export's dupe
+            # to <name>.001 (collision against a stale data-block) and
+            # the routing key would no longer match the GLB mesh name.
+            if data is not None and data.users == 0:
+                try:
+                    bpy.data.meshes.remove(data)
+                except Exception as e:
+                    print(f"[CG3H]   WARNING: could not remove auto-gen "
+                          f"mesh data {data.name}: {e}")
 
         # Pre-declare each non-stock Action as an animation_add entry
         # carrying the modder's loop flag.  Builder's _sync_mod_json
