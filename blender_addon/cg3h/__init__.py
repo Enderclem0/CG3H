@@ -1114,25 +1114,23 @@ class CG3H_OT_Export(bpy.types.Operator):
 
             if gen_outline:
                 push = float(getattr(src, "cg3h_outline_push", 0.01))
-                # Push as a fraction of the mesh's bbox diagonal so
-                # accessories of any scale get a proportional outline.
-                bbox_diag = self._bbox_diagonal(src)
-                strength = bbox_diag * max(0.001, min(0.5, push))
+                push = max(0.001, min(0.5, push))
                 dupe = self._build_outline_dupe(
                     context, src,
                     new_name=f"{base_name}Outline_MeshShape",
-                    strength=strength)
+                    push=push)
                 if dupe is not None:
                     dupes.append(dupe)
                     print(f"[CG3H]   auto-gen outline: "
                           f"{src.name} → {dupe.name} "
-                          f"(push {push*100:.1f}% = {strength:.3f})")
+                          f"(push {push*100:.2f}%)")
         return dupes
 
     @staticmethod
-    def _build_outline_dupe(context, src, new_name, strength):
-        """Duplicate `src` and push every vertex along a face-derived
-        unit normal by `strength` mesh-space units.
+    def _build_outline_dupe(context, src, new_name, push):
+        """Duplicate `src` and push every vertex outward along a
+        face-derived unit normal by `push` × the mesh's mesh-data
+        bbox diagonal.
 
         Bypasses Blender's Displace modifier on purpose.  Displace
         with direction='NORMAL' uses whatever vertex normals are
@@ -1178,15 +1176,22 @@ class CG3H_OT_Export(bpy.types.Operator):
         if dupe.data:
             dupe.data.name = new_name
 
-        # Push each vertex along an averaged face normal.  Compute
-        # everything from raw positions — bmesh's f.normal turned
-        # out to NOT be unit length on CG3H imports (probably mesh-
-        # data hint values that bm.normal_update() doesn't override).
-        # NumPy from positions is the bulletproof path.
+        # Read mesh-data positions (foreach_get gives the same flat
+        # buffer that foreach_set will write back — both stay in
+        # mesh-data space, ignoring obj.scale/rotation/location).
+        # Compute strength from the mesh-data bbox so it lines up
+        # with the units we're about to write.  obj.bound_box would
+        # NOT work here — that returns object-space corners (mesh
+        # bbox already multiplied by obj.scale), and Blender then
+        # re-applies obj.scale at render/export time, so a strength
+        # derived from obj.bound_box gets effectively scaled twice.
         mesh = dupe.data
         n_verts = len(mesh.vertices)
         verts = np.empty((n_verts, 3), dtype=np.float64)
         mesh.vertices.foreach_get("co", verts.ravel())
+
+        mesh_diag = float(np.linalg.norm(verts.max(axis=0) - verts.min(axis=0)))
+        strength = mesh_diag * push
 
         v_normals = np.zeros_like(verts)
         for poly in mesh.polygons:
@@ -1210,15 +1215,12 @@ class CG3H_OT_Export(bpy.types.Operator):
                 v_normals[idx[i+1]] += fn
         lens = np.linalg.norm(v_normals, axis=1, keepdims=True)
         unit = np.where(lens > 1e-9, v_normals / np.maximum(lens, 1e-9), 0.0)
-        new_verts = verts + unit * float(strength)
+        new_verts = verts + unit * strength
         mesh.vertices.foreach_set("co", new_verts.astype(np.float64).ravel())
         mesh.update()
-        # Diagnostic: log the actual achieved displacement so the
-        # next debug pass doesn't need to crack the GLB to see what
-        # happened.
         max_disp = float(np.linalg.norm(new_verts - verts, axis=1).max())
-        print(f"[CG3H]     outline applied: strength={strength:.3f} "
-              f"max_disp={max_disp:.3f}")
+        print(f"[CG3H]     outline applied: mesh_diag={mesh_diag:.3f} "
+              f"strength={strength:.4f} max_disp={max_disp:.4f}")
 
         # Match the post-conditions of _duplicate_with_modifier so the
         # rest of the export flow (cleanup, routing) treats this dupe
