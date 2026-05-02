@@ -255,7 +255,14 @@ def _new_actions(context):
     in the cached manifest — i.e. the actions that will be exported as
     `animation_add` entries.  Empty list if the manifest is missing
     (the modder hasn't imported the character yet) since we can't tell
-    stock from new without it."""
+    stock from new without it.
+
+    v3.15: this is the FALLBACK path for modders who haven't set up
+    NLA tracks.  When the active armature has any NLA strips referencing
+    a non-stock Action, `_new_strips()` becomes the source of truth and
+    this is unused — the strip's name is the animation name, and one
+    Action can power multiple strips (and therefore multiple animations).
+    """
     manifest = _get_manifest(context)
     if not manifest:
         return []
@@ -265,6 +272,91 @@ def _new_actions(context):
     if not stock:
         return []
     return [a for a in bpy.data.actions if a.name not in stock]
+
+
+def _armature_for_anim(context):
+    """Pick the armature whose NLA tracks we walk for animation_add.
+    Heuristic: the active object if it's an armature, else the first
+    armature in the scene that has NLA tracks, else None."""
+    obj = context.active_object
+    if obj and obj.type == 'ARMATURE':
+        return obj
+    for o in context.scene.objects:
+        if o.type == 'ARMATURE' and o.animation_data \
+                and o.animation_data.nla_tracks:
+            return o
+    return None
+
+
+def _new_strips(context):
+    """Return NLA strips on the active armature whose underlying Action
+    is non-stock — these become animation_add entries in mod.json.
+
+    Each yielded item is a dict capturing every v3.15 SJSON Animation
+    field derivable from the strip itself; modders refine via the CG3H
+    sub-panel (which writes strip custom properties).
+
+    Empty list if:
+      - no armature with NLA tracks, OR
+      - manifest missing (we can't classify stock vs. new), OR
+      - all strips reference stock Actions.
+    """
+    manifest = _get_manifest(context)
+    if not manifest:
+        return []
+    stock = set(
+        (manifest.get('animations') or {}).get('hashes', {}).keys()
+    )
+    if not stock:
+        return []
+    arm = _armature_for_anim(context)
+    if not arm or not arm.animation_data:
+        return []
+
+    # Build a (track, sorted-strips-by-frame) list so we can derive
+    # ChainTo from adjacency.  Skip muted tracks — modder is staging
+    # those, doesn't want them shipped.
+    track_strips = []
+    for track in arm.animation_data.nla_tracks:
+        if track.mute:
+            continue
+        ordered = sorted(track.strips, key=lambda s: s.frame_start)
+        track_strips.append((track, ordered))
+
+    fps = float(context.scene.render.fps or 60.0)
+
+    out = []
+    for track, ordered in track_strips:
+        for i, strip in enumerate(ordered):
+            if not strip.action or strip.action.name in stock:
+                continue
+            # Native-derived fields (NLA-native semantics)
+            scale = float(strip.scale)
+            speed = (1.0 / scale) if abs(scale - 1.0) > 1e-6 else None
+            loop = bool(strip.use_cyclic) or (
+                hasattr(strip, 'repeat') and strip.repeat and strip.repeat > 1.0)
+            blend_in = float(strip.blend_in)
+            blend_in_frames = blend_in if blend_in > 0 else None
+
+            # ChainTo derivation: next non-stock strip on the SAME track.
+            chain_to_derived = None
+            for j in range(i + 1, len(ordered)):
+                ns = ordered[j]
+                if ns.action and ns.action.name not in stock:
+                    chain_to_derived = ns.name
+                    break
+
+            entry = {
+                'strip': strip,            # caller-side ref; stripped before mod.json emit
+                'logical_name': strip.name,
+                'source_glb_action': strip.action.name,
+                'loop': loop,
+                'speed': speed,
+                'blend_in_frames': blend_in_frames,
+                'chain_to_derived': chain_to_derived,
+            }
+            out.append(entry)
+    return out
 
 
 def _get_mesh_bb_names(context, mesh_obj_name):
@@ -937,17 +1029,69 @@ class CG3H_OT_Export(bpy.types.Operator):
                     print(f"[CG3H]   WARNING: could not remove auto-gen "
                           f"mesh data {data.name}: {e}")
 
-        # Pre-declare each non-stock Action as an animation_add entry
-        # carrying the modder's loop flag.  Builder's _sync_mod_json
-        # fills in the rest (granny_name, clone_from, source_glb_action)
-        # without overwriting fields we set here.  Action names here
-        # already reflect the author-prefix renaming above.
+        # v3.15: prefer NLA strips on the active armature when present —
+        # each strip becomes one animation_add entry carrying the full
+        # v3.15 SJSON field set.  Falls back to the per-Action path
+        # (v3.11) when the modder hasn't set up NLA tracks, so legacy
+        # mods keep working without changes.
         new_anim_entries = []
-        for action in _new_actions(context):
-            new_anim_entries.append({
-                "logical_name": action.name,
-                "loop": bool(action.get("cg3h_loop", False)),
-            })
+        strip_entries = _new_strips(context)
+        if strip_entries:
+            for s in strip_entries:
+                strip = s['strip']
+                e = {
+                    "logical_name": s['logical_name'],
+                    "source_glb_action": s['source_glb_action'],
+                    "loop": s['loop'],
+                }
+                if s['speed'] is not None:
+                    e['speed'] = s['speed']
+                if s['blend_in_frames'] is not None:
+                    e['blend_in_frames'] = s['blend_in_frames']
+                # ChainTo: explicit override beats derivation; "null"
+                # opt-out emitted as None to keep mod.json clean.
+                ct_override = (strip.cg3h_chain_to_override or "").strip()
+                if ct_override:
+                    e['chain_to'] = ct_override
+                elif s['chain_to_derived']:
+                    e['chain_to'] = s['chain_to_derived']
+                inherit_override = (strip.cg3h_inherit_from_override or "").strip()
+                if inherit_override:
+                    e['inherit_from'] = inherit_override
+                # Gameplay flags — emit only when on (matches stock SJSON
+                # convention "presence = true").
+                for src, dst in (
+                    ('cg3h_cancel_on_owner_move',         'cancel_on_owner_move'),
+                    ('cg3h_hold_last_frame',              'hold_last_frame'),
+                    ('cg3h_allow_restart',                'allow_restart'),
+                    ('cg3h_owner_invulnerable',           'owner_invulnerable'),
+                    ('cg3h_owner_immobile',               'owner_immobile'),
+                    ('cg3h_owner_has_no_collision',       'owner_has_no_collision'),
+                    ('cg3h_owner_untargetable',           'owner_untargetable'),
+                    ('cg3h_disable_owner_manual_interact','disable_owner_manual_interact'),
+                ):
+                    if getattr(strip, src, False):
+                        e[dst] = True
+                # Enable3DShadow — tristate.  INHERIT = absent.
+                shadow = getattr(strip, 'cg3h_enable_3d_shadow', 'INHERIT')
+                if shadow == 'ON':
+                    e['enable_3d_shadow'] = True
+                elif shadow == 'OFF':
+                    e['enable_3d_shadow'] = False
+                # Numeric overrides — 0 = no override.
+                if getattr(strip, 'cg3h_scale', 0.0) > 0.0:
+                    e['scale'] = float(strip.cg3h_scale)
+                if getattr(strip, 'cg3h_native_move_speed', 0.0) > 0.0:
+                    e['native_move_speed'] = float(strip.cg3h_native_move_speed)
+                new_anim_entries.append(e)
+        else:
+            # Legacy v3.11 path — Action-level metadata only.  Modders
+            # who haven't migrated to NLA stay supported.
+            for action in _new_actions(context):
+                new_anim_entries.append({
+                    "logical_name": action.name,
+                    "loop": bool(action.get("cg3h_loop", False)),
+                })
         if new_anim_entries:
             target["new_animations"] = new_anim_entries
 
@@ -1756,6 +1900,101 @@ def menu_func_export(self, context):
     self.layout.operator(CG3H_OT_Export.bl_idname, text="Hades II Mod (CG3H)")
 
 
+class CG3H_PT_NlaStripAnim(bpy.types.Panel):
+    """v3.15: surfaces CG3H animation_add metadata on the active NLA
+    strip.  Lives in the NLA editor's N-panel under a CG3H tab so
+    modders can tag strips while arranging them on tracks — same
+    place they're already working."""
+    bl_label = "CG3H — Animation properties"
+    bl_idname = "CG3H_PT_nla_strip_anim"
+    bl_space_type = 'NLA_EDITOR'
+    bl_region_type = 'UI'
+    bl_category = 'CG3H'
+
+    @classmethod
+    def poll(cls, context):
+        return _active_strip(context) is not None
+
+    def draw(self, context):
+        layout = self.layout
+        strip = _active_strip(context)
+        if not strip:
+            layout.label(text="Select an NLA strip", icon='INFO')
+            return
+
+        # Header — strip identity + the two NLA-native fields modders
+        # tweak most often (blend in is exposed natively by Blender's
+        # own strip panel, but listed here for context).
+        box = layout.box()
+        box.label(text=f"Strip: {strip.name}", icon='ACTION')
+        if strip.action:
+            box.label(text=f"Action: {strip.action.name}", icon='ANIM_DATA')
+        col = box.column(align=True)
+        col.label(text=f"Loop: {'on' if strip.use_cyclic else 'off'} "
+                       f"(strip Cyclic)")
+        col.label(text=f"Blend in: {int(strip.blend_in)} frames "
+                       f"(strip Blend In)")
+        if abs(strip.scale - 1.0) > 1e-6:
+            col.label(text=f"Speed: {1.0 / strip.scale:.2f}x "
+                           f"(strip Scale = {strip.scale:.2f})")
+
+        layout.separator()
+
+        # Basic CG3H toggles (always visible)
+        b = layout.box()
+        b.label(text="Basic", icon='SETTINGS')
+        b.prop(strip, 'cg3h_hold_last_frame', text="Hold last frame")
+        b.prop(strip, 'cg3h_cancel_on_owner_move', text="Cancel on movement")
+        row = b.row(align=True)
+        row.prop(strip, 'cg3h_chain_to_override', text="Chain to")
+
+        # Advanced — collapsible via custom prop on the scene so the
+        # state survives between draws.
+        scene = context.scene
+        adv_box = layout.box()
+        adv_row = adv_box.row()
+        icon = 'TRIA_DOWN' if scene.cg3h_nla_advanced_open else 'TRIA_RIGHT'
+        adv_row.prop(scene, 'cg3h_nla_advanced_open',
+                     icon=icon, text="Advanced", emboss=False)
+        if scene.cg3h_nla_advanced_open:
+            col = adv_box.column(align=True)
+            col.prop(strip, 'cg3h_owner_invulnerable',
+                     text="Owner invulnerable")
+            col.prop(strip, 'cg3h_owner_immobile',
+                     text="Owner immobile")
+            col.prop(strip, 'cg3h_owner_has_no_collision',
+                     text="Owner no collision")
+            col.prop(strip, 'cg3h_owner_untargetable',
+                     text="Owner untargetable")
+            col.prop(strip, 'cg3h_disable_owner_manual_interact',
+                     text="Disable manual input")
+            col.prop(strip, 'cg3h_allow_restart', text="Allow restart")
+            col.separator()
+            col.prop(strip, 'cg3h_enable_3d_shadow', text="3D shadow")
+            col.prop(strip, 'cg3h_inherit_from_override',
+                     text="Inherit from")
+            col.prop(strip, 'cg3h_scale', text="Scale (0=off)")
+            col.prop(strip, 'cg3h_native_move_speed',
+                     text="Move speed (0=off)")
+
+
+def _active_strip(context):
+    """Return the NLA strip the modder is editing — `context.active_nla_strip`
+    when the NLA editor surfaces it, falling back to the active object's
+    armature animation_data when the panel is drawn outside the editor."""
+    s = getattr(context, 'active_nla_strip', None)
+    if s:
+        return s
+    arm = _armature_for_anim(context)
+    if not arm or not arm.animation_data:
+        return None
+    for track in arm.animation_data.nla_tracks:
+        for strip in track.strips:
+            if strip.active:
+                return strip
+    return None
+
+
 classes = [
     CG3HPreferences,
     CG3H_OT_Import,
@@ -1766,6 +2005,7 @@ classes = [
     CG3H_OT_BonePresetPrev,
     CG3H_OT_SetupSkinning,
     CG3H_PT_MeshEntries,
+    CG3H_PT_NlaStripAnim,
 ]
 
 
@@ -1779,6 +2019,7 @@ def register():
     bpy.types.Scene.cg3h_original_meshes = StringProperty(default="")
     bpy.types.Scene.cg3h_manifest_json = StringProperty(default="")
     bpy.types.Scene.cg3h_baseline_b64 = StringProperty(default="")
+    bpy.types.Scene.cg3h_nla_advanced_open = BoolProperty(default=False)
     bpy.types.Scene.cg3h_bone_preset = EnumProperty(
         name="Bone Preset",
         description="Hide/show bones by entry or template — pick a preset to "
@@ -1821,6 +2062,85 @@ def register():
         default=0.01, min=0.001, max=0.5, step=1, precision=4,
     )
 
+    # ── v3.15: per-NLA-strip animation_add metadata ────────────────────
+    # Each NLA strip on the active armature becomes one animation_add
+    # entry.  Modders set these via the CG3H sub-panel in the NLA
+    # editor; the export pipeline reads them and emits SJSON Animation
+    # fields one-to-one.  See project_v315_anim_metadata.md for the
+    # field-by-field rationale and stock-data usage stats.
+    #
+    # All flags default to "absent from emitted SJSON" — the engine
+    # falls back to the InheritFrom base.  The exception is
+    # `enable_3d_shadow` which is tristate: 'inherit' (absent),
+    # 'on' / 'off' (explicitly emit true / false).
+    bpy.types.NlaStrip.cg3h_cancel_on_owner_move = BoolProperty(
+        name="Cancel on movement",
+        description="Interrupt the animation if the character starts moving",
+        default=False)
+    bpy.types.NlaStrip.cg3h_hold_last_frame = BoolProperty(
+        name="Hold last frame",
+        description="Freeze on the last frame instead of returning to bind pose",
+        default=False)
+    bpy.types.NlaStrip.cg3h_allow_restart = BoolProperty(
+        name="Allow restart",
+        description="Let SetAnimation restart this animation even if it's "
+                    "already playing (default: re-call is a no-op)",
+        default=False)
+    bpy.types.NlaStrip.cg3h_owner_invulnerable = BoolProperty(
+        name="Invulnerable",
+        description="Character takes no damage during this animation "
+                    "(used for i-frames during dodges, dashes, etc.)",
+        default=False)
+    bpy.types.NlaStrip.cg3h_owner_immobile = BoolProperty(
+        name="Immobile",
+        description="Character cannot move during this animation",
+        default=False)
+    bpy.types.NlaStrip.cg3h_owner_has_no_collision = BoolProperty(
+        name="No collision",
+        description="Character passes through enemies / obstacles "
+                    "(typically paired with i-frames during dodges)",
+        default=False)
+    bpy.types.NlaStrip.cg3h_owner_untargetable = BoolProperty(
+        name="Untargetable",
+        description="Enemies will not target the character",
+        default=False)
+    bpy.types.NlaStrip.cg3h_disable_owner_manual_interact = BoolProperty(
+        name="Disable manual input",
+        description="Player input is fully ignored — used for cinematic "
+                    "lock-ins (talk-to-NPC, room-end celebrations)",
+        default=False)
+    bpy.types.NlaStrip.cg3h_enable_3d_shadow = EnumProperty(
+        name="3D shadow",
+        description="Whether the character casts a 3D shadow during the "
+                    "animation.  Stock data is split ~63/37 — pick "
+                    "explicitly when needed; 'Inherit' uses the base "
+                    "animation's setting",
+        items=[('INHERIT', 'Inherit', 'Use the value from InheritFrom'),
+               ('ON', 'On', 'Force shadow on'),
+               ('OFF', 'Off', 'Force shadow off')],
+        default='INHERIT')
+    bpy.types.NlaStrip.cg3h_chain_to_override = StringProperty(
+        name="Chain to (override)",
+        description="When the animation finishes, transition to this named "
+                    "animation.  Leave blank to derive from the next strip "
+                    "on this NLA track",
+        default="")
+    bpy.types.NlaStrip.cg3h_inherit_from_override = StringProperty(
+        name="Inherit from (override)",
+        description="Override the base animation to inherit defaults from. "
+                    "Blank = use the character's default base anim",
+        default="")
+    bpy.types.NlaStrip.cg3h_scale = FloatProperty(
+        name="Scale",
+        description="Visual model-scale multiplier for the duration of the "
+                    "animation (0 = no override)",
+        default=0.0, min=0.0, max=8.0, step=10, precision=2)
+    bpy.types.NlaStrip.cg3h_native_move_speed = FloatProperty(
+        name="Move speed",
+        description="Movement speed in units/second during this animation. "
+                    "Locomotion-specific; 0 = no override",
+        default=0.0, min=0.0, max=2000.0)
+
 
 def unregister():
     # Restore any armature bone hide state we modified
@@ -1837,12 +2157,22 @@ def unregister():
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
     for prop in ("cg3h_entries", "cg3h_character", "cg3h_original_meshes",
-                 "cg3h_manifest_json", "cg3h_baseline_b64", "cg3h_bone_preset"):
+                 "cg3h_manifest_json", "cg3h_baseline_b64", "cg3h_bone_preset",
+                 "cg3h_nla_advanced_open"):
         if hasattr(bpy.types.Scene, prop):
             delattr(bpy.types.Scene, prop)
     for prop in ("cg3h_gen_shadow", "cg3h_shadow_ratio",
                  "cg3h_gen_outline", "cg3h_outline_push"):
         if hasattr(bpy.types.Object, prop):
             delattr(bpy.types.Object, prop)
+    for prop in ("cg3h_cancel_on_owner_move", "cg3h_hold_last_frame",
+                 "cg3h_allow_restart", "cg3h_owner_invulnerable",
+                 "cg3h_owner_immobile", "cg3h_owner_has_no_collision",
+                 "cg3h_owner_untargetable", "cg3h_disable_owner_manual_interact",
+                 "cg3h_enable_3d_shadow", "cg3h_chain_to_override",
+                 "cg3h_inherit_from_override", "cg3h_scale",
+                 "cg3h_native_move_speed"):
+        if hasattr(bpy.types.NlaStrip, prop):
+            delattr(bpy.types.NlaStrip, prop)
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
