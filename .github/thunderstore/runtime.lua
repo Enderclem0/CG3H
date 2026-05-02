@@ -552,161 +552,29 @@ function M.apply_all_skins(state)
 end
 
 --- Hook the scene-load lifecycle so freshly-spawned units pick up
--- their persisted skin without user intervention.  Idempotent;
--- main.lua calls this once at init.
+-- their persisted skin without user intervention, AND so accessories
+-- get their bone bindings refreshed via the variant-swap cascade.
+-- Idempotent; main.lua calls this once at init.
 function M.install_skin_scene_hook(state)
     if not (rom.on_import and rom.on_import.post) then return end
     rom.on_import.post(function(script_name)
         if script_name == "RoomLogic.lua"
                 or script_name == "RoomManager.lua" then
             M.apply_all_skins(state)
-            M.mark_pending_nudges(state)
+            -- v3.13: re-applying the active variant selection on
+            -- scene load fixes the bind-pose lag on freshly-loaded
+            -- mesh_add accessories.  swap_entry walks
+            -- draw_populate_entry_textures + draw_swap_to_variant
+            -- which re-evaluates the entry's draw state, and the
+            -- side effect of that cascade is that accessory bone
+            -- tracks get bound within one frame instead of waiting
+            -- for the engine's first natural animation transition
+            -- (~10s).  Same code path the UI's first-frame callback
+            -- accidentally triggers when the user opens the menu —
+            -- which is exactly what the user reported as "the only
+            -- way to make the hat snap into place".
+            M.apply_active_variants(state)
         end
-    end)
-end
-
--- ── v3.13: bind-pose nudge for fresh mesh_add accessories ───────────────
---
--- Newly-loaded skinned mesh_add accessories don't get their bone-track
--- bindings until the FIRST SetAnimation transition the engine processes
--- for that character.  Until then they render at bind-pose offsets
--- relative to the bind-pose skeleton — typically ~one-character-depth
--- forward of where they should be — which clears the moment the unit
--- transitions to any new animation (or the player opens an ImGui menu
--- and the input pump triggers one for them).
---
--- Fix: on each scene load, find every character that has a mesh_add
--- mod targeting it AND is currently in the scene, and call SetAnimation
--- on it with a known-stock idle.  The transition is visually a no-op
--- (the character is already idle) but it forces Granny to bind the
--- accessory's bone tracks.
---
--- The nudge name has to be a known SJSON Animation entry for the
--- character (engine resolves the Name field via the per-character
--- Animation SJSON, NOT against GR2 entry keys).  Hardcoded map of
--- canonical idles harvested from Content/Game/Animations/Model/.
-local _NUDGE_ANIM = {
-    -- Players
-    Melinoe   = "MelinoeIdle",
-    YoungMel  = "Melinoe_Young_Idle",
-    -- Common hub NPCs
-    Hecate    = "HecateTorchMultipleHubIdle",
-    Nemesis   = "Nemesis_Hub_Idle",
-    Moros     = "Moros_Idle",
-    Hermes    = "Hermes_Idle",
-    Hypnos    = "Hypnos_Sleep_Idle",
-    Cerberus  = "Cerberus_Idle_Sitting",
-    Apollo    = "Apollo_Idle",
-    Hera      = "Hera_Idle",
-    Selene    = "Selene_Idle",
-}
-
---- Try one bind-pose nudge for `character`.  Returns:
---   "live"        — SetAnimation called on the live unit.
---   "transition"  — character not in scene yet; caller should retry.
---   "skip"        — character has no mesh_add accessory loaded; no nudge needed.
---   "no-name"     — no nudge animation known for this character; give up.
-function M.nudge_accessory_bind(state, character)
-    if not (rom.game and rom.game.SetAnimation) then return "skip" end
-    local has_accessory = false
-    for _, mod in ipairs(state.mods or {}) do
-        if mod.character == character and mod.has_mesh_add then
-            has_accessory = true
-            break
-        end
-    end
-    if not has_accessory then return "skip" end
-
-    local nudge = _NUDGE_ANIM[character]
-    if not nudge then
-        local rec = state.build_status and state.build_status[character]
-        if rec and rec.alias_animations and rec.alias_animations[1] then
-            nudge = rec.alias_animations[1].logical_name
-        end
-    end
-    if not nudge then return "no-name" end
-
-    local target_id = _live_target_for(character)
-    if not target_id then return "transition" end
-
-    if M.play_animation(target_id, nudge) then
-        rom.log.info(LOG_PREFIX .. " bind-pose nudge fired: "
-            .. character .. " #" .. tostring(target_id)
-            .. " -> '" .. nudge .. "'")
-        return "live"
-    end
-    return "skip"
-end
-
--- ── per-frame nudge retry queue ──────────────────────────────────────
---
--- The on_import.post hook for RoomLogic.lua / RoomManager.lua fires
--- BEFORE in-scene units have spawned, so the first nudge attempt
--- always returns "transition" for characters that load slightly
--- after script imports (the player Hero, hub NPCs spawned by
--- SetupRoom, etc).  Without a retry path the nudge would only
--- ever fire on the next scene change — useless for the first hub
--- entry, which is exactly when reload_game_data drops the player
--- into a fresh state with the bind-pose lag visible.
---
--- Solution: on each scene event, populate a pending-character map.
--- A per-frame imgui callback drains the map, retrying the nudge
--- until target_id resolves OR a frame cap expires (10s @ 60fps).
--- After the cap a character is silently dropped — they're not in
--- this scene at all (e.g. Hecate during a Battle room), and we
--- shouldn't keep banging on SetAnimation for nobody.
-
-local _MAX_NUDGE_FRAMES = 600
-local _pending_nudges = {}  -- character -> frames remaining
-
---- Queue every character with a mesh_add accessory for nudging.
--- Called from the scene-load hook.  Existing pending entries get
--- their counter reset (a new scene means a new chance to find the
--- unit, even if a previous attempt timed out).
-function M.mark_pending_nudges(state)
-    if not state.mods then return end
-    _pending_nudges = {}
-    local count = 0
-    for _, mod in ipairs(state.mods) do
-        if mod.has_mesh_add and mod.character ~= ""
-                and not _pending_nudges[mod.character] then
-            _pending_nudges[mod.character] = _MAX_NUDGE_FRAMES
-            count = count + 1
-        end
-    end
-    if count > 0 then
-        rom.log.info(LOG_PREFIX .. " bind-pose nudge queued for "
-            .. count .. " character(s)")
-    end
-end
-
---- Tick the pending-nudge queue.  Called once per frame from the
--- imgui always-draw callback.  Drains entries that succeed or run
--- out of attempts; quietly retries the rest next frame.
-function M.tick_pending_nudges(state)
-    if not next(_pending_nudges) then return end
-    for character, frames_left in pairs(_pending_nudges) do
-        local result = M.nudge_accessory_bind(state, character)
-        if result == "live" or result == "skip" or result == "no-name" then
-            _pending_nudges[character] = nil  -- done one way or another
-        elseif frames_left <= 1 then
-            _pending_nudges[character] = nil  -- gave up; not in scene
-            rom.log.info(LOG_PREFIX .. " bind-pose nudge timed out for "
-                .. character .. " (not in current scene)")
-        else
-            _pending_nudges[character] = frames_left - 1
-        end
-    end
-end
-
---- Install the per-frame nudge-retry tick on the imgui always-draw
--- callback.  main.lua calls this once at init.  Idempotent — the
--- tick body short-circuits when the pending queue is empty, so the
--- per-frame cost is one table-empty check.
-function M.install_accessory_nudge_tick(state)
-    if not (rom.gui and rom.gui.add_always_draw_imgui) then return end
-    rom.gui.add_always_draw_imgui(function()
-        M.tick_pending_nudges(state)
     end)
 end
 

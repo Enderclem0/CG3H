@@ -150,12 +150,6 @@ end
 -- the user re-clicking the picker.
 runtime.install_skin_scene_hook(mod_state)
 
--- v3.13: drain queued bind-pose nudges on each rendered frame.  The
--- scene hook above queues one nudge per character with a mesh_add
--- accessory; this tick fires SetAnimation as soon as the target unit
--- spawns (typically a handful of frames after script import).
-runtime.install_accessory_nudge_tick(mod_state)
-
 -- NOTE: apply_visibility is NOT called at startup because HashGuid::Lookup
 -- returns 0 before the first scene loads.  The builder respects mod_state
 -- at build time, so disabled mods are already excluded from the GPK.
