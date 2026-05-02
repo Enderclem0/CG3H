@@ -1176,6 +1176,31 @@ class CG3H_OT_Export(bpy.types.Operator):
         if dupe.data:
             dupe.data.name = new_name
 
+        # Split topology at sharp edges before computing normals so
+        # the outline doesn't poke through the source at creases.
+        # The classic inverted-hull failure mode: at the brim-of-a-hat
+        # crease, the smooth-averaged vertex normal bisects the two
+        # face normals — pushing the outline vertex outward along
+        # that bisector lands it INSIDE the source mesh on one side
+        # of the crease (visible as a black sliver where the outline
+        # peeks through the source).  Edge-splitting separates the
+        # vertex into one copy per face at sharp edges, so each copy
+        # gets that face's own normal and the displacement is
+        # crisp — same trick Blender's Edge Split modifier uses for
+        # inverted-hull outlines.
+        import bmesh
+        import math
+        SHARP_ANGLE = math.radians(30.0)
+        bm = bmesh.new()
+        bm.from_mesh(dupe.data)
+        sharp = [e for e in bm.edges
+                 if len(e.link_faces) == 2
+                 and e.calc_face_angle() > SHARP_ANGLE]
+        if sharp:
+            bmesh.ops.split_edges(bm, edges=sharp)
+        bm.to_mesh(dupe.data)
+        bm.free()
+
         # Do everything in OBJECT space, then convert back.  Why:
         # CG3H imports often parent the mesh under an armature with
         # a non-uniform bind scale — Moros's hat ships with
