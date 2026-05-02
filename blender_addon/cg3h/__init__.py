@@ -1217,6 +1217,22 @@ class CG3H_OT_Export(bpy.types.Operator):
                 v_normals[idx[i+1]] += fn
         lens = np.linalg.norm(v_normals, axis=1, keepdims=True)
         unit = np.where(lens > 1e-9, v_normals / np.maximum(lens, 1e-9), 0.0)
+
+        # Outward-orient the normals using the mesh centroid as a
+        # proxy for "inside".  CG3H GR2 imports can land in either
+        # winding convention — Moros's hat comes in CW from the
+        # outside, so the raw cross-product points INWARD and the
+        # outline ended up smaller than the source instead of
+        # bigger.  Flip any normal whose dot with (vertex-centroid)
+        # is negative.  For convex-ish accessories (hats, glasses,
+        # capes) this is reliable; deeply concave shapes might get
+        # a few verts wrong at the concavities, but those are edge
+        # cases for the auto-gen outline use.
+        centroid = obj.mean(axis=0)
+        outward = obj - centroid
+        flip_mask = np.sum(unit * outward, axis=1) < 0
+        unit[flip_mask] *= -1
+
         new_obj = obj + unit * strength
 
         # Convert displaced positions back to mesh-data space and
