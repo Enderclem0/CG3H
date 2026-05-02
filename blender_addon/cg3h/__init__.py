@@ -302,8 +302,28 @@ def _apply_vanilla_nla(context, character, game_dir):
     if not arm.animation_data:
         arm.animation_data_create()
 
-    # Index Blender Actions by name so we can look up by GrannyAnimation.
-    actions_by_name = {a.name: a for a in bpy.data.actions}
+    # Index Blender Actions by name AND by suffix-stripped stem.
+    # Blender's GLTF importer adds character/skin suffixes
+    # (e.g. `Melinoe_NoWeapon_Base_Idle_00_Skin`,
+    # `Melinoe_NoWeapon_Base_Idle_00_Armature`) so an exact match against
+    # the SJSON's `GrannyAnimation` field misses every entry.  Strip the
+    # known suffixes the importer attaches and ALSO strip Blender's
+    # `.001`/`.002` numeric duplicate suffixes.
+    _SUFFIX_RE = re.compile(r'\.\d{3,}$')
+    _STRIP_SUFFIXES = ('_Skin', '_Armature', f'_{character}_Skin')
+    def _action_stem(name):
+        n = _SUFFIX_RE.sub('', name)
+        for suf in _STRIP_SUFFIXES:
+            if n.endswith(suf):
+                return n[:-len(suf)]
+        return n
+
+    actions_by_name = {}
+    for a in bpy.data.actions:
+        actions_by_name[a.name] = a            # exact
+        stem = _action_stem(a.name)
+        if stem != a.name:
+            actions_by_name.setdefault(stem, a)  # don't override exact match
 
     n_strips = 0
     n_skipped = 0
@@ -352,8 +372,15 @@ def _apply_vanilla_nla(context, character, game_dir):
                     continue
             track_pos = strip.frame_end + 1.0
 
-            # Map SJSON metadata onto strip properties.
-            strip.use_cyclic = bool(entry.get('Loop'))
+            # Map SJSON metadata onto strip properties.  Loop signal
+            # in Blender 4.2 NLA = `strip.repeat` (no `use_cyclic` attr);
+            # bumping repeat to a sentinel high value matches stock-anim
+            # "loops forever" semantics.
+            if entry.get('Loop'):
+                try:
+                    strip.repeat = 100.0
+                except Exception:
+                    pass
             # Blend In: max Duration across the Blends array.  When
             # source-specific blends matter the v3.15 export path will
             # derive them from NLA adjacency; this just gives the
@@ -468,8 +495,12 @@ def _new_strips(context):
             # Native-derived fields (NLA-native semantics)
             scale = float(strip.scale)
             speed = (1.0 / scale) if abs(scale - 1.0) > 1e-6 else None
-            loop = bool(strip.use_cyclic) or (
-                hasattr(strip, 'repeat') and strip.repeat and strip.repeat > 1.0)
+            # Blender 4.2's NlaStrip does NOT have `use_cyclic`; the
+            # loop signal is the strip's `repeat` count (default 1.0
+            # = play once; >1 = repeat that many times; modders use
+            # high values like 100 to mean "loop forever").
+            loop = (hasattr(strip, 'repeat') and strip.repeat
+                    and strip.repeat > 1.0)
             blend_in = float(strip.blend_in)
             blend_in_frames = blend_in if blend_in > 0 else None
 
@@ -2114,8 +2145,9 @@ class CG3H_PT_NlaStripAnim(bpy.types.Panel):
         if strip.action:
             box.label(text=f"Action: {strip.action.name}", icon='ANIM_DATA')
         col = box.column(align=True)
-        col.label(text=f"Loop: {'on' if strip.use_cyclic else 'off'} "
-                       f"(strip Cyclic)")
+        loop_on = bool(getattr(strip, 'repeat', 1.0) > 1.0)
+        col.label(text=f"Loop: {'on' if loop_on else 'off'} "
+                       f"(strip Repeat = {strip.repeat:.1f})")
         col.label(text=f"Blend in: {int(strip.blend_in)} frames "
                        f"(strip Blend In)")
         if abs(strip.scale - 1.0) > 1e-6:
