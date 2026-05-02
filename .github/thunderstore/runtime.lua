@@ -560,8 +560,99 @@ function M.install_skin_scene_hook(state)
         if script_name == "RoomLogic.lua"
                 or script_name == "RoomManager.lua" then
             M.apply_all_skins(state)
+            M.nudge_all_accessories(state)
         end
     end)
+end
+
+-- ── v3.13: bind-pose nudge for fresh mesh_add accessories ───────────────
+--
+-- Newly-loaded skinned mesh_add accessories don't get their bone-track
+-- bindings until the FIRST SetAnimation transition the engine processes
+-- for that character.  Until then they render at bind-pose offsets
+-- relative to the bind-pose skeleton — typically ~one-character-depth
+-- forward of where they should be — which clears the moment the unit
+-- transitions to any new animation (or the player opens an ImGui menu
+-- and the input pump triggers one for them).
+--
+-- Fix: on each scene load, find every character that has a mesh_add
+-- mod targeting it AND is currently in the scene, and call SetAnimation
+-- on it with a known-stock idle.  The transition is visually a no-op
+-- (the character is already idle) but it forces Granny to bind the
+-- accessory's bone tracks.
+--
+-- The nudge name has to be a known SJSON Animation entry for the
+-- character (engine resolves the Name field via the per-character
+-- Animation SJSON, NOT against GR2 entry keys).  Hardcoded map of
+-- canonical idles harvested from Content/Game/Animations/Model/.
+local _NUDGE_ANIM = {
+    -- Players
+    Melinoe   = "MelinoeIdle",
+    YoungMel  = "Melinoe_Young_Idle",
+    -- Common hub NPCs
+    Hecate    = "HecateTorchMultipleHubIdle",
+    Nemesis   = "Nemesis_Hub_Idle",
+    Moros     = "Moros_Idle",
+    Hermes    = "Hermes_Idle",
+    Hypnos    = "Hypnos_Sleep_Idle",
+    Cerberus  = "Cerberus_Idle_Sitting",
+    Apollo    = "Apollo_Idle",
+    Hera      = "Hera_Idle",
+    Selene    = "Selene_Idle",
+}
+
+--- Trigger one bind-pose nudge for `character` if it has any
+-- mesh_add accessory installed and is currently in the scene.
+-- Returns "live" / "transition" / "skip" / "no-name" mirroring the
+-- skin apply for log clarity.
+function M.nudge_accessory_bind(state, character)
+    if not (rom.game and rom.game.SetAnimation) then return "skip" end
+    -- Skip the nudge unless at least one mesh_add mod targets this
+    -- character — characters without accessories never see the
+    -- bind-pose offset bug, so an unprovoked SetAnimation would just
+    -- be a wasteful one-frame hiccup.
+    local has_accessory = false
+    for _, mod in ipairs(state.mods or {}) do
+        if mod.character == character and mod.has_mesh_add then
+            has_accessory = true
+            break
+        end
+    end
+    if not has_accessory then return "skip" end
+
+    local nudge = _NUDGE_ANIM[character]
+    if not nudge then
+        -- Fall back to the first registered CG3H alias for this
+        -- character — guaranteed to resolve, no hardcoding needed.
+        local rec = state.build_status and state.build_status[character]
+        if rec and rec.alias_animations and rec.alias_animations[1] then
+            nudge = rec.alias_animations[1].logical_name
+        end
+    end
+    if not nudge then return "no-name" end
+
+    local target_id = _live_target_for(character)
+    if not target_id then return "transition" end
+
+    if M.play_animation(target_id, nudge) then
+        rom.log.info(LOG_PREFIX .. " bind-pose nudge: "
+            .. character .. " -> " .. nudge)
+        return "live"
+    end
+    return "skip"
+end
+
+--- Walk every loaded mod and trigger one nudge per character that
+-- has at least one mesh_add accessory installed.
+function M.nudge_all_accessories(state)
+    if not state.mods then return end
+    local seen = {}
+    for _, mod in ipairs(state.mods) do
+        if mod.has_mesh_add and mod.character ~= "" and not seen[mod.character] then
+            seen[mod.character] = true
+            M.nudge_accessory_bind(state, mod.character)
+        end
+    end
 end
 
 -- ── v3.8: draw-call visibility gate ────────────────────────────────────
