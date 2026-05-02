@@ -537,6 +537,42 @@ def patch_animation_entries(dll, gpk_entries, sdb_bytes, glb_animations,
         if norm not in glb_by_norm:
             glb_by_norm[norm] = tracks
 
+    # v3.14 — Skip-load short-circuit.
+    #
+    # The inner loop tries to match each GR2 entry against the GLB by
+    # FOUR keys: entry_name (exact + normalized) AND anim_name (the
+    # internal Granny animation name, exact + normalized).  We can
+    # check the entry_name pair WITHOUT loading the GR2; the anim_name
+    # pair requires the load.
+    #
+    # In CG3H's authoring flow `entry_name == anim_name == authored
+    # GLB action name`, so the entry_name pair is enough to decide
+    # whether to load.  Hand-authored mods or GLBs imported from
+    # outside CG3H may have anim_name != entry_name and could lose
+    # patches if we filtered purely on entry_name.  For those, set
+    # `CG3H_NO_SKIP_LOAD=1` to disable the short-circuit.
+    #
+    # On a Mel animation_patch with 5 edited anims out of ~350 stock
+    # entries this drops cold-build time by ~99 % of the wasted
+    # ReadEntireFileFromMemory calls.
+    skip_load = os.environ.get('CG3H_NO_SKIP_LOAD', '') not in ('1', 'true', 'yes')
+    if skip_load:
+        glb_keys = set(glb_animations.keys())
+        glb_keys_norm = set(_norm_anim_name(k) for k in glb_animations.keys())
+        def _entry_might_match(name):
+            if name in glb_keys or name in glb_keys_norm:
+                return True
+            n = _norm_anim_name(name)
+            return n in glb_keys or n in glb_keys_norm
+        before = len(anim_entries)
+        anim_entries = {k: v for k, v in anim_entries.items()
+                        if _entry_might_match(k)}
+        skipped = before - len(anim_entries)
+        if skipped > 0:
+            print(f"  skip-load: {skipped} entries pre-filtered "
+                  f"(no GLB action match), {len(anim_entries)} to load",
+                  flush=True)
+
     total = len(anim_entries)
     for idx, (entry_name, gr2_bytes) in enumerate(anim_entries.items()):
         gr2_buf = ctypes.create_string_buffer(gr2_bytes)
