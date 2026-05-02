@@ -59,13 +59,21 @@ def _make_anim(tracks):
     }]
 
 
-def _count_channels(gltf, path=None):
-    """Count animation channels in the gltf, optionally filtered by path."""
+def _count_channels(anims, path=None):
+    """Count animation channels.  Accepts either v3.14's plain-dict
+    `anim_dict_list` or the legacy pygltflib animation list — the
+    test fixtures should pass the dict list returned alongside the
+    gltf object by build_gltf."""
     total = 0
-    for anim in gltf.animations:
-        for ch in anim.channels:
-            if path is None or ch.target.path == path:
-                total += 1
+    for anim in anims:
+        if isinstance(anim, dict):
+            for ch in anim['channels']:
+                if path is None or ch['target']['path'] == path:
+                    total += 1
+        else:
+            for ch in anim.channels:
+                if path is None or ch.target.path == path:
+                    total += 1
     return total
 
 
@@ -78,8 +86,8 @@ def test_scale_skip_shear_rotation():
     tracks = [{'name': 'bone_0', 'bone_index': 0,
                'orient': None, 'pos': None,
                'scale': (np.array([0.0], dtype=np.float32), scale_matrix, 0)}]
-    gltf = build_gltf('test', _make_mesh(), ['mesh0'], bones, animations=_make_anim(tracks))
-    assert _count_channels(gltf, 'scale') == 0, "Shear/rotation scale should be skipped"
+    gltf, anims = build_gltf('test', _make_mesh(), ['mesh0'], bones, animations=_make_anim(tracks))
+    assert _count_channels(anims, 'scale') == 0, "Shear/rotation scale should be skipped"
 
 
 def test_scale_skip_nan():
@@ -90,8 +98,8 @@ def test_scale_skip_nan():
     tracks = [{'name': 'bone_0', 'bone_index': 0,
                'orient': None, 'pos': None,
                'scale': (np.array([0.0], dtype=np.float32), vals, 0)}]
-    gltf = build_gltf('test', _make_mesh(), ['mesh0'], bones, animations=_make_anim(tracks))
-    assert _count_channels(gltf, 'scale') == 0, "NaN scale should be skipped"
+    gltf, anims = build_gltf('test', _make_mesh(), ['mesh0'], bones, animations=_make_anim(tracks))
+    assert _count_channels(anims, 'scale') == 0, "NaN scale should be skipped"
 
 
 def test_scale_skip_extreme():
@@ -102,8 +110,8 @@ def test_scale_skip_extreme():
     tracks = [{'name': 'bone_0', 'bone_index': 0,
                'orient': None, 'pos': None,
                'scale': (np.array([0.0], dtype=np.float32), vals, 0)}]
-    gltf = build_gltf('test', _make_mesh(), ['mesh0'], bones, animations=_make_anim(tracks))
-    assert _count_channels(gltf, 'scale') == 0, "Extreme scale should be skipped"
+    gltf, anims = build_gltf('test', _make_mesh(), ['mesh0'], bones, animations=_make_anim(tracks))
+    assert _count_channels(anims, 'scale') == 0, "Extreme scale should be skipped"
 
 
 def test_scale_pure_scale_passes():
@@ -115,8 +123,8 @@ def test_scale_pure_scale_passes():
     tracks = [{'name': 'bone_0', 'bone_index': 0,
                'orient': None, 'pos': None,
                'scale': (np.array([0.0], dtype=np.float32), vals, 0)}]
-    gltf = build_gltf('test', _make_mesh(), ['mesh0'], bones, animations=_make_anim(tracks))
-    assert _count_channels(gltf, 'scale') == 1, "Pure scale should pass"
+    gltf, anims = build_gltf('test', _make_mesh(), ['mesh0'], bones, animations=_make_anim(tracks))
+    assert _count_channels(anims, 'scale') == 1, "Pure scale should pass"
 
 
 def test_rotation_normalized():
@@ -128,12 +136,13 @@ def test_rotation_normalized():
     tracks = [{'name': 'bone_0', 'bone_index': 0,
                'orient': (np.array([0.0], dtype=np.float32), vals.copy(), 0),
                'pos': None, 'scale': None}]
-    gltf = build_gltf('test', _make_mesh(), ['mesh0'], bones, animations=_make_anim(tracks))
-    assert _count_channels(gltf, 'rotation') == 1
-    # Find the rotation sampler's output accessor
-    rot_ch = [ch for ch in gltf.animations[0].channels if ch.target.path == 'rotation'][0]
-    sampler = gltf.animations[0].samplers[rot_ch.sampler]
-    acc = gltf.accessors[sampler.output]
+    gltf, anims = build_gltf('test', _make_mesh(), ['mesh0'], bones, animations=_make_anim(tracks))
+    assert _count_channels(anims, 'rotation') == 1
+    # Find the rotation sampler's output accessor (anims are dicts now)
+    rot_ch = [ch for ch in anims[0]['channels']
+              if ch['target']['path'] == 'rotation'][0]
+    sampler = anims[0]['samplers'][rot_ch['sampler']]
+    acc = gltf.accessors[sampler['output']]
     bv = gltf.bufferViews[acc.bufferView]
     blob = gltf.binary_blob()
     quat = np.frombuffer(blob[bv.byteOffset:bv.byteOffset + bv.byteLength], dtype=np.float32)
@@ -150,8 +159,8 @@ def test_translation_skip_extreme():
                'orient': None,
                'pos': (np.array([0.0], dtype=np.float32), vals, 0),
                'scale': None}]
-    gltf = build_gltf('test', _make_mesh(), ['mesh0'], bones, animations=_make_anim(tracks))
-    assert _count_channels(gltf, 'translation') == 0, "Extreme translation should be skipped"
+    gltf, anims = build_gltf('test', _make_mesh(), ['mesh0'], bones, animations=_make_anim(tracks))
+    assert _count_channels(anims, 'translation') == 0, "Extreme translation should be skipped"
 
 
 def test_translation_normal_passes():
@@ -163,8 +172,8 @@ def test_translation_normal_passes():
                'orient': None,
                'pos': (np.array([0.0], dtype=np.float32), vals, 0),
                'scale': None}]
-    gltf = build_gltf('test', _make_mesh(), ['mesh0'], bones, animations=_make_anim(tracks))
-    assert _count_channels(gltf, 'translation') == 1
+    gltf, anims = build_gltf('test', _make_mesh(), ['mesh0'], bones, animations=_make_anim(tracks))
+    assert _count_channels(anims, 'translation') == 1
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -179,8 +188,8 @@ def test_bone_match_exact():
                'orient': (np.array([0.0], dtype=np.float32),
                           np.array([[0,0,0,1]], dtype=np.float32), 0),
                'pos': None, 'scale': None}]
-    gltf = build_gltf('test', _make_mesh(), ['mesh0'], bones, animations=_make_anim(tracks))
-    assert _count_channels(gltf, 'rotation') == 1
+    gltf, anims = build_gltf('test', _make_mesh(), ['mesh0'], bones, animations=_make_anim(tracks))
+    assert _count_channels(anims, 'rotation') == 1
 
 
 def test_bone_match_short_name():
@@ -191,8 +200,8 @@ def test_bone_match_short_name():
                'orient': (np.array([0.0], dtype=np.float32),
                           np.array([[0,0,0,1]], dtype=np.float32), 0),
                'pos': None, 'scale': None}]
-    gltf = build_gltf('test', _make_mesh(), ['mesh0'], bones, animations=_make_anim(tracks))
-    assert _count_channels(gltf, 'rotation') == 1
+    gltf, anims = build_gltf('test', _make_mesh(), ['mesh0'], bones, animations=_make_anim(tracks))
+    assert _count_channels(anims, 'rotation') == 1
 
 
 def test_bone_match_static_suffix():
@@ -203,8 +212,8 @@ def test_bone_match_static_suffix():
                'orient': (np.array([0.0], dtype=np.float32),
                           np.array([[0,0,0,1]], dtype=np.float32), 0),
                'pos': None, 'scale': None}]
-    gltf = build_gltf('test', _make_mesh(), ['mesh0'], bones, animations=_make_anim(tracks))
-    assert _count_channels(gltf, 'rotation') == 1
+    gltf, anims = build_gltf('test', _make_mesh(), ['mesh0'], bones, animations=_make_anim(tracks))
+    assert _count_channels(anims, 'rotation') == 1
 
 
 def test_bone_match_rig_prefix_and_static():
@@ -215,8 +224,8 @@ def test_bone_match_rig_prefix_and_static():
                'orient': (np.array([0.0], dtype=np.float32),
                           np.array([[0,0,0,1]], dtype=np.float32), 0),
                'pos': None, 'scale': None}]
-    gltf = build_gltf('test', _make_mesh(), ['mesh0'], bones, animations=_make_anim(tracks))
-    assert _count_channels(gltf, 'rotation') == 1
+    gltf, anims = build_gltf('test', _make_mesh(), ['mesh0'], bones, animations=_make_anim(tracks))
+    assert _count_channels(anims, 'rotation') == 1
 
 
 def test_bone_no_match():
@@ -227,8 +236,8 @@ def test_bone_no_match():
                'orient': (np.array([0.0], dtype=np.float32),
                           np.array([[0,0,0,1]], dtype=np.float32), 0),
                'pos': None, 'scale': None}]
-    gltf = build_gltf('test', _make_mesh(), ['mesh0'], bones, animations=_make_anim(tracks))
-    assert _count_channels(gltf) == 0
+    gltf, anims = build_gltf('test', _make_mesh(), ['mesh0'], bones, animations=_make_anim(tracks))
+    assert _count_channels(anims) == 0
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -241,7 +250,7 @@ def test_duplicate_mesh_names():
     bones = _make_bones(1)
     mesh_data = _make_mesh() * 3  # three identical meshes
     mesh_names = ['MyMesh', 'MyMesh_1', 'MyMesh_2']
-    gltf = build_gltf('test', mesh_data, mesh_names, bones)
+    gltf, anims = build_gltf('test', mesh_data, mesh_names, bones)
     names = [m.name for m in gltf.meshes]
     assert 'MyMesh' in names
     assert 'MyMesh_1' in names

@@ -966,11 +966,14 @@ def build_gltf(character_name, mesh_data_list, mesh_names, bones, animations=Non
         gltf.scenes[0].nodes.append(rn)
 
     # ── Animations ──
+    # Build animations as PLAIN DICTS instead of pygltflib dataclasses.
+    # For Mel's 843 anims × ~36 tracks × ~3 paths each, the
+    # Animation/Sampler/Channel/Target dataclass instantiation alone
+    # dominates build_gltf wall time.  Caller is expected to splice
+    # `anim_dict_list` into the GLB's JSON chunk after pygltflib.save()
+    # via _inject_animations_into_glb (see below).
+    anim_dict_list = []
     if animations:
-        # Build bone name -> node index mapping for animation channel targeting.
-        # Granny uses case-insensitive exact name matching by default.
-        # Some characters have animation tracks with '_static' suffix that the
-        # mesh skeleton lacks — we strip it as a workaround (see project_static_suffix.md).
         bone_name_to_node = {}
         for i, bone in enumerate(bones):
             bone_name_to_node[bone['name']] = bone_node_indices[i]
@@ -990,20 +993,14 @@ def build_gltf(character_name, mesh_data_list, mesh_names, bones, animations=Non
                         h.update(values.tobytes())
             content_hash = h.hexdigest()
 
-            anim = Animation(
-                name=anim_data['name'], channels=[], samplers=[],
-                extras={
-                    'granny_name': anim_data.get('granny_name', ''),
-                    'content_hash': content_hash,
-                },
-            )
+            samplers = []
+            channels = []
 
             for track in anim_data['tracks']:
                 node_idx = bone_name_to_node.get(track['name'])
                 if node_idx is None:
                     short = track['name'].split(':')[-1]
                     node_idx = bone_name_to_node.get(short)
-                # Strip _static suffix (some animation skeletons use it)
                 if node_idx is None:
                     stripped = track['name'].removesuffix('_static').removesuffix('_Static')
                     node_idx = bone_name_to_node.get(stripped)
@@ -1012,9 +1009,6 @@ def build_gltf(character_name, mesh_data_list, mesh_names, bones, animations=Non
                 if node_idx is None:
                     continue
 
-                # Gap-fill: if a bone has ANY channel, emit ALL three (pos+rot+scale).
-                # Blender misinterprets partial channels (e.g. position-only causes
-                # bogus scale values). Fill missing channels with rest pose constants.
                 bone_idx = bone_node_indices.index(node_idx) if node_idx in bone_node_indices else None
                 has_any = track['pos'] is not None or track['orient'] is not None or track['scale'] is not None
                 if bone_idx is not None and has_any:
@@ -1030,7 +1024,6 @@ def build_gltf(character_name, mesh_data_list, mesh_names, bones, animations=Non
                         track['scale'] = (np.array([0.0], dtype=np.float32),
                                           np.array([[1.0, 1.0, 1.0]], dtype=np.float32), 0)
 
-                # Translation channel
                 if track['pos'] is not None:
                     knots, values, _ = track['pos']
                     if (len(knots) > 0 and values.shape[-1] == 3
@@ -1038,62 +1031,60 @@ def build_gltf(character_name, mesh_data_list, mesh_names, bones, animations=Non
                             and not np.any(np.abs(values) > 1000.0)):
                         time_acc = add_accessor(knots.astype(np.float32), FLOAT, SCALAR)
                         val_acc = add_accessor(values.astype(np.float32), FLOAT, VEC3)
-                        si = len(anim.samplers)
-                        anim.samplers.append(AnimationSampler(
-                            input=time_acc, output=val_acc, interpolation="LINEAR"))
-                        anim.channels.append(AnimationChannel(
-                            sampler=si,
-                            target=AnimationChannelTarget(node=node_idx, path="translation")))
+                        si = len(samplers)
+                        samplers.append({"input": time_acc, "output": val_acc,
+                                         "interpolation": "LINEAR"})
+                        channels.append({"sampler": si,
+                                         "target": {"node": node_idx, "path": "translation"}})
 
-                # Rotation channel (quaternion XYZW — same order as glTF)
                 if track['orient'] is not None:
                     knots, values, _ = track['orient']
                     if len(knots) > 0 and values.shape[-1] == 4 and np.all(np.isfinite(values)):
-                        # Normalize quaternions — non-unit quats cause mesh stretching
                         norms = np.linalg.norm(values, axis=1, keepdims=True)
                         norms = np.maximum(norms, 1e-10)
                         values = values / norms
                         time_acc = add_accessor(knots.astype(np.float32), FLOAT, SCALAR)
                         val_acc = add_accessor(values.astype(np.float32), FLOAT, VEC4)
-                        si = len(anim.samplers)
-                        anim.samplers.append(AnimationSampler(
-                            input=time_acc, output=val_acc, interpolation="LINEAR"))
-                        anim.channels.append(AnimationChannel(
-                            sampler=si,
-                            target=AnimationChannelTarget(node=node_idx, path="rotation")))
+                        si = len(samplers)
+                        samplers.append({"input": time_acc, "output": val_acc,
+                                         "interpolation": "LINEAR"})
+                        channels.append({"sampler": si,
+                                         "target": {"node": node_idx, "path": "rotation"}})
 
-                # Scale channel (extract diagonal from 3x3 matrix, or use 3D directly)
                 if track['scale'] is not None:
                     knots, values, _ = track['scale']
                     if len(knots) > 0:
                         if values.shape[-1] == 9:
-                            # 3x3 matrix → extract diagonal as scale
-                            scale_vals = values[:, [0, 4, 8]]  # M00, M11, M22
-                            # Check if the matrix has significant off-diagonal elements
-                            # (rotation/shear) — if so, diagonal is NOT a valid scale
+                            scale_vals = values[:, [0, 4, 8]]
                             off_diag = values[:, [1, 2, 3, 5, 6, 7]]
                             if np.any(np.abs(off_diag) > 0.01):
-                                continue  # skip — shear/rotation matrix, not pure scale
+                                continue
                         elif values.shape[-1] == 3:
                             scale_vals = values
                         else:
                             continue
-                        # Validate: skip NaN/Inf/extreme values
                         if not np.all(np.isfinite(scale_vals)):
                             continue
                         if np.any(np.abs(scale_vals) > 100.0):
-                            continue  # extreme scale values — likely corrupt
+                            continue
                         time_acc = add_accessor(knots.astype(np.float32), FLOAT, SCALAR)
                         val_acc = add_accessor(scale_vals.astype(np.float32), FLOAT, VEC3)
-                        si = len(anim.samplers)
-                        anim.samplers.append(AnimationSampler(
-                            input=time_acc, output=val_acc, interpolation="LINEAR"))
-                        anim.channels.append(AnimationChannel(
-                            sampler=si,
-                            target=AnimationChannelTarget(node=node_idx, path="scale")))
+                        si = len(samplers)
+                        samplers.append({"input": time_acc, "output": val_acc,
+                                         "interpolation": "LINEAR"})
+                        channels.append({"sampler": si,
+                                         "target": {"node": node_idx, "path": "scale"}})
 
-            if anim.channels:
-                gltf.animations.append(anim)
+            if channels:
+                anim_dict_list.append({
+                    "name": anim_data['name'],
+                    "channels": channels,
+                    "samplers": samplers,
+                    "extras": {
+                        "granny_name": anim_data.get('granny_name', ''),
+                        "content_hash": content_hash,
+                    },
+                })
 
             if (anim_idx + 1) % 100 == 0 or anim_idx + 1 == total_anims:
                 print(f"    {anim_idx+1}/{total_anims} animations built", flush=True)
@@ -1102,7 +1093,63 @@ def build_gltf(character_name, mesh_data_list, mesh_names, bones, animations=Non
     combined = b''.join(all_buffers)
     gltf.buffers = [Buffer(byteLength=len(combined))]
     gltf.set_binary_blob(combined)
-    return gltf
+    return gltf, anim_dict_list
+
+
+def _inject_animations_into_glb(glb_path, anim_dicts):
+    """Re-pack a GLB to include animations injected as plain dicts.
+
+    Bypasses pygltflib's per-object Animation/Sampler/Channel
+    serialization which dominated build_gltf wall time on
+    animation-heavy GLBs (Mel had 91k+ dataclass instances per
+    export at ~1ms each).  Reads the existing JSON chunk, adds
+    the animations array, re-pads, rewrites the GLB header +
+    chunk lengths.  Doesn't touch the BIN chunk — animation
+    accessor data was already written via add_accessor() during
+    build_gltf, so the buffer offsets stay valid.
+    """
+    if not anim_dicts:
+        return
+    with open(glb_path, 'rb') as f:
+        data = f.read()
+    if data[:4] != b'glTF':
+        raise ValueError(f"not a GLB: {glb_path}")
+    json_chunk_len = int.from_bytes(data[12:16], 'little')
+    json_chunk_off = 20  # 12-byte header + 8-byte chunk header
+    json_bytes = data[json_chunk_off : json_chunk_off + json_chunk_len]
+    js = json.loads(json_bytes.rstrip(b'\x20\x00').decode('utf-8'))
+    js['animations'] = anim_dicts
+
+    # Custom encoder so numpy ints (from accessor index returns) and
+    # numpy floats survive JSON serialization.
+    def _coerce(o):
+        if hasattr(o, 'item'):
+            return o.item()
+        raise TypeError(f"unhashable for json: {type(o)}")
+    new_json = json.dumps(js, separators=(',', ':'),
+                          default=_coerce).encode('utf-8')
+    pad = (4 - len(new_json) % 4) % 4
+    new_json = new_json + b'\x20' * pad
+
+    bin_chunk_off = json_chunk_off + json_chunk_len
+    if bin_chunk_off + 8 > len(data):
+        bin_data = b''
+    else:
+        bin_chunk_len = int.from_bytes(
+            data[bin_chunk_off : bin_chunk_off + 4], 'little')
+        bin_data_off = bin_chunk_off + 8
+        bin_data = data[bin_data_off : bin_data_off + bin_chunk_len]
+
+    new_total = 12 + 8 + len(new_json) + (8 + len(bin_data) if bin_data else 0)
+    out = bytearray()
+    out += b'glTF'
+    out += (2).to_bytes(4, 'little')         # version
+    out += new_total.to_bytes(4, 'little')   # total length
+    out += len(new_json).to_bytes(4, 'little') + b'JSON' + new_json
+    if bin_data:
+        out += len(bin_data).to_bytes(4, 'little') + b'BIN\x00' + bin_data
+    with open(glb_path, 'wb') as f:
+        f.write(bytes(out))
 
 # ─────────────────────────── Texture extraction ─────────────────────────────
 
@@ -1929,10 +1976,17 @@ def main():
 
     step = "6/6" if (args.animations or args.anim_filter) else "5/5"
     print(f"[{step}] Building glTF -> {out_path}", flush=True)
-    gltf = build_gltf(args.name, mesh_data_list, mesh_names, bones,
-                       animations=anim_data, texture_map=texture_map)
+    gltf, anim_dicts = build_gltf(args.name, mesh_data_list, mesh_names, bones,
+                                   animations=anim_data, texture_map=texture_map)
     print("  Saving GLB file...", flush=True)
     gltf.save(out_path)
+    if anim_dicts:
+        # v3.14: animations were built as plain dicts to skip pygltflib's
+        # per-object overhead — splice them into the saved GLB now that
+        # the BIN chunk has all the accessor data already written.
+        print(f"  Injecting {len(anim_dicts)} animation(s) into GLB JSON...",
+              flush=True)
+        _inject_animations_into_glb(out_path, anim_dicts)
     anim_msg = f", {len(anim_data)} animations" if anim_data else ""
     tex_msg = ", textured" if texture_map else ""
     print(f"\nDone!  {len(mesh_data_list)} meshes, {len(bones)} bones{anim_msg}{tex_msg} -> {out_path}")
