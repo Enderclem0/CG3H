@@ -310,7 +310,12 @@ def _apply_vanilla_nla(context, character, game_dir):
     # known suffixes the importer attaches and ALSO strip Blender's
     # `.001`/`.002` numeric duplicate suffixes.
     _SUFFIX_RE = re.compile(r'\.\d{3,}$')
-    _STRIP_SUFFIXES = ('_Skin', '_Armature', f'_{character}_Skin')
+    # Order matters: try longest-most-specific first.  Blender's GLTF
+    # importer suffixes Action names with `_<owner>_Skin` where <owner>
+    # is the armature/object that owns the animation channel — for Mel
+    # that's `_Melinoe_Skin`.  Matching `_Skin` first leaves
+    # `..._Melinoe` which still doesn't equal the SJSON's stem.
+    _STRIP_SUFFIXES = (f'_{character}_Skin', '_Armature', '_Skin')
     def _action_stem(name):
         n = _SUFFIX_RE.sub('', name)
         for suf in _STRIP_SUFFIXES:
@@ -434,6 +439,33 @@ def _apply_vanilla_nla(context, character, game_dir):
     print(f"[CG3H] vanilla NLA setup: {n_strips} strip(s) across "
           f"{len(by_file)} SJSON file(s); {n_skipped} entries skipped "
           f"(no matching imported Action)")
+
+    # Diagnostic: when nothing matched, dump a sample of both sides so
+    # the suffix-stripping rule can be tightened.  Removed once the
+    # rule converges across characters.
+    if n_strips == 0 and n_skipped > 0:
+        sample_actions = sorted(actions_by_name.keys())[:8]
+        print(f"[CG3H] DIAG actions_by_name sample (after stem stripping):")
+        for n in sample_actions:
+            print(f"  - {n!r}")
+        sample_actions_raw = sorted(a.name for a in bpy.data.actions)[:8]
+        print(f"[CG3H] DIAG raw bpy.data.actions sample:")
+        for n in sample_actions_raw:
+            print(f"  - {n!r}")
+        sample_granny = []
+        for fname, anims in by_file.items():
+            for entry in anims:
+                if isinstance(entry, dict):
+                    g = entry.get('GrannyAnimation')
+                    if g and g != 'null':
+                        sample_granny.append(g)
+                        if len(sample_granny) >= 8:
+                            break
+            if len(sample_granny) >= 8:
+                break
+        print(f"[CG3H] DIAG SJSON GrannyAnimation sample:")
+        for n in sample_granny:
+            print(f"  - {n!r}")
 
 
 def _armature_for_anim(context):
