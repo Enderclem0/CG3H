@@ -560,7 +560,7 @@ function M.install_skin_scene_hook(state)
         if script_name == "RoomLogic.lua"
                 or script_name == "RoomManager.lua" then
             M.apply_all_skins(state)
-            M.nudge_all_accessories(state)
+            M.mark_pending_nudges(state)
         end
     end)
 end
@@ -601,16 +601,13 @@ local _NUDGE_ANIM = {
     Selene    = "Selene_Idle",
 }
 
---- Trigger one bind-pose nudge for `character` if it has any
--- mesh_add accessory installed and is currently in the scene.
--- Returns "live" / "transition" / "skip" / "no-name" mirroring the
--- skin apply for log clarity.
+--- Try one bind-pose nudge for `character`.  Returns:
+--   "live"        — SetAnimation called on the live unit.
+--   "transition"  — character not in scene yet; caller should retry.
+--   "skip"        — character has no mesh_add accessory loaded; no nudge needed.
+--   "no-name"     — no nudge animation known for this character; give up.
 function M.nudge_accessory_bind(state, character)
     if not (rom.game and rom.game.SetAnimation) then return "skip" end
-    -- Skip the nudge unless at least one mesh_add mod targets this
-    -- character — characters without accessories never see the
-    -- bind-pose offset bug, so an unprovoked SetAnimation would just
-    -- be a wasteful one-frame hiccup.
     local has_accessory = false
     for _, mod in ipairs(state.mods or {}) do
         if mod.character == character and mod.has_mesh_add then
@@ -622,8 +619,6 @@ function M.nudge_accessory_bind(state, character)
 
     local nudge = _NUDGE_ANIM[character]
     if not nudge then
-        -- Fall back to the first registered CG3H alias for this
-        -- character — guaranteed to resolve, no hardcoding needed.
         local rec = state.build_status and state.build_status[character]
         if rec and rec.alias_animations and rec.alias_animations[1] then
             nudge = rec.alias_animations[1].logical_name
@@ -635,24 +630,84 @@ function M.nudge_accessory_bind(state, character)
     if not target_id then return "transition" end
 
     if M.play_animation(target_id, nudge) then
-        rom.log.info(LOG_PREFIX .. " bind-pose nudge: "
-            .. character .. " -> " .. nudge)
+        rom.log.info(LOG_PREFIX .. " bind-pose nudge fired: "
+            .. character .. " #" .. tostring(target_id)
+            .. " -> '" .. nudge .. "'")
         return "live"
     end
     return "skip"
 end
 
---- Walk every loaded mod and trigger one nudge per character that
--- has at least one mesh_add accessory installed.
-function M.nudge_all_accessories(state)
+-- ── per-frame nudge retry queue ──────────────────────────────────────
+--
+-- The on_import.post hook for RoomLogic.lua / RoomManager.lua fires
+-- BEFORE in-scene units have spawned, so the first nudge attempt
+-- always returns "transition" for characters that load slightly
+-- after script imports (the player Hero, hub NPCs spawned by
+-- SetupRoom, etc).  Without a retry path the nudge would only
+-- ever fire on the next scene change — useless for the first hub
+-- entry, which is exactly when reload_game_data drops the player
+-- into a fresh state with the bind-pose lag visible.
+--
+-- Solution: on each scene event, populate a pending-character map.
+-- A per-frame imgui callback drains the map, retrying the nudge
+-- until target_id resolves OR a frame cap expires (10s @ 60fps).
+-- After the cap a character is silently dropped — they're not in
+-- this scene at all (e.g. Hecate during a Battle room), and we
+-- shouldn't keep banging on SetAnimation for nobody.
+
+local _MAX_NUDGE_FRAMES = 600
+local _pending_nudges = {}  -- character -> frames remaining
+
+--- Queue every character with a mesh_add accessory for nudging.
+-- Called from the scene-load hook.  Existing pending entries get
+-- their counter reset (a new scene means a new chance to find the
+-- unit, even if a previous attempt timed out).
+function M.mark_pending_nudges(state)
     if not state.mods then return end
-    local seen = {}
+    _pending_nudges = {}
+    local count = 0
     for _, mod in ipairs(state.mods) do
-        if mod.has_mesh_add and mod.character ~= "" and not seen[mod.character] then
-            seen[mod.character] = true
-            M.nudge_accessory_bind(state, mod.character)
+        if mod.has_mesh_add and mod.character ~= ""
+                and not _pending_nudges[mod.character] then
+            _pending_nudges[mod.character] = _MAX_NUDGE_FRAMES
+            count = count + 1
         end
     end
+    if count > 0 then
+        rom.log.info(LOG_PREFIX .. " bind-pose nudge queued for "
+            .. count .. " character(s)")
+    end
+end
+
+--- Tick the pending-nudge queue.  Called once per frame from the
+-- imgui always-draw callback.  Drains entries that succeed or run
+-- out of attempts; quietly retries the rest next frame.
+function M.tick_pending_nudges(state)
+    if not next(_pending_nudges) then return end
+    for character, frames_left in pairs(_pending_nudges) do
+        local result = M.nudge_accessory_bind(state, character)
+        if result == "live" or result == "skip" or result == "no-name" then
+            _pending_nudges[character] = nil  -- done one way or another
+        elseif frames_left <= 1 then
+            _pending_nudges[character] = nil  -- gave up; not in scene
+            rom.log.info(LOG_PREFIX .. " bind-pose nudge timed out for "
+                .. character .. " (not in current scene)")
+        else
+            _pending_nudges[character] = frames_left - 1
+        end
+    end
+end
+
+--- Install the per-frame nudge-retry tick on the imgui always-draw
+-- callback.  main.lua calls this once at init.  Idempotent — the
+-- tick body short-circuits when the pending queue is empty, so the
+-- per-frame cost is one table-empty check.
+function M.install_accessory_nudge_tick(state)
+    if not (rom.gui and rom.gui.add_always_draw_imgui) then return end
+    rom.gui.add_always_draw_imgui(function()
+        M.tick_pending_nudges(state)
+    end)
 end
 
 -- ── v3.8: draw-call visibility gate ────────────────────────────────────
