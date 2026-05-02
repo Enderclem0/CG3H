@@ -214,7 +214,23 @@ local function build_alias_sjson(alias)
     if alias.speed and alias.speed ~= 1.0 then
         table.insert(lines, '    GrannyAnimationSpeed = ' .. tostring(alias.speed))
     end
-    if alias.blend_in_frames and alias.blend_in_frames > 0 then
+    -- v3.15: per-source Blends.  When the addon walked NLA strips
+    -- it derived a row per predecessor strip; emit them all.  Falls
+    -- back to a single universal-source row when only a flat
+    -- `blend_in_frames` was provided (legacy v3.15.0 schema or
+    -- hand-edited mod.json without a blends list).
+    if alias.blends and #alias.blends > 0 then
+        table.insert(lines, '    Blends =')
+        table.insert(lines, '    [')
+        for _, b in ipairs(alias.blends) do
+            table.insert(lines, '        {')
+            table.insert(lines, '            BlendTransitionFrom = "'
+                .. b.from .. '"')
+            table.insert(lines, '            Duration = ' .. tostring(b.duration))
+            table.insert(lines, '        }')
+        end
+        table.insert(lines, '    ]')
+    elseif alias.blend_in_frames and alias.blend_in_frames > 0 then
         table.insert(lines, '    Blends =')
         table.insert(lines, '    [')
         table.insert(lines, '        {')

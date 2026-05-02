@@ -309,6 +309,27 @@ function M.load_status(builder_dir)
                     if v then return tonumber(v) end
                     return nil
                 end
+                -- v3.15: source-specific Blends array.  Each element
+                -- looks like {"from":"...", "duration":N} (snake_case
+                -- to match the rest of the schema).  Parsed into a
+                -- Lua list so build_alias_sjson can emit one
+                -- `BlendTransitionFrom = X / Duration = Y` row per
+                -- predecessor.  Empty array = no Blends emitted.
+                local blends = {}
+                local blends_arr = entry_body:match('"blends"%s*:%s*(%b[])')
+                if blends_arr then
+                    for elem in blends_arr:gmatch('(%b{})') do
+                        local fr = elem:match('"from"%s*:%s*"([^"]*)"')
+                        local du = elem:match('"duration"%s*:%s*(%-?[%d%.]+)')
+                        if fr and du then
+                            blends[#blends + 1] = {
+                                from = fr,
+                                duration = tonumber(du),
+                            }
+                        end
+                    end
+                end
+
                 local logical = s("logical_name")
                 local granny = s("granny_name")
                 if logical and granny then
@@ -324,6 +345,7 @@ function M.load_status(builder_dir)
                         -- v3.15: transition / playback
                         speed = n("speed"),
                         blend_in_frames = n("blend_in_frames"),
+                        blends = blends,
                         -- v3.15: gameplay flags
                         cancel_on_owner_move = b("cancel_on_owner_move"),
                         hold_last_frame = b("hold_last_frame"),

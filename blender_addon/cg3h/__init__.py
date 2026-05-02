@@ -473,13 +473,42 @@ def _new_strips(context):
             blend_in = float(strip.blend_in)
             blend_in_frames = blend_in if blend_in > 0 else None
 
-            # ChainTo derivation: next non-stock strip on the SAME track.
+            # ChainTo derivation: ANY immediately-following strip on
+            # the same track, whether stock or new.  Strip names match
+            # SJSON Animation Names because vanilla-NLA-setup labels
+            # imported strips with the SJSON entry name, so chaining
+            # back to a stock anim (return-to-idle pattern) works
+            # without any hand entry.
             chain_to_derived = None
-            for j in range(i + 1, len(ordered)):
-                ns = ordered[j]
-                if ns.action and ns.action.name not in stock:
+            if i + 1 < len(ordered):
+                ns = ordered[i + 1]
+                if ns.name:
                     chain_to_derived = ns.name
-                    break
+
+            # Source-specific Blends: when there's an immediately
+            # PRECEDING strip on the same track, derive a per-source
+            # blend record (BlendTransitionFrom = previous-strip name,
+            # Duration = our blend_in).  Stock SJSON authors blends
+            # this way ~80% of the time — universal-only is the
+            # exception, not the rule.  Multi-source blends (this anim
+            # follows from N different predecessors) still need a
+            # hand-edit; v3.15 covers the single-predecessor common
+            # case automatically via NLA layout.
+            blends = []
+            if blend_in_frames is not None:
+                if i > 0:
+                    prev = ordered[i - 1]
+                    if prev.name:
+                        blends.append({
+                            'from': prev.name,
+                            'duration': blend_in_frames,
+                        })
+                if not blends:
+                    # No preceding strip — fall back to universal blend.
+                    blends.append({
+                        'from': 'BlendTransitionFromAll',
+                        'duration': blend_in_frames,
+                    })
 
             entry = {
                 'strip': strip,            # caller-side ref; stripped before mod.json emit
@@ -489,6 +518,7 @@ def _new_strips(context):
                 'speed': speed,
                 'blend_in_frames': blend_in_frames,
                 'chain_to_derived': chain_to_derived,
+                'blends': blends,
             }
             out.append(entry)
     return out
@@ -1196,6 +1226,12 @@ class CG3H_OT_Export(bpy.types.Operator):
                     e['speed'] = s['speed']
                 if s['blend_in_frames'] is not None:
                     e['blend_in_frames'] = s['blend_in_frames']
+                # Source-specific Blends — derived from NLA adjacency.
+                # Builder + runtime expand this into the SJSON Blends
+                # array.  Empty list / single-entry "BlendTransitionFromAll"
+                # falls back to the simple universal-blend code path.
+                if s.get('blends'):
+                    e['blends'] = s['blends']
                 # ChainTo: explicit override beats derivation; "null"
                 # opt-out emitted as None to keep mod.json clean.
                 ct_override = (strip.cg3h_chain_to_override or "").strip()
