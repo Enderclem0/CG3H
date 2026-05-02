@@ -282,16 +282,13 @@ function M.load_status(builder_dir)
             end
         end
 
-        -- v3.11: alias_animations.  Each element looks like
-        --   { "mod_id": "...", "logical_name": "...",
-        --     "granny_name": "...", "sjson": "...", "loop": false,
-        --     "inherit_from": "...", "chain_to": "...", "blends": [...] }
-        -- We parse only the scalar fields we'll inject into SJSON;
-        -- blends are intentionally NOT parsed in v3.11.0 (modders use
-        -- the simpler InheritFrom/ChainTo path).
+        -- v3.15: alias_animations.  Each element carries the full
+        -- SJSON Animation field set.  Parser extracts everything the
+        -- runtime SJSON injector emits — see runtime.lua's
+        -- `build_alias_sjson` for the field list.  blends array is
+        -- still parsed-as-list (unused by SJSON injector today, kept
+        -- for round-trip; v3.15.x will wire source-specific blends).
         local aliases = {}
-        -- Use balanced %b[] so nested arrays (e.g. inline `"blends": []`)
-        -- don't terminate the outer match at their `]`.
         local aa_block = body:match('"alias_animations"%s*:%s*(%b[])')
         if aa_block then
             for entry_body in aa_block:gmatch('(%b{})') do
@@ -299,9 +296,17 @@ function M.load_status(builder_dir)
                     return entry_body:match('"' .. field .. '"%s*:%s*"([^"]*)"')
                 end
                 local function b(field)
+                    -- Tristate: nil (key absent), true, false.  Used for
+                    -- "absent vs explicitly false" gameplay flags.
                     local v = entry_body:match('"' .. field .. '"%s*:%s*(%a+)')
                     if v == "true" then return true end
                     if v == "false" then return false end
+                    return nil
+                end
+                local function n(field)
+                    -- Numeric, nil if missing.  Accepts int or float.
+                    local v = entry_body:match('"' .. field .. '"%s*:%s*(%-?[%d%.]+)')
+                    if v then return tonumber(v) end
                     return nil
                 end
                 local logical = s("logical_name")
@@ -312,9 +317,26 @@ function M.load_status(builder_dir)
                         logical_name = logical,
                         granny_name = granny,
                         sjson = s("sjson"),
+                        -- v3.11 basics
                         loop = b("loop"),
                         inherit_from = s("inherit_from"),
                         chain_to = s("chain_to"),
+                        -- v3.15: transition / playback
+                        speed = n("speed"),
+                        blend_in_frames = n("blend_in_frames"),
+                        -- v3.15: gameplay flags
+                        cancel_on_owner_move = b("cancel_on_owner_move"),
+                        hold_last_frame = b("hold_last_frame"),
+                        allow_restart = b("allow_restart"),
+                        owner_invulnerable = b("owner_invulnerable"),
+                        owner_immobile = b("owner_immobile"),
+                        owner_has_no_collision = b("owner_has_no_collision"),
+                        owner_untargetable = b("owner_untargetable"),
+                        disable_owner_manual_interact = b("disable_owner_manual_interact"),
+                        -- v3.15: polarising / overrides
+                        enable_3d_shadow = b("enable_3d_shadow"),
+                        scale = n("scale"),
+                        native_move_speed = n("native_move_speed"),
                     }
                 end
             end

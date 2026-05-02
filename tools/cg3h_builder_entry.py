@@ -203,6 +203,31 @@ def _collect_animation_adds(animation_add_mods, character):
                       f"character {character!r} and none specified; "
                       f"alias {logical!r} will not be registered")
                 continue
+            # v3.15: full SJSON Animation field set.  Each top-level key
+            # below maps to a single SJSON field on the injected alias.
+            # Conventions:
+            #   - bool:  None = field absent from emitted SJSON
+            #            True = present as `Field = true`
+            #            False also emits `Field = false` when explicitly set
+            #            (some flags like Enable3DShadow have polarising
+            #            stock values; see project_v315_anim_metadata.md).
+            #   - float: None = absent; specific value = `Field = N`.
+            #   - string: None or "" = absent; otherwise quoted in SJSON.
+            # The Blender addon UI fills these from NLA strip properties +
+            # CG3H sub-panel toggles; modders can hand-edit mod.json to
+            # override any field.  Fields not in this set still flow via
+            # the `_sjson` passthrough (v3.15.x — phase 2).
+            def _b(k):
+                v = raw.get(k)
+                return None if v is None else bool(v)
+            def _n(k):
+                v = raw.get(k)
+                return None if v is None else float(v)
+            def _s(k):
+                v = raw.get(k)
+                if v is None or v == "":
+                    return None
+                return str(v)
             alias_entries.append({
                 'mod_id': mi['id'],
                 'character': character,
@@ -211,11 +236,31 @@ def _collect_animation_adds(animation_add_mods, character):
                 'clone_from': clone_from,
                 'source_glb_action': glb_action,
                 'sjson': sjson_basename,
+                # Always-present basics (ChainTo handled below)
                 'loop': bool(raw.get('loop', False)),
-                'inherit_from': raw.get('inherit_from'),
-                'chain_to': raw.get('chain_to'),
+                'inherit_from': _s('inherit_from'),
+                'chain_to': _s('chain_to'),
+                # Transition / playback
+                'speed': _n('speed'),
+                'blend_in_frames': _n('blend_in_frames'),
+                # Gameplay flags (snake_case mirrors the Blender UI;
+                # SJSON emit translates to PascalCase).
+                'cancel_on_owner_move': _b('cancel_on_owner_move'),
+                'hold_last_frame': _b('hold_last_frame'),
+                'allow_restart': _b('allow_restart'),
+                'owner_invulnerable': _b('owner_invulnerable'),
+                'owner_immobile': _b('owner_immobile'),
+                'owner_has_no_collision': _b('owner_has_no_collision'),
+                'owner_untargetable': _b('owner_untargetable'),
+                'disable_owner_manual_interact': _b('disable_owner_manual_interact'),
+                # Polarising / overrides
+                'enable_3d_shadow': _b('enable_3d_shadow'),
+                'scale': _n('scale'),
+                'native_move_speed': _n('native_move_speed'),
+                # Carried but currently unused by SJSON injection;
+                # retained for cg3h_status.json round-trip and future
+                # source-specific blend support.
                 'blends': raw.get('blends') or [],
-                'cancel_on_owner_move': raw.get('cancel_on_owner_move'),
             })
     return add_specs, alias_entries
 

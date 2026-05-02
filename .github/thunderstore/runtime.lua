@@ -183,19 +183,79 @@ end
 --         Loop = true
 --         ChainTo = "..."
 --     }
+-- v3.15: emit a full SJSON Animation entry for `alias`.  See
+-- mod_state.lua's alias parser for the field list / default rules:
+--   * `nil` flags / numeric fields are NOT emitted.
+--   * `false` flags ARE emitted explicitly (some fields like
+--     Enable3DShadow have polarising stock values).
+--   * Numeric fields are emitted verbatim; floats round-trip via tostring.
+--   * `blend_in_frames > 0` produces a Blends array with a single
+--     entry targeting BlendTransitionFromAll.
 local function build_alias_sjson(alias)
     local lines = { "{" }
+    -- Always-present basics
     table.insert(lines, '    Name = "' .. alias.logical_name .. '"')
     if alias.inherit_from and alias.inherit_from ~= "" then
         table.insert(lines, '    InheritFrom = "' .. alias.inherit_from .. '"')
     end
     table.insert(lines, '    GrannyAnimation = "' .. alias.granny_name .. '"')
+
+    -- Loop is binary in stock data (presence = true); only emit when on.
     if alias.loop then
         table.insert(lines, '    Loop = true')
     end
+
+    -- ChainTo string field; "" / nil = absent.
     if alias.chain_to and alias.chain_to ~= "" then
         table.insert(lines, '    ChainTo = "' .. alias.chain_to .. '"')
     end
+
+    -- Playback / transition
+    if alias.speed and alias.speed ~= 1.0 then
+        table.insert(lines, '    GrannyAnimationSpeed = ' .. tostring(alias.speed))
+    end
+    if alias.blend_in_frames and alias.blend_in_frames > 0 then
+        table.insert(lines, '    Blends =')
+        table.insert(lines, '    [')
+        table.insert(lines, '        {')
+        table.insert(lines, '            BlendTransitionFrom = "BlendTransitionFromAll"')
+        table.insert(lines, '            Duration = ' .. tostring(alias.blend_in_frames))
+        table.insert(lines, '        }')
+        table.insert(lines, '    ]')
+    end
+
+    -- Gameplay flags — stock convention: presence = true, absence = false.
+    -- Emit only when explicitly true; nil / false stays absent.
+    local function _flag(field, sjson_name)
+        if alias[field] then
+            table.insert(lines, '    ' .. sjson_name .. ' = true')
+        end
+    end
+    _flag('cancel_on_owner_move', 'CancelOnOwnerMove')
+    _flag('hold_last_frame', 'HoldLastFrame')
+    _flag('allow_restart', 'AllowRestart')
+    _flag('owner_invulnerable', 'OwnerInvulnerable')
+    _flag('owner_immobile', 'OwnerImmobile')
+    _flag('owner_has_no_collision', 'OwnerHasNoCollision')
+    _flag('owner_untargetable', 'OwnerUntargetable')
+    _flag('disable_owner_manual_interact', 'DisableOwnerManualInteract')
+
+    -- Enable3DShadow is the only polarising flag — both true and false
+    -- show up in stock data (~63%/37%) and the engine's default differs
+    -- per character.  Emit explicitly when set either way; nil = inherit.
+    if alias.enable_3d_shadow ~= nil then
+        table.insert(lines, '    Enable3DShadow = ' ..
+            (alias.enable_3d_shadow and 'true' or 'false'))
+    end
+
+    -- Numeric overrides; nil = inherit.
+    if alias.scale ~= nil then
+        table.insert(lines, '    Scale = ' .. tostring(alias.scale))
+    end
+    if alias.native_move_speed ~= nil then
+        table.insert(lines, '    NativeMoveSpeed = ' .. tostring(alias.native_move_speed))
+    end
+
     table.insert(lines, "}")
     return table.concat(lines, "\n")
 end
