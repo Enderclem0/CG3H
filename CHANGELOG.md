@@ -4,6 +4,78 @@ All notable changes to CG3H are documented here.
 
 ---
 
+## v3.15.0
+
+**`animation_add` mods can now carry the full Hades II animation
+metadata set — loop, fade durations, chain-to, gameplay flags
+(invulnerability, immobility, no-collision, untargetable, hold-last-frame,
+disable-input, allow-restart), per-source blend tables, and overrides
+for inheritance, scale, native move speed, and 3D shadow.**
+
+### Full SJSON Animation field schema
+
+`mod.json` `target.new_animations[]` entries accept the complete set
+of fields the Hades II engine consumes when reading per-character
+Animation SJSON files.  At runtime, `CG3HBuilder` injects every
+field set on each entry:
+
+```json
+{
+  "logical_name":          "MyHeroSalute",
+  "granny_name":           "Melinoe_X_MyHeroSalute_C_00",
+  "clone_from":            "Melinoe_NoWeapon_Base_Salute_00",
+  "source_glb_action":     "MyHeroSalute",
+  "loop":                  false,
+  "speed":                 0.5,
+  "blend_in_frames":       8,
+  "chain_to":              "MelinoeIdleWeaponless",
+  "inherit_from":          "MelinoeBaseAnimation",
+  "cancel_on_owner_move":  true,
+  "hold_last_frame":       false,
+  "allow_restart":         false,
+  "owner_invulnerable":    true,
+  "owner_immobile":        true,
+  "owner_has_no_collision":true,
+  "owner_untargetable":    true,
+  "disable_owner_manual_interact": false,
+  "enable_3d_shadow":      true,
+  "scale":                 1.27,
+  "native_move_speed":     540,
+  "blends": [
+    { "from": "MelinoeIdle",      "duration": 6 },
+    { "from": "MelinoeRunFront",  "duration": 4 }
+  ]
+}
+```
+
+Every field is optional except `logical_name`, `granny_name`, and
+`clone_from`.  The Blender addon still writes only the minimal
+fields it has UI for (`logical_name`, `loop`); modders enrich the
+rest by hand-editing `mod.json`.  A future authoring UX is in the
+backlog.
+
+### Per-source blend tables
+
+When transitioning into your animation, the engine looks at the
+incoming animation's name and finds the matching `blends` entry.
+For example, in the snippet above the salute fades in over 6
+frames when the player was idle but only 4 frames when they were
+running.  This matches how stock Hades II animations express
+context-dependent transitions (~80 % of stock anims with a
+`Blends` array specify per-source durations).
+
+### Misc
+
+- `CG3HBuilder` plugin's runtime SJSON injector emits every v3.15
+  field one-to-one — no need for `_sjson` passthrough today.
+- `mod_state.lua` parser handles structured `blends` arrays and
+  numeric overrides.
+- All v3.14 performance wins (sub-10-second Mel imports, parallel
+  per-entry patching, hand-rolled GLB writer) carry forward
+  unchanged.
+
+---
+
 ## v3.14.0
 
 **Animation-heavy mods are no longer painful.  Building at game
