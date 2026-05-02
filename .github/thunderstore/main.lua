@@ -150,6 +150,11 @@ end
 -- the user re-clicking the picker.
 runtime.install_skin_scene_hook(mod_state)
 
+-- v3.13: drain queued variant re-applies on the render thread.
+-- The scene hook sets a pending flag; this tick fires the actual
+-- apply_active_variants call from the imgui callback (safe thread).
+runtime.install_variant_reapply_tick(mod_state)
+
 -- NOTE: apply_visibility is NOT called at startup because HashGuid::Lookup
 -- returns 0 before the first scene loads.  The builder respects mod_state
 -- at build time, so disabled mods are already excluded from the GPK.

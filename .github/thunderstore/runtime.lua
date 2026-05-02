@@ -552,29 +552,50 @@ function M.apply_all_skins(state)
 end
 
 --- Hook the scene-load lifecycle so freshly-spawned units pick up
--- their persisted skin without user intervention, AND so accessories
--- get their bone bindings refreshed via the variant-swap cascade.
--- Idempotent; main.lua calls this once at init.
+-- their persisted skin without user intervention, AND queue a
+-- variant re-apply for the next render frame to refresh accessory
+-- bone bindings.  Idempotent; main.lua calls this once at init.
 function M.install_skin_scene_hook(state)
     if not (rom.on_import and rom.on_import.post) then return end
     rom.on_import.post(function(script_name)
         if script_name == "RoomLogic.lua"
                 or script_name == "RoomManager.lua" then
             M.apply_all_skins(state)
-            -- v3.13: re-applying the active variant selection on
-            -- scene load fixes the bind-pose lag on freshly-loaded
-            -- mesh_add accessories.  swap_entry walks
-            -- draw_populate_entry_textures + draw_swap_to_variant
-            -- which re-evaluates the entry's draw state, and the
-            -- side effect of that cascade is that accessory bone
-            -- tracks get bound within one frame instead of waiting
-            -- for the engine's first natural animation transition
-            -- (~10s).  Same code path the UI's first-frame callback
-            -- accidentally triggers when the user opens the menu —
-            -- which is exactly what the user reported as "the only
-            -- way to make the hat snap into place".
-            M.apply_active_variants(state)
+            -- v3.13: queue the variant-swap cascade for the next
+            -- render frame.  The cascade (draw_populate_entry_textures
+            -- + draw_swap_to_variant) is what actually fixes the
+            -- bind-pose lag on freshly-loaded mesh_add accessories
+            -- (proven by in-game logs: opening the GUI fires it via
+            -- the UI's first-frame callback and snaps accessories
+            -- into place).  But calling it directly from on_import.post
+            -- crashed the engine in ProcessAtlasMap — script-import
+            -- callbacks fire on a loader thread, and the draw-state
+            -- mutations need to happen on the render thread.  The
+            -- always-draw imgui tick drains the flag safely.
+            _variant_reapply_pending = true
         end
+    end)
+end
+
+-- ── v3.13: deferred variant re-apply for bind-pose lag ──────────────
+--
+-- See install_skin_scene_hook above for the why.  The flag is set
+-- by the script-import callback and drained by the always-draw
+-- imgui tick.  Per-frame cost when the flag is false is a single
+-- bool check, so the tick is cheap to leave installed always.
+
+_variant_reapply_pending = false
+
+function M.tick_pending_variant_reapply(state)
+    if not _variant_reapply_pending then return end
+    _variant_reapply_pending = false
+    M.apply_active_variants(state)
+end
+
+function M.install_variant_reapply_tick(state)
+    if not (rom.gui and rom.gui.add_always_draw_imgui) then return end
+    rom.gui.add_always_draw_imgui(function()
+        M.tick_pending_variant_reapply(state)
     end)
 end
 
