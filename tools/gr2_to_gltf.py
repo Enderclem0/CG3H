@@ -831,12 +831,20 @@ def build_gltf(character_name, mesh_data_list, mesh_names, bones, animations=Non
     gltf.asset = pygltflib.Asset(version="2.0", generator="Hades2 GR2 Exporter")
 
     all_buffers = []
+    # v3.14 — running offset cache.  The previous implementation called
+    # `sum(len(b) for b in all_buffers)` on every accessor add, which
+    # is O(N) per call.  For Mel with ~100k accessor calls (843 anims
+    # × ~36 tracks × 3 paths × 2 accessors per path) that's O(N²) =
+    # 10 billion ops, dominating build_gltf at ~25 minutes wall time.
+    # Tracking the running total turns it into O(1) per call.
+    _buffer_total = [0]
 
     def add_accessor(data_np, component_type, element_type, target=None):
         raw = data_np.tobytes()
-        bv_offset = sum(len(b) for b in all_buffers)
+        bv_offset = _buffer_total[0]
         pad = (4 - (len(raw) % 4)) % 4
         all_buffers.append(raw + b'\x00' * pad)
+        _buffer_total[0] += len(raw) + pad
         bv_idx = len(gltf.bufferViews)
         gltf.bufferViews.append(BufferView(
             buffer=0, byteOffset=bv_offset, byteLength=len(raw), target=target,
@@ -899,9 +907,10 @@ def build_gltf(character_name, mesh_data_list, mesh_names, bones, animations=Non
 
     if texture_map:
         for tex_name, (png_bytes, mesh_indices) in texture_map.items():
-            png_bv_offset = sum(len(b) for b in all_buffers)
+            png_bv_offset = _buffer_total[0]
             pad = (4 - (len(png_bytes) % 4)) % 4
             all_buffers.append(png_bytes + b'\x00' * pad)
+            _buffer_total[0] += len(png_bytes) + pad
             png_bv_idx = len(gltf.bufferViews)
             gltf.bufferViews.append(BufferView(
                 buffer=0, byteOffset=png_bv_offset, byteLength=len(png_bytes),
@@ -1749,6 +1758,17 @@ def main():
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
 
+    # v3.14: per-phase timing.  Records elapsed at each [PHASE] mark
+    # and prints the breakdown at end-of-run so we can pinpoint where
+    # the wall time actually goes.
+    import time as _phase_time
+    _phase_t0 = _phase_time.monotonic()
+    _phase_marks: list = []
+    def _phase(label):
+        _phase_marks.append((label, _phase_time.monotonic() - _phase_t0))
+        print(f"[+{_phase_marks[-1][1]:6.1f}s] {label}", flush=True)
+
+    _phase("[1/5] Extracting GPK")
     print(f"[1/5] Extracting GPK: {gpk_path}")
     entries = extract_all_from_gpk(gpk_path)
     all_mesh_keys = [k for k in entries if is_mesh_entry(k)]
@@ -1787,13 +1807,16 @@ def main():
         if len(mesh_keys) > 1:
             print(f"  Multi-entry GPK: {mesh_keys}")
 
+    _phase("[2/5] Loading SDB")
     print(f"[2/5] Loading SDB: {sdb_path}")
     with open(sdb_path, 'rb') as f:
         sdb_bytes = f.read()
 
+    _phase("[3/5] Loading Granny DLL and building type map")
     print("[3/5] Loading Granny DLL and building type map")
     dll = setup_granny(args.dll)
 
+    _phase("[4/5] Reading skeleton and mesh data")
     print("[4/5] Reading skeleton and mesh data")
     mesh_data_list = []
     mesh_bb_names_list = []
@@ -1867,6 +1890,7 @@ def main():
     # ── Animations ──
     anim_data = None
     if args.animations or args.anim_filter:
+        _phase("[5/6] Extracting animations")
         print("[5/6] Extracting animations")
         anim_data = extract_animations(dll, entries, sdb_bytes,
                                        anim_filter=args.anim_filter, dll_path=args.dll,
@@ -1975,18 +1999,27 @@ def main():
             print(f"  Package directory not found: {pkg_dir}")
 
     step = "6/6" if (args.animations or args.anim_filter) else "5/5"
+    _phase(f"[{step}] Building glTF")
     print(f"[{step}] Building glTF -> {out_path}", flush=True)
     gltf, anim_dicts = build_gltf(args.name, mesh_data_list, mesh_names, bones,
                                    animations=anim_data, texture_map=texture_map)
+    _phase("  Saving GLB (pygltflib)")
     print("  Saving GLB file...", flush=True)
     gltf.save(out_path)
     if anim_dicts:
-        # v3.14: animations were built as plain dicts to skip pygltflib's
-        # per-object overhead — splice them into the saved GLB now that
-        # the BIN chunk has all the accessor data already written.
+        _phase(f"  Injecting {len(anim_dicts)} animation(s) into GLB")
         print(f"  Injecting {len(anim_dicts)} animation(s) into GLB JSON...",
               flush=True)
         _inject_animations_into_glb(out_path, anim_dicts)
+    _phase("[end]")
+    if len(_phase_marks) > 1:
+        print("\n  exporter phase breakdown:")
+        for i in range(len(_phase_marks) - 1):
+            label, t_start = _phase_marks[i]
+            _, t_next = _phase_marks[i + 1]
+            print(f"    {t_next - t_start:7.2f}s  {label}")
+        print(f"    -------")
+        print(f"    {_phase_marks[-1][1]:7.2f}s  total")
     anim_msg = f", {len(anim_data)} animations" if anim_data else ""
     tex_msg = ", textured" if texture_map else ""
     print(f"\nDone!  {len(mesh_data_list)} meshes, {len(bones)} bones{anim_msg}{tex_msg} -> {out_path}")
