@@ -30,9 +30,6 @@ BUNDLE_SOURCES = [
     # Source (tracked):
     ('blender_addon/cg3h/__init__.py',  'addon'),
     ('blender_addon/cg3h/cg3h_core.py', 'addon'),
-    # v3.15: SJSON Animation parser used at import time to pre-populate
-    # NLA tracks with the character's stock animations + metadata.
-    ('blender_addon/cg3h/cg3h_sjson_anim.py', 'addon'),
     ('tools/cg3h_build.py',             'addon'),
     ('tools/cg3h_constants.py',         'addon'),
     ('tools/pkg_texture.py',            'addon'),
