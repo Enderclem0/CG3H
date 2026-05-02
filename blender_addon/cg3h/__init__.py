@@ -418,10 +418,17 @@ def _apply_vanilla_nla(context, character, game_dir):
                 if entry.get(sjson_key) is True:
                     setattr(strip, prop, True)
             shadow = entry.get('Enable3DShadow')
-            if shadow is True:
-                strip.cg3h_enable_3d_shadow = 'ON'
-            elif shadow is False:
-                strip.cg3h_enable_3d_shadow = 'OFF'
+            # Defensive setattr — Blender 4.2 sometimes rejects RNA
+            # writes on NlaStrip EnumProperty during operator execute()
+            # ("read-only" AttributeError).  Custom dict-style access
+            # always works as a fallback; the panel reads strip.x first
+            # then strip["x"], so either path is fine.
+            if shadow is True or shadow is False:
+                value = 'ON' if shadow else 'OFF'
+                try:
+                    strip.cg3h_enable_3d_shadow = value
+                except (AttributeError, TypeError):
+                    strip["cg3h_enable_3d_shadow"] = value
             ct = entry.get('ChainTo')
             if ct and ct != 'null':
                 strip.cg3h_chain_to_override = str(ct)
@@ -968,10 +975,15 @@ class CG3H_OT_Import(bpy.types.Operator, ImportHelper):
         # strip carrying its loop / blends / gameplay flags from the
         # game's own SJSON — duplicating a strip and renaming it gives
         # a fully-tagged baseline for a new animation_add entry.
+        print(f"[CG3H] vanilla NLA setup gate: animations={self.animations} "
+              f"character={name!r} actions_loaded={len(bpy.data.actions)}",
+              flush=True)
         if self.animations:
             try:
                 _apply_vanilla_nla(context, name, _prefs().game_path)
             except Exception as e:
+                import traceback
+                traceback.print_exc()
                 self.report({'WARNING'},
                             f"Vanilla NLA setup failed: {e}")
 
@@ -1319,8 +1331,12 @@ class CG3H_OT_Export(bpy.types.Operator):
                 ):
                     if getattr(strip, src, False):
                         e[dst] = True
-                # Enable3DShadow — tristate.  INHERIT = absent.
-                shadow = getattr(strip, 'cg3h_enable_3d_shadow', 'INHERIT')
+                # Enable3DShadow — tristate.  INHERIT = absent.  Reads
+                # check both the RNA EnumProperty AND the dict fallback
+                # (see _apply_vanilla_nla — Blender sometimes rejects
+                # the RNA write and we fall back to dict access).
+                shadow = (strip.get('cg3h_enable_3d_shadow')
+                          or getattr(strip, 'cg3h_enable_3d_shadow', 'INHERIT'))
                 if shadow == 'ON':
                     e['enable_3d_shadow'] = True
                 elif shadow == 'OFF':
